@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CYD Usage Server — Control Panel</title>
+<style>
+:root {
+  --bg: #08090d;
+  --surface: #0f1117;
+  --surface-alt: #161b27;
+  --border: rgba(255,255,255,0.08);
+  --text: #f1f5f9;
+  --text2: #94a3b8;
+  --muted: #64748b;
+  --accent: #F4620E;
+  --good: #22c55e;
+  --bad: #f43f5e;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.2);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  max-width: 960px;
+  margin: 0 auto 20px;
+}
+
+h1 { font-size: clamp(1.1rem, 2.5vw, 1.5rem); font-weight: 700; }
+h1 span { color: var(--muted); font-weight: 400; }
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.status-pill .dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--muted);
+}
+.status-pill.running .dot { background: var(--good); animation: pulse 1.6s ease infinite; }
+.status-pill.stopped .dot { background: var(--bad); }
+.status-pill.unknown .dot { background: var(--muted); }
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+.toggle-btn {
+  margin-left: auto;
+  padding: 9px 20px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--surface-alt);
+  color: var(--text);
+  transition: background 0.2s ease, opacity 0.2s ease;
+}
+.toggle-btn.enable { background: var(--good); color: #06220f; border-color: transparent; }
+.toggle-btn.disable { background: var(--surface-alt); color: var(--bad); border-color: rgba(244,63,94,0.35); }
+.toggle-btn:hover { opacity: 0.85; }
+.toggle-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.toggle-btn:disabled { opacity: 0.45; cursor: wait; }
+
+main { max-width: 960px; margin: 0 auto; display: grid; gap: 16px; }
+
+.banner {
+  border: 1px solid rgba(244,63,94,0.4);
+  background: rgba(244,63,94,0.08);
+  color: #fda4af;
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  font-size: 0.9rem;
+  display: none;
+}
+.banner code { background: rgba(255,255,255,0.08); padding: 2px 6px; border-radius: 6px; }
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px;
+}
+.stat-card h2 {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.stat-card .value {
+  font-size: 1.35rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.stat-card .sub { color: var(--text2); font-size: 0.82rem; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.value.good { color: var(--good); }
+.value.bad { color: var(--bad); }
+.value.dim { color: var(--muted); }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px;
+}
+.panel h2 { font-size: 0.95rem; margin-bottom: 12px; }
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+.check-row:last-child { border-bottom: none; }
+.check-row .mark { width: 20px; text-align: center; font-weight: 700; }
+.check-row.pass .mark { color: var(--good); }
+.check-row.fail .mark { color: var(--bad); }
+.check-row .detail { margin-left: auto; color: var(--text2); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+
+.client-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+}
+.client-row:last-child { border-bottom: none; }
+.client-row .tag {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--text2);
+}
+.client-row .ago { margin-left: auto; color: var(--text2); }
+.client-row.fresh .ago { color: var(--good); }
+
+.log-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+.log-box {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  height: 220px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--text2);
+  white-space: pre;
+}
+
+.action-log { color: var(--text2); font-size: 0.82rem; min-height: 1.2em; }
+.action-log.err { color: var(--bad); }
+
+footer {
+  max-width: 960px;
+  margin: 20px auto 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 768px) {
+  .log-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 480px) {
+  body { padding: 14px; }
+  .toggle-btn { margin-left: 0; width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CYD Usage Server <span>· control panel</span></h1>
+  <div class="status-pill unknown" id="status-pill">
+    <span class="dot"></span><span id="status-label">…</span>
+  </div>
+  <button class="toggle-btn" id="toggle-btn" disabled aria-label="Enable or disable the usage server">…</button>
+</header>
+
+<main>
+  <div class="banner" id="control-banner">
+    Can't reach the control server. Start it with
+    <code>/usr/bin/python3 ~/cyd/server/control_server.py</code>
+    then reload this page.
+  </div>
+
+  <div class="action-log" id="action-log" role="status"></div>
+
+  <section class="card-grid" aria-label="Server stats">
+    <div class="stat-card">
+      <h2>launchd job</h2>
+      <div class="value" id="v-launchd">—</div>
+      <div class="sub" id="s-launchd">&nbsp;</div>
+    </div>
+    <div class="stat-card">
+      <h2>API endpoint :8787</h2>
+      <div class="value" id="v-endpoint">—</div>
+      <div class="sub" id="s-endpoint">&nbsp;</div>
+    </div>
+    <div class="stat-card">
+      <h2>Plan limits (keychain)</h2>
+      <div class="value" id="v-limits">—</div>
+      <div class="sub" id="s-limits">&nbsp;</div>
+    </div>
+    <div class="stat-card">
+      <h2>Board heartbeat</h2>
+      <div class="value" id="v-board">—</div>
+      <div class="sub" id="s-board">&nbsp;</div>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="Diagnostics">
+    <h2>Diagnostics</h2>
+    <div id="checks"></div>
+  </section>
+
+  <section class="panel" aria-label="Connected clients">
+    <h2>Clients polling /api/usage</h2>
+    <div id="clients"></div>
+  </section>
+
+  <section class="panel" aria-label="Server logs">
+    <h2>Logs</h2>
+    <div class="log-grid">
+      <div>
+        <h2 style="font-size:0.75rem;color:var(--muted)">/tmp/cydusage.log</h2>
+        <div class="log-box" id="log-out">…</div>
+      </div>
+      <div>
+        <h2 style="font-size:0.75rem;color:var(--muted)">/tmp/cydusage.err</h2>
+        <div class="log-box" id="log-err">…</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>control API: 127.0.0.1:8788 (localhost only)</span>
+  <span id="refresh-note">refreshing every 4s</span>
+</footer>
+
+<script>
+// ── STATE ──────────────────────────────────────────────────
+const CONTROL_BASE = location.protocol === 'file:'
+  ? 'http://127.0.0.1:8788'
+  : location.origin;
+const POLL_MS = 4000;
+const BOARD_STALE_SEC = 60;   // board polls every 20s; 60s missed = worry
+
+const STATE = {
+  status: null,
+  controlUp: false,
+  busy: false,
+};
+
+// ── FORMATTING ─────────────────────────────────────────────
+function fmtAgo(sec) {
+  if (sec == null) return '—';
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's ago';
+  return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm ago';
+}
+
+function fmtTokens(n) {
+  if (n == null) return '—';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function generatedAgeSec(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return isNaN(t) ? null : Math.max(0, Math.round((Date.now() - t) / 1000));
+}
+
+// ── DATA LOADING ───────────────────────────────────────────
+async function fetchStatus() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3500);
+  try {
+    const resp = await fetch(CONTROL_BASE + '/api/status', { signal: ctrl.signal });
+    STATE.status = await resp.json();
+    STATE.controlUp = true;
+  } catch (err) {
+    STATE.status = null;
+    STATE.controlUp = false;
+  } finally {
+    clearTimeout(timer);
+  }
+  render();
+}
+
+async function postAction(action) {
+  if (STATE.busy) return;
+  STATE.busy = true;
+  render();
+  const logEl = document.getElementById('action-log');
+  logEl.className = 'action-log';
+  logEl.textContent = action === 'enable' ? 'Enabling server…' : 'Disabling server…';
+  try {
+    const resp = await fetch(CONTROL_BASE + '/api/' + action, { method: 'POST' });
+    const doc = await resp.json();
+    logEl.textContent = doc.detail || (doc.ok ? 'done' : 'failed');
+    if (!doc.ok) logEl.className = 'action-log err';
+  } catch (err) {
+    logEl.textContent = 'Control server unreachable: ' + err.message;
+    logEl.className = 'action-log err';
+  }
+  STATE.busy = false;
+  // launchd takes a beat to spawn/kill the process; refresh twice.
+  setTimeout(fetchStatus, 800);
+  setTimeout(fetchStatus, 2500);
+}
+
+// ── RENDER ─────────────────────────────────────────────────
+function setCard(id, value, cls, sub) {
+  const v = document.getElementById('v-' + id);
+  v.textContent = value;
+  v.className = 'value' + (cls ? ' ' + cls : '');
+  document.getElementById('s-' + id).textContent = sub || ' ';
+}
+
+function boardClients(endpoint) {
+  const clients = (endpoint && endpoint.clients) || [];
+  return clients.filter(c => c.ip !== '127.0.0.1' && c.ip !== '::1');
+}
+
+function render() {
+  const banner = document.getElementById('control-banner');
+  const pill = document.getElementById('status-pill');
+  const label = document.getElementById('status-label');
+  const btn = document.getElementById('toggle-btn');
+
+  if (!STATE.controlUp) {
+    banner.style.display = 'block';
+    pill.className = 'status-pill unknown';
+    label.textContent = 'CONTROL DOWN';
+    btn.textContent = '…';
+    btn.disabled = true;
+    return;
+  }
+  banner.style.display = 'none';
+
+  const st = STATE.status;
+  const ld = st.launchd || {};
+  const ep = st.endpoint || {};
+  const running = !!(ld.loaded && ld.pid) && ep.up;
+  const stopped = !ld.loaded;
+
+  // Header pill + toggle button
+  pill.className = 'status-pill ' + (running ? 'running' : (stopped ? 'stopped' : 'unknown'));
+  label.textContent = running ? 'RUNNING' : (stopped ? 'STOPPED' : (ld.loaded ? 'STARTING…' : 'UNKNOWN'));
+  btn.disabled = STATE.busy;
+  if (stopped) {
+    btn.textContent = 'Enable server';
+    btn.className = 'toggle-btn enable';
+    btn.onclick = () => postAction('enable');
+  } else {
+    btn.textContent = 'Disable server';
+    btn.className = 'toggle-btn disable';
+    btn.onclick = () => postAction('disable');
+  }
+
+  // Stat cards
+  setCard('launchd',
+    ld.loaded ? (ld.pid ? 'loaded' : 'loaded, no pid') : 'not loaded',
+    ld.loaded && ld.pid ? 'good' : (ld.loaded ? '' : 'bad'),
+    ld.pid ? ('pid ' + ld.pid + (ld.uptime ? ' · up ' + ld.uptime : '')) : 'launchctl job unloaded');
+
+  if (ep.up) {
+    const age = generatedAgeSec(ep.generated_at);
+    setCard('endpoint', 'responding', 'good',
+      ep.latency_ms + 'ms · data ' + (age == null ? '?' : age + 's old'));
+  } else {
+    setCard('endpoint', 'no response', 'bad', ep.error || 'connection failed');
+  }
+
+  if (ep.up) {
+    setCard('limits', ep.limits_ok ? 'OK' : 'missing',
+      ep.limits_ok ? 'good' : '',
+      ep.limits_ok ? 'session/week percentages available'
+                   : 'keychain read hasn’t succeeded yet');
+  } else {
+    setCard('limits', '—', 'dim', 'server not responding');
+  }
+
+  const boards = boardClients(ep);
+  if (!ep.up) {
+    setCard('board', '—', 'dim', 'server not responding');
+  } else if (boards.length === 0) {
+    setCard('board', 'not seen', '', 'no remote client has polled yet');
+  } else {
+    const newest = boards[0];
+    const fresh = newest.last_seen_sec <= BOARD_STALE_SEC;
+    setCard('board', fresh ? 'alive' : 'stale', fresh ? 'good' : 'bad',
+      newest.ip + ' · ' + fmtAgo(newest.last_seen_sec));
+  }
+
+  // Diagnostics checklist
+  const age = ep.up ? generatedAgeSec(ep.generated_at) : null;
+  const checks = [
+    ['launchd job loaded', ld.loaded, ld.state || ''],
+    ['server process running', !!ld.pid, ld.pid ? 'pid ' + ld.pid : ''],
+    ['port 8787 responding', !!ep.up, ep.up ? ep.latency_ms + 'ms' : (ep.error || '')],
+    ['usage data fresh', ep.up && age != null && age < 90, age != null ? age + 's old' : ''],
+    ['plan limits from keychain', !!(ep.up && ep.limits_ok), ''],
+    ['board polled recently', boards.length > 0 && boards[0].last_seen_sec <= BOARD_STALE_SEC,
+      boards.length ? fmtAgo(boards[0].last_seen_sec) : 'never seen'],
+  ];
+  document.getElementById('checks').innerHTML = checks.map(([name, ok, detail]) =>
+    '<div class="check-row ' + (ok ? 'pass' : 'fail') + '">' +
+      '<span class="mark">' + (ok ? '✓' : '✗') + '</span>' +
+      '<span>' + name + '</span>' +
+      '<span class="detail">' + detail + '</span>' +
+    '</div>').join('');
+
+  // Clients list
+  const allClients = (ep.clients || []);
+  document.getElementById('clients').innerHTML = allClients.length === 0
+    ? '<div class="client-row"><span style="color:var(--muted)">no requests since server start</span></div>'
+    : allClients.map(c => {
+        const isLocal = c.ip === '127.0.0.1' || c.ip === '::1';
+        const fresh = c.last_seen_sec <= BOARD_STALE_SEC;
+        return '<div class="client-row' + (fresh ? ' fresh' : '') + '">' +
+          '<span>' + c.ip + '</span>' +
+          '<span class="tag">' + (isLocal ? 'this Mac' : 'board / LAN') + '</span>' +
+          '<span class="ago">' + fmtAgo(c.last_seen_sec) + '</span>' +
+        '</div>';
+      }).join('');
+
+  // Logs
+  const logs = st.logs || {};
+  const outBox = document.getElementById('log-out');
+  const errBox = document.getElementById('log-err');
+  outBox.textContent = (logs.out || []).join('\n') || '(empty)';
+  errBox.textContent = (logs.err || []).join('\n') || '(empty)';
+  outBox.scrollTop = outBox.scrollHeight;
+  errBox.scrollTop = errBox.scrollHeight;
+}
+
+// ── BOOT ───────────────────────────────────────────────────
+fetchStatus();
+setInterval(fetchStatus, POLL_MS);
+</script>
+</body>
+</html>

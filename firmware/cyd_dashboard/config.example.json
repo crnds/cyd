@@ -1,0 +1,6 @@
+{
+  "wifi_ssid": "your-wifi-name",
+  "wifi_password": "your-wifi-password",
+  "server_host": "your-mac-name.local",
+  "server_port": 8787
+}

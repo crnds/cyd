@@ -1,0 +1,1156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CYD Dashboard Simulator</title>
+<style>
+:root {
+  --bg: #08090d;
+  --surface: #0f1117;
+  --surface-alt: #161b27;
+  --border: rgba(255,255,255,0.08);
+  --text: #f1f5f9;
+  --text2: #94a3b8;
+  --muted: #64748b;
+  --accent: #F4620E;
+  --good: #22c55e;
+  --warn: #f43f5e;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.2);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  min-height: 100vh;
+  padding: 24px;
+}
+header { margin-bottom: 20px; }
+header h1 { font-size: 20px; font-weight: 600; }
+header p { color: var(--text2); font-size: 13px; margin-top: 4px; }
+
+.layout {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 768px) { .layout { grid-template-columns: 1fr; } }
+
+/* ── simulated device ── */
+.device {
+  background: #3a3208;
+  background: linear-gradient(145deg, #4a4110, #2e2806);
+  border-radius: 16px;
+  padding: 26px 22px;
+  box-shadow: var(--shadow);
+  display: inline-block;
+}
+.device-label {
+  text-align: center;
+  color: rgba(255,255,255,0.35);
+  font-size: 10px;
+  letter-spacing: 2px;
+  margin-top: 12px;
+  text-transform: uppercase;
+}
+#screen {
+  display: block;
+  background: #000;
+  border: 3px solid #111;
+  border-radius: 4px;
+  cursor: pointer;
+  image-rendering: pixelated;
+}
+
+/* ── control panel ── */
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 640px;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  box-shadow: var(--shadow);
+}
+.card h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text2);
+  margin-bottom: 12px;
+}
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.control-row:last-child { margin-bottom: 0; }
+label { font-size: 13px; color: var(--text2); }
+input[type="text"], select {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+input[type="text"] { flex: 1; min-width: 220px; }
+input[type="text"]:focus, select:focus, button:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  padding: 7px 16px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+button:hover { background: rgba(255,255,255,0.1); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { opacity: 0.88; }
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text2);
+  cursor: pointer;
+}
+.status-line {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.status-line .dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+}
+.dot.ok { background: var(--good); animation: pulse 2s infinite; }
+.dot.bad { background: var(--warn); }
+@keyframes pulse { 50% { opacity: 0.4; } }
+
+pre {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-x: auto;
+  max-height: 260px;
+  overflow-y: auto;
+  color: var(--text2);
+}
+#log { max-height: 150px; }
+#log .err { color: var(--warn); }
+#log .ok { color: var(--good); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>CYD Dashboard Simulator</h1>
+  <p>Simulates the 2.8&Prime; 320&times;240 landscape ESP32-2432S028R screen. Click/tap the screen to cycle pages, exactly like the firmware.</p>
+</header>
+
+<main class="layout">
+  <section class="device" aria-label="Simulated CYD device">
+    <canvas id="screen" width="320" height="240" aria-label="Simulated 320 by 240 landscape display, click to change page"></canvas>
+    <div class="device-label">ESP32-2432S028R &middot; simulated</div>
+  </section>
+
+  <section class="panel">
+    <div class="card">
+      <h2>Connection</h2>
+      <div class="control-row">
+        <input type="text" id="server-url" value="http://localhost:8787/api/usage" aria-label="Server URL">
+        <button class="primary" id="poll-now">Poll now</button>
+      </div>
+      <div class="control-row">
+        <label for="poll-interval">Poll every</label>
+        <select id="poll-interval" aria-label="Poll interval">
+          <option value="5000">5s</option>
+          <option value="20000" selected>20s (firmware default)</option>
+          <option value="60000">60s</option>
+        </select>
+        <label class="toggle"><input type="checkbox" id="sim-offline"> Simulate server offline</label>
+        <label class="toggle"><input type="checkbox" id="mock-data"> Use mock data</label>
+        <label class="toggle"><input type="checkbox" id="sim-sd-missing"> Simulate SD card missing</label>
+      </div>
+      <div class="status-line">
+        <span id="conn-status"><span class="dot bad"></span>not connected</span>
+        <span id="fetch-status">no fetch yet</span>
+        <span id="page-status">page 1/6</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Last response</h2>
+      <pre id="raw-json">&mdash;</pre>
+    </div>
+
+    <div class="card">
+      <h2>Log</h2>
+      <pre id="log"></pre>
+    </div>
+  </section>
+</main>
+
+<script>
+// ── CONSTANTS (mirroring cyd_dashboard.ino) ───────────────
+const POLL_DEFAULT_MS = 20000;
+const PAGE_COUNT = 6;
+const GIF_PAGE = 5;  // 6th page: random cat GIFs on the device (stand-in here — see drawGifPage)
+const LONG_TREND_DAYS = 30;
+const DAILY_LOG_KEY = 'cyddashboard_v1_dailylog';
+const LAST_USAGE_KEY = 'cyddashboard_v1_lastusage';
+
+// Footer pagination dots: right-aligned so the rightmost dot's edge always
+// lands at x=319, regardless of PAGE_COUNT (mirrors the firmware fix for a
+// 5th dot pushing past the 320px screen edge).
+const DOT_SPACING = 12;
+const DOT_START_X = 316 - (PAGE_COUNT - 1) * DOT_SPACING;
+const STALE_AFTER_SEC = 60;
+
+// Flash/RAM are on-device figures with no browser equivalent, so these
+// mirror the last arduino-cli compile report rather than a live query
+// (they only change when the sketch is recompiled, same as on the board).
+const FLASH_USED_BYTES = 1184479;
+const FLASH_TOTAL_BYTES = 1310720;
+const STATIC_RAM_BYTES = 53116;
+const TOTAL_RAM_BYTES = 327680;
+
+// SD card capacity has no browser equivalent either, so this mocks a
+// plausible 8GB card partway full; "Simulate SD card missing" overrides it.
+const SD_USED_BYTES = 2483027968;
+const SD_TOTAL_BYTES = 7948206080;
+
+// RGB565 firmware colors converted to RGB888 exactly as the panel shows them
+const COL_BG      = 'rgb(8,8,8)';       // 0x0841
+const COL_SURFACE = 'rgb(8,8,8)';       // 0x0841 (card fill = bg, no surface tint)
+const COL_BORDER  = 'rgb(58,57,58)';    // 0x39C7
+const COL_TEXT    = 'rgb(255,255,255)'; // 0xFFFF
+const COL_TEXT2   = 'rgb(156,154,156)'; // 0x9CD3
+const COL_ACCENT  = 'rgb(255,97,66)';   // 0xFB08
+const COL_BLUE    = 'rgb(58,130,247)';  // 0x3C1E device-stats bar chart accent
+const COL_GOOD    = 'rgb(33,206,66)';   // 0x2668
+const COL_WARN    = 'rgb(255,24,49)';   // 0xF8C6
+const COL_TRACK   = 'rgb(90,89,90)';    // 0x5ACB neutral grey track
+
+// ── STATE (mirroring the firmware UsageState struct) ──────
+const STATE = {
+  projects: [],           // [{name, tokens}]
+  trend: [0,0,0,0,0,0,0],
+  longTrend: [],          // {date,tokens}[] mirroring the firmware's SD-backed 30-day log
+  lastLoggedDate: null,   // date string of the last day appended, mirrors STATE.lastLoggedYday
+  haveData: false,        // true once any data (live or cached) has been applied
+  cpuPercentAvg: 0,       // EMA of render() duty cycle vs. the 50ms tick period
+  sessionPercent: -1,     // -1 = limits unavailable
+  sessionResets: '',
+  sessionResetsInSec: -1, // countdown to session reset; -1 = unknown
+  weekPercent: -1,
+  weekResets: '',
+  lastFetchOkMs: 0,
+  btcPrice: -1,           // BTC/USDT from Binance; -1 = not fetched yet
+  weatherTempC: -999,     // Bangkok current temp from Open-Meteo; -999 = not fetched yet
+  weatherCode: -1,        // Open-Meteo WMO weather_code; -1 = not fetched yet
+  // simulator-only
+  lastPollMs: 0,          // when the last poll cycle started (progress line)
+  currentPage: 0,
+  wifiOk: false,
+  connected: false,     // did the most recent fetch reach the server?
+  pollTimer: null,
+  weatherTimer: null,
+  btcTimer: null,
+};
+
+// ── SIMULATED GFX (LovyanGFX-ish API on canvas) ───────────
+// Classic GFX font metrics: size 1 = 6x8 px per char (5x7 glyph + 1px gap).
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+const DPR = Math.min(window.devicePixelRatio || 1, 3);
+canvas.width = 320 * DPR;
+canvas.height = 240 * DPR;
+canvas.style.width = '320px';
+canvas.style.height = '240px';
+ctx.scale(DPR, DPR);
+
+const gfx = {
+  _color: COL_TEXT,
+  _size: 1,
+  _x: 0, _y: 0,
+  fillScreen(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, 320, 240); },
+  setTextColor(c) { this._color = c; },
+  setTextSize(s) { this._size = s; },
+  setCursor(x, y) { this._x = x; this._y = y; },
+  print(str) {
+    // The hardware GFX font is a 5x7 bitmap glyph in a 6x8 cell: it advances
+    // 6px per char but the glyph fills 5px. Keep the 6px advance (so line
+    // lengths match the device) while stretching each glyph to ~5px wide so
+    // it fills the cell like the real font instead of leaving an airy gap.
+    const s = this._size;
+    const advance = 6 * s;
+    const glyphW = 5 * s;
+    ctx.fillStyle = this._color;
+    ctx.font = `bold ${8 * s}px Menlo, Consolas, monospace`;
+    ctx.textBaseline = 'top';
+    str = String(str);
+    for (let i = 0; i < str.length; i++) {
+      const w = ctx.measureText(str[i]).width || glyphW;
+      ctx.save();
+      ctx.translate(this._x, this._y);
+      ctx.scale(glyphW / w, 1);
+      ctx.fillText(str[i], 0, 0);
+      ctx.restore();
+      this._x += advance;
+    }
+  },
+  fillRect(x, y, w, h, c) {
+    ctx.fillStyle = c;
+    ctx.fillRect(x, y, w, h);
+  },
+  fillRoundRect(x, y, w, h, r, c) {
+    ctx.fillStyle = c;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    ctx.fill();
+  },
+  drawRoundRect(x, y, w, h, r, c) {
+    ctx.strokeStyle = c;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x + 0.5, y + 0.5, w - 1, h - 1, r);
+    ctx.stroke();
+  },
+  fillCircle(x, y, r, c) {
+    ctx.fillStyle = c;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  },
+};
+
+// ── FORMATTING (mirroring the firmware) ───────────────────
+function fmtTokens(t) {
+  if (t >= 1e9) return (t / 1e9).toFixed(2) + 'B';
+  if (t >= 1e6) return (t / 1e6).toFixed(1) + 'M';
+  if (t >= 1e3) return (t / 1e3).toFixed(1) + 'K';
+  return String(t);
+}
+function fmtCost(c) { return '$' + c.toFixed(2); }
+function fmtBtc(p) {
+  if (p < 0) return '--';
+  return Math.round(p).toLocaleString('en-US');
+}
+function fmtCountdown(sec) {
+  if (sec < 0) return '';
+  let m = Math.floor((sec + 30) / 60);  // round to nearest minute
+  const h = Math.floor(m / 60);
+  m %= 60;
+  return h > 0 ? h + 'h:' + String(m).padStart(2, '0') + 'm' : m + 'm';
+}
+function fmtKB(bytes) { return (bytes / 1024).toFixed(1) + 'KB'; }
+function fmtGB(bytes) { return (bytes / (1024 ** 3)).toFixed(1) + 'GB'; }
+
+// ── PAGE DRAWING (line-for-line port of the .ino) ─────────
+function drawFooter() {
+  // Status dot: pulses once a second while the most recent poll reached the
+  // server — big+green on the odd second, small+red on the even second, so the
+  // pulse is easy to read at a glance. Static amber when coasting on cached
+  // data (haveData true but connected false — render() only reaches here when
+  // haveData is true).
+  const bigPhase = Math.floor(performance.now() / 1000) % 2;
+  const dotR = (STATE.connected && bigPhase) ? 4 : 3;
+  const dotColor = !STATE.connected ? COL_ACCENT : (bigPhase ? COL_GOOD : COL_WARN);
+  gfx.fillCircle(14, 230, dotR, dotColor);
+
+  for (let i = 0; i < PAGE_COUNT; i++) {
+    const c = (i === STATE.currentPage) ? COL_ACCENT : COL_BORDER;
+    gfx.fillCircle(DOT_START_X + i * DOT_SPACING, 230, 3, c);
+  }
+
+  // Minimal 1px line along the bottom edge, filling left-to-right as the
+  // next poll approaches (full width = fetch imminent).
+  const pollMs = Number(document.getElementById('poll-interval').value) || POLL_DEFAULT_MS;
+  let elapsed = performance.now() - STATE.lastPollMs;
+  if (elapsed > pollMs) elapsed = pollMs;
+  const lineW = Math.round(elapsed / pollMs * 320);
+  if (lineW > 0) gfx.fillRect(0, 239, lineW, 1, COL_TEXT2);
+}
+
+function drawLimitBlock(y, title, percent, resets, resetsInSec) {
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(1);
+  gfx.setCursor(10, y);
+  gfx.print(title);
+
+  const barX = 10, barY = y + 22, barW = 195, barH = 16;
+  gfx.fillRoundRect(barX, barY, barW, barH, 3, COL_TRACK);
+  if (percent >= 0) {
+    const fillW = Math.round(Math.min(percent, 100) / 100 * barW);
+    gfx.fillRoundRect(barX, barY, Math.max(fillW, 3), barH, 3, COL_ACCENT);
+  }
+
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(2);
+  gfx.setCursor(215, barY + 1);
+  gfx.print(percent >= 0 ? percent + '% used' : '--');
+
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(2);
+  gfx.setCursor(10, barY + 26);
+  let line = resets ? 'Resets ' + resets : 'Resets --';
+  if (resets && resetsInSec >= 0) {
+    line += ' (' + fmtCountdown(resetsInSec) + ')';
+  }
+  gfx.print(line);
+}
+
+function drawHomePage() {
+  // Tick the session countdown down locally between polls.
+  let sessionRem = STATE.sessionResetsInSec;
+  if (sessionRem >= 0) {
+    sessionRem -= Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
+    if (sessionRem < 0) sessionRem = 0;
+  }
+  drawLimitBlock(10, 'Current session', STATE.sessionPercent, STATE.sessionResets, sessionRem);
+  drawLimitBlock(104, 'Current week (all models)', STATE.weekPercent, STATE.weekResets, -1);
+
+  // ₿ has no glyph in the built-in ASCII font: print "B" and add the two
+  // vertical strokes piercing its top and bottom (size-2 glyph = 10x14 px).
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(2);
+  gfx.setCursor(10, 198);
+  gfx.print('B');
+  gfx.fillRect(12, 195, 2, 3, COL_TEXT);
+  gfx.fillRect(16, 195, 2, 3, COL_TEXT);
+  gfx.fillRect(12, 212, 2, 3, COL_TEXT);
+  gfx.fillRect(16, 212, 2, 3, COL_TEXT);
+  gfx.print(' $' + fmtBtc(STATE.btcPrice));
+}
+
+// Combined page: top 4 projects (7d) in the upper half, the 7-day token trend
+// chart in the lower half (formerly its own page). A 1px divider at y=128
+// splits the two sections; the trend labels end at y=226, just above the
+// footer dots at y=230.
+function drawProjectsPage() {
+  // ── upper half: top projects (7d) ──
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(1);
+  gfx.setCursor(10, 6);
+  gfx.print('TOP PROJECTS (7D)');
+
+  if (STATE.projects.length === 0) {
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setCursor(10, 24);
+    gfx.print('No data yet');
+  } else {
+    const shown = Math.min(STATE.projects.length, 4);
+    let maxTokens = 1;
+    for (let i = 0; i < shown; i++) if (STATE.projects[i].tokens > maxTokens) maxTokens = STATE.projects[i].tokens;
+
+    let y = 22;
+    const barMaxW = 250;
+    for (let i = 0; i < shown; i++) {
+      const p = STATE.projects[i];
+      gfx.setTextColor(COL_TEXT);
+      gfx.setTextSize(1);
+      gfx.setCursor(10, y);
+      gfx.print(p.name);
+
+      const barW = Math.round(p.tokens / maxTokens * barMaxW);
+      gfx.fillRoundRect(10, y + 10, barMaxW, 8, 2, COL_SURFACE);
+      gfx.fillRoundRect(10, y + 10, Math.max(barW, 4), 8, 2, COL_ACCENT);
+
+      gfx.setTextColor(COL_TEXT2);
+      gfx.setCursor(10 + barMaxW + 8, y + 11);
+      gfx.print(fmtTokens(p.tokens));
+
+      y += 26;
+    }
+  }
+
+  // ── lower half: 7-day trend ──
+  gfx.fillRect(10, 128, 300, 1, COL_BORDER);
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(1);
+  gfx.setCursor(10, 134);
+  gfx.print('7-DAY TREND');
+
+  let maxTrend = 1;
+  for (const v of STATE.trend) if (v > maxTrend) maxTrend = v;
+
+  const dayLabels = ['-6', '-5', '-4', '-3', '-2', '-1', 'today'];
+  const chartX = 24, chartY = 150, chartH = 64, barW = 32, gap = 8;
+  for (let i = 0; i < 7; i++) {
+    const barH = Math.round(STATE.trend[i] / maxTrend * chartH);
+    const bx = chartX + i * (barW + gap);
+    const by = chartY + chartH - barH;
+    gfx.fillRoundRect(bx, by, barW, Math.max(barH, 2), 3, COL_ACCENT);
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setTextSize(1);
+    gfx.setCursor(bx, chartY + chartH + 4);
+    gfx.print(dayLabels[i]);
+  }
+}
+
+// Simple vector weather icon (line-for-line port of the firmware's
+// drawWeatherIcon), mapped from Open-Meteo's WMO weather_code.
+function drawWeatherIcon(x, y, code) {
+  if (code < 0) {
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setTextSize(1);
+    gfx.setCursor(x, y + 6);
+    gfx.print('--');
+    return;
+  }
+  const cx = x + 10, cy = y + 10;
+  if (code === 0 || code === 1) {
+    gfx.fillCircle(cx, cy, 6, COL_ACCENT);
+    gfx.fillRect(cx - 1, y - 2, 2, 4, COL_ACCENT);
+    gfx.fillRect(cx - 1, y + 18, 2, 4, COL_ACCENT);
+    gfx.fillRect(x - 2, cy - 1, 4, 2, COL_ACCENT);
+    gfx.fillRect(x + 20, cy - 1, 4, 2, COL_ACCENT);
+    return;
+  }
+  gfx.fillCircle(cx - 5, cy - 1, 5, COL_TEXT2);
+  gfx.fillCircle(cx + 2, cy - 3, 6, COL_TEXT2);
+  gfx.fillCircle(cx + 8, cy - 1, 5, COL_TEXT2);
+  gfx.fillRoundRect(cx - 9, cy - 1, 24, 7, 3, COL_TEXT2);
+  if (code >= 95) {
+    gfx.fillRect(cx, cy + 7, 3, 6, COL_ACCENT);
+  } else if ((code >= 71 && code <= 77) || code === 85 || code === 86) {
+    gfx.fillCircle(cx - 4, cy + 10, 1, COL_TEXT);
+    gfx.fillCircle(cx + 2, cy + 10, 1, COL_TEXT);
+    gfx.fillCircle(cx + 8, cy + 10, 1, COL_TEXT);
+  } else if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
+    gfx.fillRect(cx - 4, cy + 7, 2, 6, COL_BLUE);
+    gfx.fillRect(cx + 2, cy + 7, 2, 6, COL_BLUE);
+    gfx.fillRect(cx + 8, cy + 7, 2, 6, COL_BLUE);
+  }
+}
+
+// Thin inset progress bar: near-black track recessed into a surface card.
+function drawMiniBar(x, y, w, percent, color) {
+  gfx.fillRoundRect(x, y, w, 6, 3, COL_TRACK);
+  if (percent >= 0) {
+    const fillW = Math.round(Math.min(percent, 100) / 100 * w);
+    gfx.fillRoundRect(x, y, Math.max(fillW, 6), 6, 3, color);
+  }
+}
+
+// Uppercase section label with a 3px accent tick on its left.
+function drawCardLabel(x, y, label) {
+  gfx.fillRect(x, y, 3, 8, COL_ACCENT);
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(1);
+  gfx.setCursor(x + 7, y);
+  gfx.print(label);
+}
+
+// Card layout: one tall left card = session/week limits (always accent
+// orange); the right column is three stacked cards = Bangkok clock/date
+// (y=4 h=92), weather (y=100 h=56), BTC (y=160 h=56), 4px gaps. All cards
+// are 152px wide with 10px inner padding (content x=14 / x=174, width 132).
+function drawStatusPage() {
+  gfx.fillRoundRect(4, 4, 152, 216, 8, COL_SURFACE);
+  gfx.drawRoundRect(4, 4, 152, 216, 8, COL_BORDER);
+  gfx.fillRoundRect(164, 4, 152, 92, 8, COL_SURFACE);
+  gfx.drawRoundRect(164, 4, 152, 92, 8, COL_BORDER);
+  gfx.fillRoundRect(164, 100, 152, 56, 8, COL_SURFACE);
+  gfx.drawRoundRect(164, 100, 152, 56, 8, COL_BORDER);
+  gfx.fillRoundRect(164, 160, 152, 56, 8, COL_SURFACE);
+  gfx.drawRoundRect(164, 160, 152, 56, 8, COL_BORDER);
+
+  // ── left card: limits ──
+  drawCardLabel(14, 13, 'SESSION (5H)');
+
+  // Tick the session countdown down locally between polls.
+  let sessionRem = STATE.sessionResetsInSec;
+  if (sessionRem >= 0) {
+    sessionRem -= Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
+    if (sessionRem < 0) sessionRem = 0;
+  }
+
+  gfx.setTextColor(COL_ACCENT);
+  gfx.setTextSize(4);
+  gfx.setCursor(14, 28);
+  gfx.print(STATE.sessionPercent >= 0 ? STATE.sessionPercent + '%' : '--');
+
+  drawMiniBar(14, 64, 132, STATE.sessionPercent, COL_ACCENT);
+
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(2);
+  gfx.setCursor(14, 76);
+  gfx.print('resets:');
+  gfx.setCursor(14, 94);
+  gfx.print(STATE.sessionResets || '--');
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(2);
+  gfx.setCursor(14, 112);
+  if (sessionRem >= 0) gfx.print('in ' + fmtCountdown(sessionRem));
+
+  gfx.fillRect(14, 136, 132, 1, COL_BORDER);
+
+  drawCardLabel(14, 147, 'WEEK (ALL MODELS)');
+
+  gfx.setTextColor(COL_ACCENT);
+  gfx.setTextSize(3);
+  gfx.setCursor(14, 162);
+  gfx.print(STATE.weekPercent >= 0 ? STATE.weekPercent + '%' : '--');
+
+  drawMiniBar(14, 192, 132, STATE.weekPercent, COL_ACCENT);
+
+  // "resets Jul 9 at 4:59am" is 22 chars = 132px at size1 — exactly the
+  // card's inner width, so this line must stay size1.
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(1);
+  gfx.setCursor(14, 206);
+  gfx.print(STATE.weekResets ? 'resets ' + STATE.weekResets : 'resets --');
+
+  // ── right cards: Bangkok clock/date, weather, BTC price ──
+  const bkk = bangkokParts();
+
+  drawCardLabel(174, 13, 'BANGKOK');
+
+  gfx.setTextSize(4);
+  gfx.setCursor(174, 28);
+  if (bkk) {
+    gfx.setTextColor(COL_TEXT);
+    gfx.print(bkk.hour + '.' + bkk.minute);
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setTextSize(1);
+    // Bottom-align the small seconds against the big "HH.MM" cell (32px
+    // tall at size4 vs. 8px at size1): x is the fixed 5-char size4 advance.
+    gfx.setCursor(174 + 5 * 24, 52);
+    gfx.print('.' + bkk.second);
+  } else {
+    gfx.setTextColor(COL_TEXT2);
+    gfx.print('--.--');
+  }
+
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(2);
+  gfx.setCursor(174, 66);
+  // Year dropped: "Mon 25 Jul 2026" at size2 would overrun the 132px inner
+  // width; weekday+day+month fits at 120px.
+  gfx.print(bkk ? (bkk.weekday + ' ' + bkk.day + ' ' + bkk.month) : '--');
+
+  drawCardLabel(174, 109, 'WEATHER');
+
+  drawWeatherIcon(174, 124, STATE.weatherCode);
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(3);
+  gfx.setCursor(204, 122);
+  gfx.print(STATE.weatherTempC > -900 ? Math.round(STATE.weatherTempC) + 'C' : '--');
+
+  drawCardLabel(174, 169, 'BTC/USDT');
+
+  // Orange for the Bitcoin figure, per the shared color semantics.
+  gfx.setTextColor(COL_ACCENT);
+  gfx.setTextSize(3);
+  gfx.setCursor(174, 182);
+  gfx.print(fmtBtc(STATE.btcPrice));
+}
+
+function drawLongTrendPage() {
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(2);
+  gfx.setCursor(10, 6);
+  gfx.print('30-Day Trend');
+
+  const sdMissing = document.getElementById('sim-sd-missing').checked;
+  if (sdMissing) {
+    // Same tone as drawOfflineScreen: a bare centered grey message, since
+    // this page has nothing to show without the card.
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setTextSize(2);
+    gfx.setCursor(52, 110);  // centered: "SD CARD NOT FOUND" is 17 chars * 12px = 204px
+    gfx.print('SD CARD NOT FOUND');
+    return;
+  }
+
+  const days = STATE.longTrend;
+  let maxTokens = 1;
+  for (const d of days) if (d.tokens > maxTokens) maxTokens = d.tokens;
+
+  const chartX = 10, chartY = 36, chartH = 148, chartW = 300;
+  const barW = 6, gap = 4;
+  const startX = chartX + chartW - days.length * (barW + gap);
+  for (let i = 0; i < days.length; i++) {
+    const barH = Math.round(days[i].tokens / maxTokens * chartH);
+    const bx = startX + i * (barW + gap);
+    const by = chartY + chartH - barH;
+    gfx.fillRoundRect(bx, by, barW, Math.max(barH, 2), 2, COL_ACCENT);
+  }
+
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(1);
+  gfx.setCursor(chartX, chartY + chartH + 6);
+  gfx.print('oldest');
+  gfx.setCursor(chartX + chartW - 30, chartY + chartH + 6);
+  gfx.print('today');
+  gfx.setCursor(chartX, chartY + chartH + 18);
+  gfx.print(days.length + ' days logged, peak ' + fmtTokens(maxTokens));
+}
+
+function drawFullStatBlock(y, title, percent, sub, color) {
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(1);
+  gfx.setCursor(10, y);
+  gfx.print(title);
+
+  const barX = 10, barY = y + 14, barW = 245, barH = 16;
+  gfx.fillRoundRect(barX, barY, barW, barH, 3, COL_TRACK);
+  if (percent >= 0) {
+    const fillW = Math.round(Math.min(percent, 100) / 100 * barW);
+    gfx.fillRoundRect(barX, barY, Math.max(fillW, 3), barH, 3, color);
+  }
+
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(2);
+  gfx.setCursor(barX + barW + 8, barY);
+  gfx.print(percent >= 0 ? percent + '%' : '--');
+
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(1);
+  gfx.setCursor(10, barY + 20);
+  gfx.print(sub);
+}
+
+function drawDevicePage() {
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(2);
+  gfx.setCursor(10, 6);
+  gfx.print('Device Stats');
+
+  const cpuInt = Math.round(STATE.cpuPercentAvg);
+  const cpuColor = (cpuInt >= 80) ? COL_WARN : COL_BLUE;
+  drawFullStatBlock(34, 'CPU USAGE (loop duty cycle, live)', cpuInt, '', cpuColor);
+
+  const flashPct = Math.round(FLASH_USED_BYTES / FLASH_TOTAL_BYTES * 100);
+  const flashColor = (flashPct >= 80) ? COL_WARN : COL_BLUE;
+  drawFullStatBlock(80, 'FLASH USAGE', flashPct,
+                     fmtKB(FLASH_USED_BYTES) + ' / ' + fmtKB(FLASH_TOTAL_BYTES), flashColor);
+
+  const ramPct = Math.round(STATIC_RAM_BYTES / TOTAL_RAM_BYTES * 100);
+  const ramColor = (ramPct >= 80) ? COL_WARN : COL_BLUE;
+  drawFullStatBlock(126, 'STATIC RAM USAGE', ramPct,
+                     fmtKB(STATIC_RAM_BYTES) + ' / ' + fmtKB(TOTAL_RAM_BYTES), ramColor);
+
+  const sdMissing = document.getElementById('sim-sd-missing').checked;
+  const sdPct = sdMissing ? -1 : Math.round(SD_USED_BYTES / SD_TOTAL_BYTES * 100);
+  const sdColor = (sdPct >= 80) ? COL_WARN : COL_BLUE;
+  drawFullStatBlock(172, 'SD CARD USAGE', sdPct,
+                     sdPct >= 0 ? fmtGB(SD_USED_BYTES) + ' / ' + fmtGB(SD_TOTAL_BYTES) : 'SD CARD NOT FOUND',
+                     sdColor);
+}
+
+function drawOfflineScreen() {
+  gfx.fillScreen(COL_BG);
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(4);
+  gfx.setCursor(76, 104);  // centered: "OFFLINE" is 7 chars * 24px = 168px
+  gfx.print('OFFLINE');
+}
+
+// Page 6 stand-in. On the device this page decodes and plays random cat GIFs
+// from /cats/ on the SD card frame-by-frame (AnimatedGIF, in the firmware's
+// gifTick()) — which the canvas simulator can't emulate, so it shows the same
+// "CATS" title as the firmware's no-cats placeholder plus a note. This is the
+// one page that is deliberately NOT a pixel-faithful twin of the hardware.
+function drawGifPage() {
+  gfx.fillScreen(COL_BG);
+  gfx.setTextColor(COL_ACCENT);
+  gfx.setTextSize(3);
+  gfx.setCursor(124, 92);  // "CATS" = 4 chars * 18px = 72; (320-72)/2 = 124
+  gfx.print('CATS');
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(1);
+  const msg = 'random cat GIFs play here on the device';
+  gfx.setCursor((320 - msg.length * 6) / 2, 132);
+  gfx.print(msg);
+  const note = '(reads /cats/*.gif from the SD card)';
+  gfx.setCursor((320 - note.length * 6) / 2, 148);
+  gfx.print(note);
+}
+
+function render() {
+  // Page 6 plays regardless of connectivity, so it bypasses the OFFLINE
+  // short-circuit — mirrors the firmware's render() early-return for GIF_PAGE.
+  if (STATE.currentPage === GIF_PAGE) {
+    drawGifPage();
+    document.getElementById('page-status').textContent = 'page 6/6 (cat GIFs)';
+    return;
+  }
+  if (!STATE.haveData) {
+    drawOfflineScreen();
+    document.getElementById('page-status').textContent = 'OFFLINE';
+    return;
+  }
+  gfx.fillScreen(COL_BG);
+  switch (STATE.currentPage) {
+    case 0: drawStatusPage(); break;
+    case 1: drawProjectsPage(); break;  // projects (7d) + 7-day trend combined
+    case 2: drawHomePage(); break;
+    case 3: drawDevicePage(); break;
+    case 4: drawLongTrendPage(); break;
+  }
+  drawFooter();
+  document.getElementById('page-status').textContent =
+    'page ' + (STATE.currentPage + 1) + '/' + PAGE_COUNT;
+}
+
+// ── DATA LOADING ──────────────────────────────────────────
+const MOCK = {
+  today: { tokens: 2573012, cost: 2.31 },
+  last5h: { tokens: 1807153, cost: 1.68 },
+  week: { tokens: 351668302, cost: 228.27 },
+  active_now: true,
+  last_activity_sec: 12,
+  projects: [
+    { name: 'ampypay-eunite', tokens: 178178755 },
+    { name: 'org-chart', tokens: 145575128 },
+    { name: 'autoclaude', tokens: 15567872 },
+    { name: 'iief-thai', tokens: 5286431 },
+    { name: 'fsfi-thai', tokens: 3970315 },
+  ],
+  trend: [118891173, 158279627, 0, 0, 55363947, 17326402, 2573012],
+  limits: {
+    tz: 'Asia/Bangkok',
+    session: { percent: 27, resets: '3:19am', resets_in_sec: 5400 },
+    week: { percent: 86, resets: 'Jul 9 at 4:59am' },
+  },
+  btc: { price: 109432 },
+  weather: { tempC: 34, code: 3 },
+};
+
+// Mirrors the firmware's SD-backed daily log, using localStorage as the
+// simulator's stand-in for the on-device CSV (per the root CLAUDE.md's
+// projectname_v1_keyname convention) — same day-rollover semantics, just a
+// different persistence backend.
+function loadLongTrend() {
+  try {
+    const raw = localStorage.getItem(DAILY_LOG_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    STATE.longTrend = parsed.slice(-LONG_TREND_DAYS);
+    STATE.lastLoggedDate = STATE.longTrend.length ?
+      STATE.longTrend[STATE.longTrend.length - 1].date : null;
+  } catch {
+    STATE.longTrend = [];
+    STATE.lastLoggedDate = null;
+  }
+}
+
+// Called after each successful fetch, mirroring appendDailyLogIfNeeded():
+// logs the day that just ended (yesterday) using the token total it
+// finished on, captured by the caller before applyData() overwrote
+// STATE.trend with the new day's running total.
+function appendDailyLogIfNeeded(todayDateStr, justEndedDayTokens) {
+  if (todayDateStr === STATE.lastLoggedDate) return;  // same day, nothing to do
+  if (STATE.lastLoggedDate === null && !STATE.longTrend.length) {
+    // First poll ever (fresh log) — just record today's date as the
+    // baseline; the actual log starts tomorrow.
+    STATE.lastLoggedDate = todayDateStr;
+    return;
+  }
+  const y = new Date(todayDateStr + 'T00:00:00');
+  y.setDate(y.getDate() - 1);
+  const yesterdayDateStr = y.toISOString().slice(0, 10);
+
+  STATE.longTrend.push({ date: yesterdayDateStr, tokens: justEndedDayTokens });
+  if (STATE.longTrend.length > LONG_TREND_DAYS) STATE.longTrend.shift();
+  STATE.lastLoggedDate = todayDateStr;
+  localStorage.setItem(DAILY_LOG_KEY, JSON.stringify(STATE.longTrend));
+}
+
+// Mirrors the firmware's SD-backed /last_usage.json cache, using
+// localStorage as the simulator's stand-in — so the dashboard keeps
+// showing real (if stale) data instead of going blank when a poll fails.
+function saveLastUsageCache(doc) {
+  try {
+    localStorage.setItem(LAST_USAGE_KEY, JSON.stringify(doc));
+  } catch { /* storage full/unavailable — cache is best-effort */ }
+}
+
+function loadCachedUsage() {
+  try {
+    const raw = localStorage.getItem(LAST_USAGE_KEY);
+    if (!raw) return false;
+    applyData(JSON.parse(raw));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function applyData(doc) {
+  const prevToday = STATE.trend[6];
+  STATE.projects = (doc.projects || []).slice(0, 5);
+  STATE.trend = Array.from({ length: 7 }, (_, i) => doc.trend?.[i] ?? 0);
+  appendDailyLogIfNeeded(bangkokDateStr(), prevToday);
+  if (doc.limits) {
+    STATE.sessionPercent = doc.limits.session?.percent ?? -1;
+    STATE.sessionResets = doc.limits.session?.resets ?? '';
+    STATE.sessionResetsInSec = doc.limits.session?.resets_in_sec ?? -1;
+    STATE.weekPercent = doc.limits.week?.percent ?? -1;
+    STATE.weekResets = doc.limits.week?.resets ?? '';
+  } else {
+    STATE.sessionPercent = -1;
+    STATE.sessionResets = '';
+    STATE.sessionResetsInSec = -1;
+    STATE.weekPercent = -1;
+    STATE.weekResets = '';
+  }
+  // BTC + weather now ride along in the usage payload (the Mac fetches them, the
+  // board can't do TLS — see the server's market_loop). Mirrors the firmware's
+  // applyUsageJson; keeps the last value when a field is absent.
+  if (doc.btc && doc.btc.price > 0) STATE.btcPrice = doc.btc.price;
+  if (doc.weather) {
+    STATE.weatherTempC = doc.weather.tempC ?? STATE.weatherTempC;
+    STATE.weatherCode = doc.weather.code ?? STATE.weatherCode;
+  }
+  STATE.lastFetchOkMs = performance.now();
+  document.getElementById('raw-json').textContent = JSON.stringify(doc, null, 2);
+}
+
+// BTC/USDT straight from Binance, independent of the usage server —
+// mirrors the firmware's fetchBtcPrice(). Keeps the last price on failure.
+async function fetchBtc() {
+  if (document.getElementById('mock-data').checked) {
+    STATE.btcPrice = 109432;
+    return;
+  }
+  if (document.getElementById('sim-offline').checked) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
+                            { signal: controller.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const doc = await res.json();
+    const p = parseFloat(doc.price);
+    if (p > 0) STATE.btcPrice = p;
+    log('BTC/USDT ' + fmtBtc(STATE.btcPrice), 'ok');
+  } catch (err) {
+    log('btc fetch failed: ' + err.message, 'err');
+  } finally {
+    clearTimeout(timer);
+  }
+  render();
+}
+
+// The browser has no on-device NTP equivalent to the firmware's
+// configTime()/getLocalTime(), so the clock is derived straight from the
+// system clock, converted to Asia/Bangkok (no DST, fixed UTC+7 — matches the
+// firmware's GMT_OFFSET_SEC exactly).
+function bangkokDateStr() {
+  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Bangkok' });  // en-CA -> YYYY-MM-DD
+  return fmt.format(new Date());
+}
+
+function bangkokParts() {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Bangkok', hour12: false,
+    weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const parts = {};
+  for (const p of fmt.formatToParts(new Date())) parts[p.type] = p.value;
+  return {
+    weekday: parts.weekday, month: parts.month, day: parts.day, year: parts.year,
+    hour: parts.hour === '24' ? '00' : parts.hour, minute: parts.minute, second: parts.second,
+  };
+}
+
+// Bangkok current weather from Open-Meteo (no API key), same pattern as
+// fetchBtc() — independent of the usage server. Keeps the last reading on
+// failure.
+async function fetchWeather() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch('https://api.open-meteo.com/v1/forecast?latitude=13.7563&longitude=100.5018&current=temperature_2m,weather_code&timezone=Asia%2FBangkok',
+                            { signal: controller.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const doc = await res.json();
+    if (doc.current) {
+      STATE.weatherTempC = doc.current.temperature_2m ?? -999;
+      STATE.weatherCode = doc.current.weather_code ?? -1;
+      log('weather ' + STATE.weatherTempC + 'C code ' + STATE.weatherCode, 'ok');
+    }
+  } catch (err) {
+    log('weather fetch failed: ' + err.message, 'err');
+  } finally {
+    clearTimeout(timer);
+  }
+  render();
+}
+
+async function fetchUsage() {
+  STATE.lastPollMs = performance.now();
+  const offline = document.getElementById('sim-offline').checked;
+  const mock = document.getElementById('mock-data').checked;
+
+  if (mock) {
+    applyData(MOCK);
+    saveLastUsageCache(MOCK);
+    STATE.haveData = true;
+    STATE.wifiOk = true;
+    STATE.connected = true;
+    setConn(true, 'mock data');
+    log('applied mock data', 'ok');
+    render();
+    return;
+  }
+  if (offline) {
+    STATE.wifiOk = false;
+    STATE.connected = false;
+    if (!STATE.haveData) STATE.haveData = loadCachedUsage();
+    setConn(false, 'simulated offline');
+    log('poll skipped: simulated offline', 'err');
+    render();
+    return;
+  }
+
+  const url = document.getElementById('server-url').value.trim();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const doc = await res.json();
+    applyData(doc);
+    saveLastUsageCache(doc);
+    STATE.haveData = true;
+    STATE.wifiOk = true;
+    STATE.connected = true;
+    setConn(true, 'ok, ' + new Date().toLocaleTimeString());
+    log('fetched ' + fmtTokens(doc.today?.tokens ?? 0) + ' today / ' +
+        fmtTokens(doc.week?.tokens ?? 0) + ' week', 'ok');
+  } catch (err) {
+    STATE.wifiOk = false;
+    STATE.connected = false;
+    if (!STATE.haveData) STATE.haveData = loadCachedUsage();
+    setConn(false, err.name === 'AbortError' ? 'timeout (5s)' : err.message);
+    log('fetch failed: ' + err.message, 'err');
+  } finally {
+    clearTimeout(timer);
+  }
+  render();
+}
+
+// ── UI WIRING ─────────────────────────────────────────────
+function setConn(ok, detail) {
+  document.getElementById('conn-status').innerHTML =
+    `<span class="dot ${ok ? 'ok' : 'bad'}"></span>${ok ? 'connected' : 'disconnected'}`;
+  document.getElementById('fetch-status').textContent = detail;
+}
+
+function log(msg, cls) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+  el.prepend(line);
+  while (el.childElementCount > 50) el.removeChild(el.lastChild);
+}
+
+function restartPollTimer() {
+  clearInterval(STATE.pollTimer);
+  const ms = Number(document.getElementById('poll-interval').value) || POLL_DEFAULT_MS;
+  STATE.pollTimer = setInterval(fetchUsage, ms);
+}
+
+// ── AUDIO (mirroring the firmware's page-change solfege beeps) ────
+// Do Re Mi Fa Sol La (C5..A5) for pages 1..6, ~70ms each. A square wave at
+// low gain approximates the board's low-duty LEDC output through its amp.
+const TONE_FREQS = [523, 587, 659, 698, 784, 880];
+const TONE_DURATION_MS = 70;
+let audioCtx = null;
+function playPageTone(page) {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = TONE_FREQS[page];
+    gain.gain.value = 0.02;  // low volume, like the firmware's TONE_DUTY
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + TONE_DURATION_MS / 1000);
+  } catch (err) { /* audio unavailable — the beep is best-effort */ }
+}
+
+// Touch feedback: flash a 5px white border on all four edges for one frame,
+// then re-render to clear it. Mirrors flashTouchBorder() in the firmware.
+function flashTouchBorder() {
+  const T = 5;
+  gfx.fillRect(0, 0, 320, T, COL_TEXT);        // top
+  gfx.fillRect(0, 240 - T, 320, T, COL_TEXT);  // bottom
+  gfx.fillRect(0, 0, T, 240, COL_TEXT);        // left
+  gfx.fillRect(320 - T, 0, T, 240, COL_TEXT);  // right
+  setTimeout(render, 60);
+}
+
+canvas.addEventListener('click', () => {
+  STATE.currentPage = (STATE.currentPage + 1) % PAGE_COUNT;
+  playPageTone(STATE.currentPage);
+  render();
+  flashTouchBorder();  // one-frame white edge flash on the new page: touch registered
+});
+
+document.getElementById('poll-now').addEventListener('click', fetchUsage);
+document.getElementById('poll-interval').addEventListener('change', restartPollTimer);
+document.getElementById('sim-offline').addEventListener('change', fetchUsage);
+document.getElementById('mock-data').addEventListener('change', fetchUsage);
+document.getElementById('sim-sd-missing').addEventListener('change', render);
+
+// Repaint at ~20fps so the bottom progress line advances smoothly, matching
+// the firmware's incremental line top-ups between its 1s full repaints.
+// Each tick also measures render()'s own time against the 50ms period and
+// feeds an EMA — the same duty-cycle idea the firmware uses for cpuPercentAvg,
+// just measuring canvas draw time instead of loop() work (there's no real
+// device CPU to sample from a browser tab).
+function tick() {
+  const start = performance.now();
+  render();
+  const busyMs = performance.now() - start;
+  const sample = busyMs / 50 * 100;
+  STATE.cpuPercentAvg = STATE.cpuPercentAvg * 0.9 + sample * 0.1;
+}
+setInterval(tick, 50);
+
+loadLongTrend();
+render();
+fetchUsage();
+restartPollTimer();
+fetchWeather();
+STATE.weatherTimer = setInterval(fetchWeather, 600000);
+fetchBtc();
+STATE.btcTimer = setInterval(fetchBtc, 5000);
+</script>
+</body>
+</html>
