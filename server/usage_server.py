@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,7 +40,11 @@ STATE = {
     "lock": threading.Lock(),
 }
 
-LIMITS_INTERVAL_SEC = 60
+LIMITS_INTERVAL_SEC = 120
+# The OAuth endpoint rate-limits aggressive polling; after a 429, back off
+# hard — the last-good snapshot plus per-request resets_in_sec keeps the
+# board's display fresh in the meantime.
+LIMITS_429_BACKOFF_SEC = 600
 OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 # BTC + Bangkok weather are fetched by the Mac (which has ample RAM + a TLS
@@ -99,7 +104,10 @@ def fetch_limits():
         doc = json.loads(resp.read())
     session = doc.get("five_hour") or {}
     week = doc.get("seven_day") or {}
-    if session.get("utilization") is None or week.get("utilization") is None:
+    # resets_at can be null right after a window resets — treat that like a
+    # missing snapshot (keep last-good) rather than crashing on .replace().
+    if (session.get("utilization") is None or week.get("utilization") is None
+            or not session.get("resets_at") or not week.get("resets_at")):
         return None
     now = datetime.now().astimezone()
     week_reset = datetime.fromisoformat(week["resets_at"].replace("Z", "+00:00")).astimezone()
@@ -121,6 +129,7 @@ def fetch_limits():
 
 def limits_loop():
     while True:
+        sleep_sec = LIMITS_INTERVAL_SEC
         try:
             limits = fetch_limits()
             if limits:
@@ -128,7 +137,13 @@ def limits_loop():
         except Exception as e:
             # keep the last good snapshot; report shows it as-is
             print(f"limits_loop: {type(e).__name__}: {e}", file=sys.stderr)
-        time.sleep(LIMITS_INTERVAL_SEC)
+            if isinstance(e, urllib.error.HTTPError) and e.code == 429:
+                try:
+                    retry_after = int(e.headers.get("Retry-After") or 0)
+                except ValueError:
+                    retry_after = 0
+                sleep_sec = max(LIMITS_429_BACKOFF_SEC, retry_after)
+        time.sleep(sleep_sec)
 
 
 def fetch_btc():

@@ -174,17 +174,24 @@ reliable. Do not flash at the default speed.
 - **Self-healing for "set up once and leave":** `WiFi.setAutoReconnect(true)`,
   non-blocking reconnect in `networkTask` (core 0), and an `ESP.restart()`
   after ~15 min (`RESTART_AFTER_CYCLES`) of no WiFi.
-- **Offline = a bare centered grey "OFFLINE"** (`drawOfflineScreen`), not a
-  dimmed dashboard. `render()` short-circuits to it whenever `connected` is
-  false; it auto-recovers on the next successful 20s poll.
+- **Offline = the cat GIFs + an "OFFLINE" banner**, not a dimmed dashboard.
+  `loop()` computes `catMode = (currentPage == GIF_PAGE) || offline`, so cats
+  play on *any* page whenever offline, and `gifTick(offline)` overlays
+  `drawOfflineBanner()` (textSize 5, top-center) on top of the frame. `STATE.haveData`
+  is otherwise sticky-true once any fetch or SD cache load succeeds, so
+  `fetchFailCycles`/`OFFLINE_AFTER_CYCLES` (~1 min of consecutive failed polls,
+  WiFi down or WiFi up but the Mac unreachable) is what forces it back to
+  false — without that, a real outage would just freeze the last-known
+  dashboard forever instead of ever showing offline.
 - Token fields are `int64_t` (weekly totals exceed the 32-bit `long` range).
 - **Page 6 = cat GIF player.** `gifTick()` (called from `loop()` on core 1)
   decodes at most one frame per pass via AnimatedGIF and paces itself with
   `gifNextFrameMs`, so touch stays responsive; when a GIF ends it opens another
   at random from `catFiles[]` (scanned once at boot by `scanCats()`) — endless.
-  `render()` early-returns for `GIF_PAGE`, and `loop()` skips the footer/progress
-  line on it, so the GIF owns the whole screen and plays even while OFFLINE.
-  This is the one deliberate break from the firmware/simulator parity rule.
+  `render()` early-returns for `GIF_PAGE`; `loop()` skips the footer/progress
+  line whenever `catMode` is active (page 6, or offline on any page) so the
+  cats own the whole screen. This is the one deliberate break from the
+  firmware/simulator parity rule.
 - **`sdMutex` — the second lock.** Page 6 is the only code that reads the SD
   card from the render core (core 1); all other SD I/O is on `networkTask`
   (core 0). `sdMutex` (via `lockSD`/`unlockSD`) serializes the HSPI/SD bus

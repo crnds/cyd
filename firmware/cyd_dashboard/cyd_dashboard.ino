@@ -238,6 +238,14 @@ bool mdnsStarted = false;
 int wifiDownCycles = 0;
 const int RESTART_AFTER_CYCLES = 45;  // ~15 min of no WiFi -> self-reboot
 
+// Consecutive failed polls (WiFi down OR WiFi up but the Mac unreachable)
+// before STATE.haveData is forced back to false, switching the display to the
+// cat-GIF/OFFLINE screen. STATE.haveData is otherwise sticky-true once any
+// fetch (or SD cache load) succeeds, so this is what makes a real outage
+// actually visible instead of just freezing the last-known dashboard forever.
+int fetchFailCycles = 0;
+const int OFFLINE_AFTER_CYCLES = 3;  // ~1 min at the default 20s poll interval
+
 // Runtime overrides for the compiled config.h defaults, loaded from an
 // optional /config.json on the SD card (see loadRuntimeConfig()) so WiFi
 // creds or the Mac's host/port can change without reflashing.
@@ -805,6 +813,27 @@ void drawFooter() {
     g->fillCircle(DOT_START_X + i * DOT_SPACING, 230, 3, c);
   }
 
+  uint32_t flashUsed, flashTotal, ramUsed;
+  int romPct = flashPercent(flashUsed, flashTotal);
+  int ramPct = staticRamPercent(ramUsed);
+  int cpuInt = (int)(cpuPercentAvg + 0.5f);
+  
+  g->setTextSize(1);
+  g->setCursor(30, 226);
+  
+  g->setTextColor(COL_TEXT2);
+  g->print("CPU ");
+  g->setTextColor(COL_TEXT);
+  g->print(String(cpuInt) + "%");
+  g->setTextColor(COL_TEXT2);
+  g->print("  ROM ");
+  g->setTextColor(COL_TEXT);
+  g->print(String(romPct) + "%");
+  g->setTextColor(COL_TEXT2);
+  g->print("  RAM ");
+  g->setTextColor(COL_TEXT);
+  g->print(String(ramPct) + "%");
+
   // Minimal 1px line along the bottom edge, filling left-to-right as the
   // next poll approaches (full width = fetch imminent).
   uint32_t elapsed = millis() - lastPollMs;
@@ -983,12 +1012,11 @@ void drawMiniBar(int x, int y, int w, int percent, uint16_t color) {
   }
 }
 
-// Uppercase section label with a 3px accent tick on its left.
+// Uppercase section label.
 void drawCardLabel(int x, int y, const char* label) {
-  g->fillRect(x, y, 3, 8, COL_ACCENT);
   g->setTextColor(COL_TEXT2);
   g->setTextSize(1);
-  g->setCursor(x + 7, y);
+  g->setCursor(x, y);
   g->print(label);
 }
 
@@ -1078,7 +1106,7 @@ void drawStatusPage() {
     g->print("--.--");
   }
 
-  g->setTextColor(COL_TEXT);
+  g->setTextColor(COL_TEXT2);
   g->setTextSize(2);
   g->setCursor(174, 66);
   if (haveTime) {
@@ -1106,8 +1134,7 @@ void drawStatusPage() {
 
   drawCardLabel(174, 169, "BTC/USDT");
 
-  // Orange for the Bitcoin figure, per the shared color semantics.
-  g->setTextColor(COL_ACCENT);
+  g->setTextColor(COL_TEXT);
   g->setTextSize(3);
   g->setCursor(174, 182);
   g->print(fmtBtc(STATE.btcPrice));
@@ -1120,8 +1147,8 @@ void drawLongTrendPage() {
   g->print("30-Day Trend");
 
   if (!STATE.sdOk) {
-    // Same tone as drawOfflineScreen: a bare centered grey message, since
-    // this page has nothing to show without the card.
+    // A bare centered grey message, since this page has nothing to show
+    // without the card.
     g->setTextColor(COL_TEXT2);
     g->setTextSize(2);
     g->setCursor(52, 110);  // centered: "SD CARD NOT FOUND" is 17 chars * 12px = 204px
@@ -1208,11 +1235,14 @@ void drawDevicePage() {
                      sdColor);
 }
 
-void drawOfflineScreen() {
-  g->fillScreen(COL_BG);
-  g->setTextColor(COL_TEXT2);
-  g->setTextSize(4);
-  g->setCursor(76, 104);  // centered: "OFFLINE" is 7 chars * 24px = 168px
+// "OFFLINE" banner overlaid on top of whatever page 6 is already showing (a
+// playing cat GIF, or the no-cats placeholder) — a solid bar behind the text
+// keeps it legible over a busy GIF frame. Drawn last, right before presentFrame().
+void drawOfflineBanner() {
+  g->fillRect(0, 0, 320, 44, COL_BG);
+  g->setTextColor(COL_TEXT);
+  g->setTextSize(5);
+  g->setCursor(55, 6);  // centered: "OFFLINE" is 7 chars * 30px = 210px; (320-210)/2 = 55
   g->print("OFFLINE");
 }
 
@@ -1321,21 +1351,25 @@ void scanCats() {
 }
 
 // A centered message when there are no cats to show (no SD, or empty /cats/).
-// Drawn once per page visit (gifPlaceholderDrawn) so it doesn't flicker.
-void drawGifPlaceholder() {
-  if (gifPlaceholderDrawn) return;
-  gifPlaceholderDrawn = true;
-  g->fillScreen(COL_BG);
-  g->setTextColor(COL_ACCENT);
-  g->setTextSize(3);
-  g->setCursor(124, 92);  // "CATS" = 4 chars * 18px = 72; (320-72)/2 = 124
-  g->print("CATS");
-  g->setTextColor(COL_TEXT2);
-  g->setTextSize(1);
-  const char* msg = STATE.sdOk ? "no GIFs found in /cats/ on the SD card"
-                               : "insert an SD card with /cats/ GIFs";
-  g->setCursor((320 - (int)strlen(msg) * 6) / 2, 132);
-  g->print(msg);
+// Drawn once per page visit (gifPlaceholderDrawn) so it doesn't flicker; the
+// OFFLINE banner is re-applied on top every call since offline state can
+// change independently of the placeholder's draw-once guard.
+void drawGifPlaceholder(bool offline) {
+  if (!gifPlaceholderDrawn) {
+    gifPlaceholderDrawn = true;
+    g->fillScreen(COL_BG);
+    g->setTextColor(COL_ACCENT);
+    g->setTextSize(3);
+    g->setCursor(124, 92);  // "CATS" = 4 chars * 18px = 72; (320-72)/2 = 124
+    g->print("CATS");
+    g->setTextColor(COL_TEXT2);
+    g->setTextSize(1);
+    const char* msg = STATE.sdOk ? "no GIFs found in /cats/ on the SD card"
+                                 : "insert an SD card with /cats/ GIFs";
+    g->setCursor((320 - (int)strlen(msg) * 6) / 2, 132);
+    g->print(msg);
+  }
+  if (offline) drawOfflineBanner();
   presentFrame();
 }
 
@@ -1358,15 +1392,17 @@ bool openRandomCat() {
   return true;
 }
 
-// Called from loop() on core 1 while page 6 is showing. Decodes at most one
-// frame per call (pacing itself via gifNextFrameMs) so touch stays responsive;
-// when a GIF ends it immediately opens another at random — endless cats.
-void gifTick() {
-  if (!STATE.sdOk || catCount == 0 || !gif) { drawGifPlaceholder(); return; }
+// Called from loop() on core 1 while page 6 is showing, OR while offline on any
+// page (cats double as the offline screen — see catMode in loop()). Decodes at
+// most one frame per call (pacing itself via gifNextFrameMs) so touch stays
+// responsive; when a GIF ends it immediately opens another at random — endless
+// cats. `offline` overlays the OFFLINE banner on top of the cat frame.
+void gifTick(bool offline) {
+  if (!STATE.sdOk || catCount == 0 || !gif) { drawGifPlaceholder(offline); return; }
   uint32_t now = millis();
   if (gifOpen && now < gifNextFrameMs) return;  // not time for the next frame yet
   if (!gifOpen && !openRandomCat()) {
-    drawGifPlaceholder();
+    drawGifPlaceholder(offline);
     gifNextFrameMs = now + 1000;  // retry opening later
     return;
   }
@@ -1374,6 +1410,7 @@ void gifTick() {
   lockSD();
   int more = gif->playFrame(false, &delayMs);  // bSync=false: we handle timing ourselves
   unlockSD();
+  if (offline) drawOfflineBanner();
   presentFrame();
   if (more == 0) {                 // last frame drawn — rotate to a new random cat
     lockSD(); gif->close(); unlockSD();
@@ -1385,27 +1422,24 @@ void gifTick() {
 }
 
 void render() {
-  // Page 6 is animated frame-by-frame by gifTick() in loop(), not drawn here —
-  // and it plays regardless of connectivity, so it must bypass the OFFLINE
-  // short-circuit below entirely.
+  // Page 6 is animated frame-by-frame by gifTick() in loop(), not drawn here.
+  // Offline mode is also driven by gifTick() (cats + an OFFLINE banner, see
+  // catMode in loop()), so render() is never called while offline — no
+  // separate offline branch needed here.
   if (currentPage == GIF_PAGE) return;
   // Hold the lock across all STATE reads (draw helpers read String members the
   // network task may reassign), then release before the SPI pushSprite so the
   // task's next brief STATE copy isn't delayed by the display write.
   lockState();
-  if (!STATE.haveData) {
-    drawOfflineScreen();
-  } else {
-    g->fillScreen(COL_BG);
-    switch (currentPage) {
-      case 0: drawStatusPage(); break;
-      case 1: drawProjectsPage(); break;  // projects (7d) + 7-day trend combined
-      case 2: drawHomePage(); break;
-      case 3: drawDevicePage(); break;
-      case 4: drawLongTrendPage(); break;
-    }
-    drawFooter();
+  g->fillScreen(COL_BG);
+  switch (currentPage) {
+    case 0: drawStatusPage(); break;
+    case 1: drawProjectsPage(); break;  // projects (7d) + 7-day trend combined
+    case 2: drawHomePage(); break;
+    case 3: drawDevicePage(); break;
+    case 4: drawLongTrendPage(); break;
   }
+  drawFooter();
   unlockState();
   presentFrame();
 }
@@ -1448,11 +1482,6 @@ void networkTask(void* param) {
         int64_t prevTodayTokens = STATE.trend[6];
         unlockState();
         connected = fetchUsage();
-        if (connected) {
-          STATE.haveData = true;
-        } else if (!STATE.haveData && STATE.sdOk) {
-          STATE.haveData = loadCachedUsage();
-        }
         struct tm nowInfo;
         if (connected && getLocalTime(&nowInfo, 0)) {
           appendDailyLogIfNeeded(nowInfo, prevTodayTokens);
@@ -1468,6 +1497,18 @@ void networkTask(void* param) {
           logDiag("restart_wifi_timeout");
           ESP.restart();
         }
+      }
+
+      // A failed poll here covers both WiFi being down and WiFi being up but
+      // the Mac unreachable. haveData is otherwise sticky-true, so this is the
+      // only thing that ever flips the display back to the offline/cat screen.
+      if (connected) {
+        STATE.haveData = true;
+        fetchFailCycles = 0;
+      } else {
+        if (!STATE.haveData && STATE.sdOk) STATE.haveData = loadCachedUsage();
+        if (fetchFailCycles < OFFLINE_AFTER_CYCLES) fetchFailCycles++;
+        if (fetchFailCycles >= OFFLINE_AFTER_CYCLES) STATE.haveData = false;
       }
     }
 
@@ -1548,30 +1589,35 @@ void loop() {
   uint32_t loopStartUs = micros();
   uint32_t now = millis();
 
-  // Page-transition bookkeeping: close the GIF when leaving page 6, and reset
-  // the placeholder/timer when entering it.
-  static int prevPage = -1;
-  if (currentPage != prevPage) {
-    if (prevPage == GIF_PAGE) {
-      // Leaving page 6: close any open GIF and free the decoder's ~24KB so the
+  // Cats own the screen on page 6, AND whenever offline (the cat GIF loop
+  // doubles as the offline screen, with an OFFLINE banner overlaid on top —
+  // see drawOfflineBanner()/gifTick()).
+  bool offline = !STATE.haveData;
+  bool catMode = (currentPage == GIF_PAGE) || offline;
+
+  // catMode-transition bookkeeping: close the GIF on the way out, and reset
+  // the placeholder/timer on the way in.
+  static bool prevCatMode = false;
+  if (catMode != prevCatMode) {
+    if (!catMode) {
+      // Leaving cat mode: close any open GIF and free the decoder's ~24KB so the
       // BTC/weather HTTPS fetches on core 0 have heap for their TLS handshakes.
       if (gif && gifOpen) { lockSD(); gif->close(); unlockSD(); }
       gifOpen = false;
       delete gif;
       gif = nullptr;
-    }
-    if (currentPage == GIF_PAGE) {
+    } else {
       if (!gif) gif = new AnimatedGIF();  // allocate the decoder only while it's needed
       gifPlaceholderDrawn = false;
       gifNextFrameMs = 0;
     }
-    prevPage = currentPage;
+    prevCatMode = catMode;
   }
 
-  if (currentPage == GIF_PAGE) {
-    // Page 6 animates itself frame-by-frame; it owns the whole screen (no footer
-    // or poll-progress line) and needs no 1s repaint.
-    gifTick();
+  if (catMode) {
+    // Cats animate frame-by-frame; they own the whole screen (no footer or
+    // poll-progress line) and need no 1s repaint.
+    gifTick(offline);
   } else {
     // Repaint once a second for the pulsing status dot, the local session
     // countdown, and the Bangkok clock's ticking seconds. Fetches run on core 0,
@@ -1609,7 +1655,7 @@ void loop() {
   if (touchDown && !touchWasDown && now - lastTouchMs > TOUCH_DEBOUNCE_MS) {
     lastTouchMs = now;
     currentPage = (currentPage + 1) % PAGE_COUNT;
-    render();
+    if (!catMode) render();  // catMode: gifTick() already redraws every pass
     flashTouchBorder();  // one-frame white edge flash on the new page: touch registered
   }
   touchWasDown = touchDown;

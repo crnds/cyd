@@ -223,6 +223,9 @@ pre {
 const POLL_DEFAULT_MS = 20000;
 const PAGE_COUNT = 6;
 const GIF_PAGE = 5;  // 6th page: random cat GIFs on the device (stand-in here — see drawGifPage)
+// Consecutive failed polls before haveData is forced back to false, mirroring
+// the firmware's fetchFailCycles/OFFLINE_AFTER_CYCLES.
+const OFFLINE_AFTER_CYCLES = 3;
 const LONG_TREND_DAYS = 30;
 const DAILY_LOG_KEY = 'cyddashboard_v1_dailylog';
 const LAST_USAGE_KEY = 'cyddashboard_v1_lastusage';
@@ -281,6 +284,7 @@ const STATE = {
   currentPage: 0,
   wifiOk: false,
   connected: false,     // did the most recent fetch reach the server?
+  fetchFailCycles: 0,   // consecutive failed polls; mirrors the firmware's counter
   pollTimer: null,
   weatherTimer: null,
   btcTimer: null,
@@ -390,6 +394,26 @@ function drawFooter() {
     const c = (i === STATE.currentPage) ? COL_ACCENT : COL_BORDER;
     gfx.fillCircle(DOT_START_X + i * DOT_SPACING, 230, 3, c);
   }
+
+  const romPct = Math.round(FLASH_USED_BYTES / FLASH_TOTAL_BYTES * 100);
+  const ramPct = Math.round(STATIC_RAM_BYTES / TOTAL_RAM_BYTES * 100);
+  const cpuPct = Math.round(STATE.cpuPercentAvg);
+  
+  gfx.setTextSize(1);
+  gfx.setCursor(30, 226);
+  
+  gfx.setTextColor(COL_TEXT2);
+  gfx.print('CPU ');
+  gfx.setTextColor(COL_TEXT);
+  gfx.print(cpuPct + '%');
+  gfx.setTextColor(COL_TEXT2);
+  gfx.print('  ROM ');
+  gfx.setTextColor(COL_TEXT);
+  gfx.print(romPct + '%');
+  gfx.setTextColor(COL_TEXT2);
+  gfx.print('  RAM ');
+  gfx.setTextColor(COL_TEXT);
+  gfx.print(ramPct + '%');
 
   // Minimal 1px line along the bottom edge, filling left-to-right as the
   // next poll approaches (full width = fetch imminent).
@@ -561,12 +585,11 @@ function drawMiniBar(x, y, w, percent, color) {
   }
 }
 
-// Uppercase section label with a 3px accent tick on its left.
+// Uppercase section label.
 function drawCardLabel(x, y, label) {
-  gfx.fillRect(x, y, 3, 8, COL_ACCENT);
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(1);
-  gfx.setCursor(x + 7, y);
+  gfx.setCursor(x, y);
   gfx.print(label);
 }
 
@@ -651,7 +674,7 @@ function drawStatusPage() {
     gfx.print('--.--');
   }
 
-  gfx.setTextColor(COL_TEXT);
+  gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(2);
   gfx.setCursor(174, 66);
   // Year dropped: "Mon 25 Jul 2026" at size2 would overrun the 132px inner
@@ -668,8 +691,7 @@ function drawStatusPage() {
 
   drawCardLabel(174, 169, 'BTC/USDT');
 
-  // Orange for the Bitcoin figure, per the shared color semantics.
-  gfx.setTextColor(COL_ACCENT);
+  gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(3);
   gfx.setCursor(174, 182);
   gfx.print(fmtBtc(STATE.btcPrice));
@@ -768,11 +790,14 @@ function drawDevicePage() {
                      sdColor);
 }
 
-function drawOfflineScreen() {
-  gfx.fillScreen(COL_BG);
-  gfx.setTextColor(COL_TEXT2);
-  gfx.setTextSize(4);
-  gfx.setCursor(76, 104);  // centered: "OFFLINE" is 7 chars * 24px = 168px
+// "OFFLINE" banner overlaid on top of whatever page 6 is already showing —
+// mirrors the firmware's drawOfflineBanner(). A solid bar behind the text
+// keeps it legible over a busy GIF frame on the real device.
+function drawOfflineBanner() {
+  gfx.fillRect(0, 0, 320, 44, COL_BG);
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(5);
+  gfx.setCursor(55, 6);  // centered: "OFFLINE" is 7 chars * 30px = 210px; (320-210)/2 = 55
   gfx.print('OFFLINE');
 }
 
@@ -781,7 +806,9 @@ function drawOfflineScreen() {
 // gifTick()) — which the canvas simulator can't emulate, so it shows the same
 // "CATS" title as the firmware's no-cats placeholder plus a note. This is the
 // one page that is deliberately NOT a pixel-faithful twin of the hardware.
-function drawGifPage() {
+// Cats also double as the offline screen (see render()); `offline` overlays
+// the OFFLINE banner on top, mirroring the firmware's gifTick(offline).
+function drawGifPage(offline) {
   gfx.fillScreen(COL_BG);
   gfx.setTextColor(COL_ACCENT);
   gfx.setTextSize(3);
@@ -795,19 +822,17 @@ function drawGifPage() {
   const note = '(reads /cats/*.gif from the SD card)';
   gfx.setCursor((320 - note.length * 6) / 2, 148);
   gfx.print(note);
+  if (offline) drawOfflineBanner();
 }
 
 function render() {
-  // Page 6 plays regardless of connectivity, so it bypasses the OFFLINE
-  // short-circuit — mirrors the firmware's render() early-return for GIF_PAGE.
-  if (STATE.currentPage === GIF_PAGE) {
-    drawGifPage();
-    document.getElementById('page-status').textContent = 'page 6/6 (cat GIFs)';
-    return;
-  }
-  if (!STATE.haveData) {
-    drawOfflineScreen();
-    document.getElementById('page-status').textContent = 'OFFLINE';
+  // Page 6 plays regardless of connectivity. Offline mode also shows cats
+  // (with an OFFLINE banner on top) instead of a bare offline screen — mirrors
+  // the firmware's catMode in loop().
+  if (STATE.currentPage === GIF_PAGE || !STATE.haveData) {
+    drawGifPage(!STATE.haveData);
+    document.getElementById('page-status').textContent =
+      !STATE.haveData ? 'OFFLINE (cat GIFs)' : 'page 6/6 (cat GIFs)';
     return;
   }
   gfx.fillScreen(COL_BG);
@@ -1009,6 +1034,16 @@ async function fetchWeather() {
   render();
 }
 
+// haveData is otherwise sticky-true once any fetch/cache load succeeds, so
+// this is what makes a simulated outage actually flip the display back to
+// the offline/cat screen after a few consecutive failed polls — mirrors the
+// firmware's fetchFailCycles/OFFLINE_AFTER_CYCLES.
+function markFetchFailed() {
+  if (!STATE.haveData) STATE.haveData = loadCachedUsage();
+  if (STATE.fetchFailCycles < OFFLINE_AFTER_CYCLES) STATE.fetchFailCycles++;
+  if (STATE.fetchFailCycles >= OFFLINE_AFTER_CYCLES) STATE.haveData = false;
+}
+
 async function fetchUsage() {
   STATE.lastPollMs = performance.now();
   const offline = document.getElementById('sim-offline').checked;
@@ -1018,6 +1053,7 @@ async function fetchUsage() {
     applyData(MOCK);
     saveLastUsageCache(MOCK);
     STATE.haveData = true;
+    STATE.fetchFailCycles = 0;
     STATE.wifiOk = true;
     STATE.connected = true;
     setConn(true, 'mock data');
@@ -1028,7 +1064,7 @@ async function fetchUsage() {
   if (offline) {
     STATE.wifiOk = false;
     STATE.connected = false;
-    if (!STATE.haveData) STATE.haveData = loadCachedUsage();
+    markFetchFailed();
     setConn(false, 'simulated offline');
     log('poll skipped: simulated offline', 'err');
     render();
@@ -1045,6 +1081,7 @@ async function fetchUsage() {
     applyData(doc);
     saveLastUsageCache(doc);
     STATE.haveData = true;
+    STATE.fetchFailCycles = 0;
     STATE.wifiOk = true;
     STATE.connected = true;
     setConn(true, 'ok, ' + new Date().toLocaleTimeString());
@@ -1053,7 +1090,7 @@ async function fetchUsage() {
   } catch (err) {
     STATE.wifiOk = false;
     STATE.connected = false;
-    if (!STATE.haveData) STATE.haveData = loadCachedUsage();
+    markFetchFailed();
     setConn(false, err.name === 'AbortError' ? 'timeout (5s)' : err.message);
     log('fetch failed: ' + err.message, 'err');
   } finally {
