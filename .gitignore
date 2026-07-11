@@ -1,6 +1,7 @@
 firmware/cyd_dashboard/config.h
 firmware/cyd_dashboard/build/
 TODO-API.md
+secrets.local.json
 
 # Generated cat GIF library (regenerate with prepare_cat_gifs.py; too big to track)
 cats/

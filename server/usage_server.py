@@ -76,7 +76,7 @@ def fmt_reset_time(iso_ts, with_date):
     # reset line is rendered at a large, readable size. TZ_NAME is exposed
     # separately in the JSON for anyone who wants it.
     dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00")).astimezone()
-    t = dt.strftime("%I:%M%p").lstrip("0").lower()
+    t = dt.strftime("%H:%M")
     return f"{dt.strftime('%b')} {dt.day} at {t}" if with_date else t
 
 
@@ -155,12 +155,65 @@ def fetch_btc():
 
 
 def fetch_weather():
-    with urllib.request.urlopen(WEATHER_URL, timeout=8) as resp:
-        doc = json.loads(resp.read())
-    cur = doc.get("current") or {}
-    if cur.get("temperature_2m") is None:
+    # Load API key from secrets.local.json in the repository root
+    key = None
+    secrets_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "secrets.local.json")
+    if os.path.exists(secrets_path):
+        try:
+            with open(secrets_path, "r") as f:
+                secrets = json.load(f)
+                key = secrets.get("WEATHER_API_KEY")
+        except Exception as e:
+            print(f"Error reading secrets: {e}", file=sys.stderr)
+
+    # Fallback to Open-Meteo if no WeatherAPI key is provided
+    if not key:
+        try:
+            with urllib.request.urlopen(WEATHER_URL, timeout=8) as resp:
+                doc = json.loads(resp.read())
+            cur = doc.get("current") or {}
+            if cur.get("temperature_2m") is None:
+                return None
+            return {"tempC": cur["temperature_2m"], "code": cur.get("weather_code", -1)}
+        except Exception as e:
+            print(f"Open-Meteo fallback failed: {e}", file=sys.stderr)
+            return None
+
+    # Fetch from WeatherAPI
+    url = f"http://api.weatherapi.com/v1/current.json?key={key}&q=Bangkok"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "cydusage"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        
+        cur = data.get("current", {})
+        temp_c = cur.get("temp_c")
+        if temp_c is None:
+            return None
+            
+        cond = cur.get("condition", {})
+        wa_code = cond.get("code", 1000)
+        
+        # Map WeatherAPI condition codes to WMO weather codes expected by the CYD board
+        # Default WMO code 3 (cloudy)
+        wmo_code = 3
+        if wa_code == 1000:
+            wmo_code = 0  # clear
+        elif wa_code == 1003:
+            wmo_code = 1  # mainly clear / partly cloudy
+        elif wa_code in (1006, 1009, 1030, 1135, 1147):
+            wmo_code = 3  # cloudy / overcast / fog
+        elif wa_code in (1063, 1150, 1153, 1180, 1183, 1186, 1189, 1192, 1195, 1198, 1201, 1240, 1243, 1246):
+            wmo_code = 61  # rain
+        elif wa_code in (1066, 1069, 1072, 1114, 1117, 1204, 1207, 1210, 1213, 1216, 1219, 1222, 1225, 1237, 1249, 1252, 1255, 1258, 1261, 1264):
+            wmo_code = 71  # snow
+        elif wa_code in (1087, 1273, 1276, 1279, 1282):
+            wmo_code = 95  # thunderstorm
+            
+        return {"tempC": temp_c, "code": wmo_code}
+    except Exception as e:
+        print(f"WeatherAPI fetch failed: {e}", file=sys.stderr)
         return None
-    return {"tempC": cur["temperature_2m"], "code": cur.get("weather_code", -1)}
 
 
 def market_loop():

@@ -117,7 +117,7 @@ void flashTouchBorder() {
 // boot before the two tasks start, then only read, so no lock is needed.
 uint32_t POLL_INTERVAL_MS = 20000;
 const uint32_t TOUCH_DEBOUNCE_MS = 350;
-const int PAGE_COUNT = 6;
+const int PAGE_COUNT = 7;
 const int GIF_PAGE = 5;  // 6th page (0-indexed): random cat GIFs from /cats/ on SD
 
 // Footer pagination dots: right-aligned so the rightmost dot's edge always
@@ -706,20 +706,27 @@ void loadLongTrendFromSD() {
 // overwrote STATE.trend[6] with the new day's (near-zero) running total.
 void appendDailyLogIfNeeded(const struct tm& nowInfo, int64_t justEndedDayTokens) {
   if (!STATE.sdOk) return;
-  if (nowInfo.tm_yday == STATE.lastLoggedYday) return;  // same day, nothing to do
-
-  if (STATE.lastLoggedYday == -1) {
-    // First poll ever (fresh card, nothing to compare against yet) — just
-    // record today's yday as the baseline; the actual log starts tomorrow.
-    STATE.lastLoggedYday = nowInfo.tm_yday;
-    return;
-  }
 
   struct tm nowCopy = nowInfo;
   time_t nowEpoch = mktime(&nowCopy);
   time_t yesterdayEpoch = nowEpoch - 86400;
   struct tm yesterday;
   localtime_r(&yesterdayEpoch, &yesterday);
+
+  lockState();
+  int lastYday = STATE.lastLoggedYday;
+  unlockState();
+
+  if (yesterday.tm_yday == lastYday) return;  // same day, nothing to do
+
+  if (lastYday == -1) {
+    // First poll ever (fresh card, nothing to compare against yet) — just
+    // record yesterday's yday as the baseline; the actual log starts tomorrow.
+    lockState();
+    STATE.lastLoggedYday = yesterday.tm_yday;
+    unlockState();
+    return;
+  }
 
   char dateBuf[11];
   snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d",
@@ -740,7 +747,7 @@ void appendDailyLogIfNeeded(const struct tm& nowInfo, int64_t justEndedDayTokens
     memmove(longTrend, longTrend + 1, (LONG_TREND_DAYS - 1) * sizeof(int64_t));
     longTrend[LONG_TREND_DAYS - 1] = justEndedDayTokens;
   }
-  STATE.lastLoggedYday = nowInfo.tm_yday;
+  STATE.lastLoggedYday = yesterday.tm_yday;
   unlockState();
 }
 
@@ -1020,19 +1027,9 @@ void drawCardLabel(int x, int y, const char* label) {
   g->print(label);
 }
 
-// Card layout: one tall left card = session/week limits (always accent
-// orange); the right column is three stacked cards = Bangkok clock/date
-// (y=4 h=92), weather (y=100 h=56), BTC (y=160 h=56), 4px gaps. All cards
-// are 152px wide with 10px inner padding (content x=14 / x=174, width 132).
-void drawStatusPage() {
+void drawLimitsCard() {
   g->fillRoundRect(4, 4, 152, 216, 8, COL_SURFACE);
   g->drawRoundRect(4, 4, 152, 216, 8, COL_BORDER);
-  g->fillRoundRect(164, 4, 152, 92, 8, COL_SURFACE);
-  g->drawRoundRect(164, 4, 152, 92, 8, COL_BORDER);
-  g->fillRoundRect(164, 100, 152, 56, 8, COL_SURFACE);
-  g->drawRoundRect(164, 100, 152, 56, 8, COL_BORDER);
-  g->fillRoundRect(164, 160, 152, 56, 8, COL_SURFACE);
-  g->drawRoundRect(164, 160, 152, 56, 8, COL_BORDER);
 
   // ── left card: limits ──
   drawCardLabel(14, 13, "SESSION (5H)");
@@ -1079,6 +1076,27 @@ void drawStatusPage() {
   g->setTextSize(1);
   g->setCursor(14, 206);
   g->print(STATE.weekResets.length() ? "resets " + STATE.weekResets : "resets --");
+}
+
+void drawMixedPageStatic() {
+  // Clear the footer background area to prevent text bloating/overlapping
+  g->fillRect(0, 220, 320, 20, COL_BG);
+  drawLimitsCard();
+  drawFooter();
+}
+
+// Card layout: one tall left card = session/week limits (always accent
+// orange); the right column is three stacked cards = Bangkok clock/date
+// (y=4 h=92), weather (y=100 h=56), BTC (y=160 h=56), 4px gaps. All cards
+// are 152px wide with 10px inner padding (content x=14 / x=174, width 132).
+void drawStatusPage() {
+  drawLimitsCard();
+  g->fillRoundRect(164, 4, 152, 92, 8, COL_SURFACE);
+  g->drawRoundRect(164, 4, 152, 92, 8, COL_BORDER);
+  g->fillRoundRect(164, 100, 152, 56, 8, COL_SURFACE);
+  g->drawRoundRect(164, 100, 152, 56, 8, COL_BORDER);
+  g->fillRoundRect(164, 160, 152, 56, 8, COL_SURFACE);
+  g->drawRoundRect(164, 160, 152, 56, 8, COL_BORDER);
 
   // ── right cards: Bangkok clock/date, weather, BTC price ──
   struct tm timeinfo;
@@ -1286,6 +1304,12 @@ void GIFDraw(GIFDRAW* pDraw) {
   int iWidth = pDraw->iWidth;
   if (iWidth > 320) iWidth = 320;
   int y = gifYOffset + pDraw->iY + pDraw->y;
+  
+  bool offline = !STATE.haveData;
+  bool mixedMode = (currentPage == 6 && !offline);
+  int max_y = mixedMode ? 220 : 240;
+  if (y < 0 || y >= max_y) return;
+
   uint8_t* s = pDraw->pPixels;
 
   if (pDraw->ucDisposalMethod == 2) {  // restore-to-background: paint transparent as bg
@@ -1308,7 +1332,20 @@ void GIFDraw(GIFDRAW* pDraw) {
         else { *d++ = usPalette[c]; iCount++; }
       }
       if (iCount) {
-        g->pushImage(gifXOffset + pDraw->iX + x, y, iCount, 1, usTemp);
+        int startX = gifXOffset + pDraw->iX + x;
+        int endX = startX + iCount;
+        int clipStart = startX;
+        int clipEnd = endX;
+        if (mixedMode) {
+          if (clipStart < 160) clipStart = 160;
+          if (clipEnd > 320) clipEnd = 320;
+        } else {
+          if (clipStart < 0) clipStart = 0;
+          if (clipEnd > 320) clipEnd = 320;
+        }
+        if (clipStart < clipEnd) {
+          g->pushImage(clipStart, y, clipEnd - clipStart, 1, usTemp + (clipStart - startX));
+        }
         x += iCount;
         iCount = 0;
       }
@@ -1322,7 +1359,20 @@ void GIFDraw(GIFDRAW* pDraw) {
     }
   } else {
     for (int x = 0; x < iWidth; x++) usTemp[x] = usPalette[*s++];
-    g->pushImage(gifXOffset + pDraw->iX, y, iWidth, 1, usTemp);
+    int startX = gifXOffset + pDraw->iX;
+    int endX = startX + iWidth;
+    int clipStart = startX;
+    int clipEnd = endX;
+    if (mixedMode) {
+      if (clipStart < 160) clipStart = 160;
+      if (clipEnd > 320) clipEnd = 320;
+    } else {
+      if (clipStart < 0) clipStart = 0;
+      if (clipEnd > 320) clipEnd = 320;
+    }
+    if (clipStart < clipEnd) {
+      g->pushImage(clipStart, y, clipEnd - clipStart, 1, usTemp + (clipStart - startX));
+    }
   }
 }
 
@@ -1355,19 +1405,33 @@ void scanCats() {
 // OFFLINE banner is re-applied on top every call since offline state can
 // change independently of the placeholder's draw-once guard.
 void drawGifPlaceholder(bool offline) {
+  bool mixedMode = (currentPage == 6 && !offline);
   if (!gifPlaceholderDrawn) {
     gifPlaceholderDrawn = true;
-    g->fillScreen(COL_BG);
-    g->setTextColor(COL_ACCENT);
-    g->setTextSize(3);
-    g->setCursor(124, 92);  // "CATS" = 4 chars * 18px = 72; (320-72)/2 = 124
-    g->print("CATS");
-    g->setTextColor(COL_TEXT2);
-    g->setTextSize(1);
-    const char* msg = STATE.sdOk ? "no GIFs found in /cats/ on the SD card"
-                                 : "insert an SD card with /cats/ GIFs";
-    g->setCursor((320 - (int)strlen(msg) * 6) / 2, 132);
-    g->print(msg);
+    if (mixedMode) {
+      g->fillRect(160, 0, 160, 240, COL_BG);
+      g->setTextColor(COL_ACCENT);
+      g->setTextSize(2);
+      g->setCursor(216, 92);
+      g->print("CATS");
+      g->setTextColor(COL_TEXT2);
+      g->setTextSize(1);
+      const char* msg = "no GIFs";
+      g->setCursor(160 + (160 - (int)strlen(msg) * 6) / 2, 120);
+      g->print(msg);
+    } else {
+      g->fillScreen(COL_BG);
+      g->setTextColor(COL_ACCENT);
+      g->setTextSize(3);
+      g->setCursor(124, 92);  // "CATS" = 4 chars * 18px = 72; (320-72)/2 = 124
+      g->print("CATS");
+      g->setTextColor(COL_TEXT2);
+      g->setTextSize(1);
+      const char* msg = STATE.sdOk ? "no GIFs found in /cats/ on the SD card"
+                                   : "insert an SD card with /cats/ GIFs";
+      g->setCursor((320 - (int)strlen(msg) * 6) / 2, 132);
+      g->print(msg);
+    }
   }
   if (offline) drawOfflineBanner();
   presentFrame();
@@ -1385,9 +1449,16 @@ bool openRandomCat() {
   unlockSD();
   if (!ok) return false;
   int w = gif->getCanvasWidth(), h = gif->getCanvasHeight();
-  gifXOffset = w < 320 ? (320 - w) / 2 : 0;
-  gifYOffset = h < 240 ? (240 - h) / 2 : 0;
-  g->fillScreen(0x0000);  // clear the sprite; first frame's lines land on top, then present
+  bool offline = !STATE.haveData;
+  if (currentPage == 6 && !offline) {
+    gifXOffset = 160 + (160 - w) / 2;
+    gifYOffset = (220 - h) / 2;
+    g->fillRect(160, 0, 160, 240, 0x0000); // clear only the right side
+  } else {
+    gifXOffset = w < 320 ? (320 - w) / 2 : 0;
+    gifYOffset = h < 240 ? (240 - h) / 2 : 0;
+    g->fillScreen(0x0000);  // clear the sprite; first frame's lines land on top, then present
+  }
   gifOpen = true;
   return true;
 }
@@ -1426,7 +1497,7 @@ void render() {
   // Offline mode is also driven by gifTick() (cats + an OFFLINE banner, see
   // catMode in loop()), so render() is never called while offline — no
   // separate offline branch needed here.
-  if (currentPage == GIF_PAGE) return;
+  if (currentPage == GIF_PAGE || currentPage == 6) return;
   // Hold the lock across all STATE reads (draw helpers read String members the
   // network task may reassign), then release before the SPI pushSprite so the
   // task's next brief STATE copy isn't delayed by the display write.
@@ -1593,7 +1664,7 @@ void loop() {
   // doubles as the offline screen, with an OFFLINE banner overlaid on top —
   // see drawOfflineBanner()/gifTick()).
   bool offline = !STATE.haveData;
-  bool catMode = (currentPage == GIF_PAGE) || offline;
+  bool catMode = (currentPage == GIF_PAGE) || (currentPage == 6) || offline;
 
   // catMode-transition bookkeeping: close the GIF on the way out, and reset
   // the placeholder/timer on the way in.
@@ -1618,6 +1689,16 @@ void loop() {
     // Cats animate frame-by-frame; they own the whole screen (no footer or
     // poll-progress line) and need no 1s repaint.
     gifTick(offline);
+    if (currentPage == 6 && !offline) {
+      static uint32_t lastMixedRenderMs = 0;
+      if (now - lastMixedRenderMs >= 1000) {
+        lastMixedRenderMs = now;
+        lockState();
+        drawMixedPageStatic();
+        unlockState();
+        presentFrame();
+      }
+    }
   } else {
     // Repaint once a second for the pulsing status dot, the local session
     // countdown, and the Bangkok clock's ticking seconds. Fetches run on core 0,
@@ -1655,6 +1736,24 @@ void loop() {
   if (touchDown && !touchWasDown && now - lastTouchMs > TOUCH_DEBOUNCE_MS) {
     lastTouchMs = now;
     currentPage = (currentPage + 1) % PAGE_COUNT;
+    
+    // Handle initialization when entering a page
+    if (currentPage == 6 && !offline) {
+      lockState();
+      g->fillScreen(COL_BG);
+      drawMixedPageStatic();
+      unlockState();
+      presentFrame();
+      
+      if (gifOpen) { lockSD(); gif->close(); unlockSD(); }
+      gifOpen = false;
+      gifNextFrameMs = 0;
+    } else if (currentPage == GIF_PAGE) {
+      if (gifOpen) { lockSD(); gif->close(); unlockSD(); }
+      gifOpen = false;
+      gifNextFrameMs = 0;
+    }
+    
     if (!catMode) render();  // catMode: gifTick() already redraws every pass
     flashTouchBorder();  // one-frame white edge flash on the new page: touch registered
   }

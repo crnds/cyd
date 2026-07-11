@@ -221,7 +221,7 @@ pre {
 <script>
 // ── CONSTANTS (mirroring cyd_dashboard.ino) ───────────────
 const POLL_DEFAULT_MS = 20000;
-const PAGE_COUNT = 6;
+const PAGE_COUNT = 7;
 const GIF_PAGE = 5;  // 6th page: random cat GIFs on the device (stand-in here — see drawGifPage)
 // Consecutive failed polls before haveData is forced back to false, mirroring
 // the firmware's fetchFailCycles/OFFLINE_AFTER_CYCLES.
@@ -597,15 +597,9 @@ function drawCardLabel(x, y, label) {
 // orange); the right column is three stacked cards = Bangkok clock/date
 // (y=4 h=92), weather (y=100 h=56), BTC (y=160 h=56), 4px gaps. All cards
 // are 152px wide with 10px inner padding (content x=14 / x=174, width 132).
-function drawStatusPage() {
+function drawLimitsCard() {
   gfx.fillRoundRect(4, 4, 152, 216, 8, COL_SURFACE);
   gfx.drawRoundRect(4, 4, 152, 216, 8, COL_BORDER);
-  gfx.fillRoundRect(164, 4, 152, 92, 8, COL_SURFACE);
-  gfx.drawRoundRect(164, 4, 152, 92, 8, COL_BORDER);
-  gfx.fillRoundRect(164, 100, 152, 56, 8, COL_SURFACE);
-  gfx.drawRoundRect(164, 100, 152, 56, 8, COL_BORDER);
-  gfx.fillRoundRect(164, 160, 152, 56, 8, COL_SURFACE);
-  gfx.drawRoundRect(164, 160, 152, 56, 8, COL_BORDER);
 
   // ── left card: limits ──
   drawCardLabel(14, 13, 'SESSION (5H)');
@@ -652,6 +646,16 @@ function drawStatusPage() {
   gfx.setTextSize(1);
   gfx.setCursor(14, 206);
   gfx.print(STATE.weekResets ? 'resets ' + STATE.weekResets : 'resets --');
+}
+
+function drawStatusPage() {
+  drawLimitsCard();
+  gfx.fillRoundRect(164, 4, 152, 92, 8, COL_SURFACE);
+  gfx.drawRoundRect(164, 4, 152, 92, 8, COL_BORDER);
+  gfx.fillRoundRect(164, 100, 152, 56, 8, COL_SURFACE);
+  gfx.drawRoundRect(164, 100, 152, 56, 8, COL_BORDER);
+  gfx.fillRoundRect(164, 160, 152, 56, 8, COL_SURFACE);
+  gfx.drawRoundRect(164, 160, 152, 56, 8, COL_BORDER);
 
   // ── right cards: Bangkok clock/date, weather, BTC price ──
   const bkk = bangkokParts();
@@ -825,14 +829,50 @@ function drawGifPage(offline) {
   if (offline) drawOfflineBanner();
 }
 
+function drawMixedPage(offline) {
+  gfx.fillScreen(COL_BG);
+  drawLimitsCard();
+  drawFooter();
+
+  if (offline) {
+    drawOfflineBanner();
+    return;
+  }
+
+  // Draw right side GIF placeholder box
+  gfx.drawRoundRect(164, 4, 152, 216, 8, COL_BORDER);
+  gfx.setTextColor(COL_ACCENT);
+  gfx.setTextSize(2);
+  gfx.setCursor(216, 92);
+  gfx.print('CATS');
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(1);
+  const msg = 'cat GIFs loop';
+  gfx.setCursor(164 + (152 - msg.length * 6) / 2, 120);
+  gfx.print(msg);
+  const note = 'here on device';
+  gfx.setCursor(164 + (152 - note.length * 6) / 2, 136);
+  gfx.print(note);
+}
+
 function render() {
-  // Page 6 plays regardless of connectivity. Offline mode also shows cats
-  // (with an OFFLINE banner on top) instead of a bare offline screen — mirrors
+  // Offline mode also shows cats (with an OFFLINE banner on top) instead of a bare offline screen — mirrors
   // the firmware's catMode in loop().
-  if (STATE.currentPage === GIF_PAGE || !STATE.haveData) {
-    drawGifPage(!STATE.haveData);
+  if (!STATE.haveData) {
+    drawGifPage(true);
+    document.getElementById('page-status').textContent = 'OFFLINE (cat GIFs)';
+    return;
+  }
+  if (STATE.currentPage === GIF_PAGE) {
+    drawGifPage(false);
     document.getElementById('page-status').textContent =
-      !STATE.haveData ? 'OFFLINE (cat GIFs)' : 'page 6/6 (cat GIFs)';
+      'page 6/' + PAGE_COUNT + ' (cat GIFs)';
+    return;
+  }
+  if (STATE.currentPage === 6) {
+    drawMixedPage(false);
+    document.getElementById('page-status').textContent =
+      'page 7/' + PAGE_COUNT + ' (status + cats)';
     return;
   }
   gfx.fillScreen(COL_BG);
@@ -865,8 +905,8 @@ const MOCK = {
   trend: [118891173, 158279627, 0, 0, 55363947, 17326402, 2573012],
   limits: {
     tz: 'Asia/Bangkok',
-    session: { percent: 27, resets: '3:19am', resets_in_sec: 5400 },
-    week: { percent: 86, resets: 'Jul 9 at 4:59am' },
+    session: { percent: 27, resets: '03:19', resets_in_sec: 5400 },
+    week: { percent: 86, resets: 'Jul 9 at 04:59' },
   },
   btc: { price: 109432 },
   weather: { tempC: 34, code: 3 },
@@ -894,20 +934,21 @@ function loadLongTrend() {
 // finished on, captured by the caller before applyData() overwrote
 // STATE.trend with the new day's running total.
 function appendDailyLogIfNeeded(todayDateStr, justEndedDayTokens) {
-  if (todayDateStr === STATE.lastLoggedDate) return;  // same day, nothing to do
-  if (STATE.lastLoggedDate === null && !STATE.longTrend.length) {
-    // First poll ever (fresh log) — just record today's date as the
-    // baseline; the actual log starts tomorrow.
-    STATE.lastLoggedDate = todayDateStr;
-    return;
-  }
   const y = new Date(todayDateStr + 'T00:00:00');
   y.setDate(y.getDate() - 1);
   const yesterdayDateStr = y.toISOString().slice(0, 10);
 
+  if (yesterdayDateStr === STATE.lastLoggedDate) return;  // same day, nothing to do
+  if (STATE.lastLoggedDate === null && !STATE.longTrend.length) {
+    // First poll ever (fresh log) — just record yesterday's date as the
+    // baseline; the actual log starts tomorrow.
+    STATE.lastLoggedDate = yesterdayDateStr;
+    return;
+  }
+
   STATE.longTrend.push({ date: yesterdayDateStr, tokens: justEndedDayTokens });
   if (STATE.longTrend.length > LONG_TREND_DAYS) STATE.longTrend.shift();
-  STATE.lastLoggedDate = todayDateStr;
+  STATE.lastLoggedDate = yesterdayDateStr;
   localStorage.setItem(DAILY_LOG_KEY, JSON.stringify(STATE.longTrend));
 }
 
@@ -1124,7 +1165,7 @@ function restartPollTimer() {
 // ── AUDIO (mirroring the firmware's page-change solfege beeps) ────
 // Do Re Mi Fa Sol La (C5..A5) for pages 1..6, ~70ms each. A square wave at
 // low gain approximates the board's low-duty LEDC output through its amp.
-const TONE_FREQS = [523, 587, 659, 698, 784, 880];
+const TONE_FREQS = [523, 587, 659, 698, 784, 880, 988];
 const TONE_DURATION_MS = 70;
 let audioCtx = null;
 function playPageTone(page) {
