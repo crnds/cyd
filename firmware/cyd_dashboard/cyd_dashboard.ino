@@ -38,6 +38,7 @@ public:
       cfg.pin_mosi = CYD_TFT_MOSI;
       cfg.pin_miso = CYD_TFT_MISO;
       cfg.pin_dc = CYD_TFT_DC;
+      cfg.dma_channel = SPI_DMA_CH_AUTO;
       _bus_instance.config(cfg);
       _panel_instance.setBus(&_bus_instance);
     }
@@ -93,9 +94,7 @@ SPIClass sdSPI(HSPI);
 LGFX_Sprite frame(&gfx);
 lgfx::LovyanGFX* g = &gfx;
 
-void presentFrame() {
-  if (g == &frame) frame.pushSprite(0, 0);
-}
+void presentFrame(bool fullScreen = true);
 
 // Touch feedback: flash a 5px white border on all four edges for one frame,
 // straight to the panel over the already-pushed frame, then re-push the clean
@@ -174,8 +173,70 @@ int64_t longTrend[LONG_TREND_DAYS];
 int longTrendCount = 0;  // valid entries, oldest at [0]; may be < LONG_TREND_DAYS early on
 
 int currentPage = 0;
+bool mixedPageDirty = false;
 uint32_t lastPollMs = 0;
 uint32_t lastTouchMs = 0;
+int gifMinY = 220;
+int gifMaxY = -1;
+bool gifFirstFrame = false;
+
+void presentFrame(bool fullScreen) {
+  if (g == &frame) {
+    bool offline = !STATE.haveData;
+    if (currentPage == 6 && !offline) {
+      gfx.startWrite();
+      if (frame.getColorDepth() == 16) {
+        uint16_t* buf = (uint16_t*)frame.getBuffer();
+        if (fullScreen) {
+          // Push left half (0-159, height 240) + right footer (160-319, rows 220-239)
+          for (int y = 0; y < 240; y++) {
+            gfx.pushImage(0, y, 160, 1, buf + y * 320);
+          }
+          for (int y = 220; y < 240; y++) {
+            gfx.pushImage(160, y, 160, 1, buf + y * 320 + 160);
+          }
+        } else {
+          // Push only the dirty band of the right half (160-319) where the GIF is drawn
+          if (gifMinY <= gifMaxY) {
+            int startY = gifMinY < 0 ? 0 : gifMinY;
+            int endY = gifMaxY >= 220 ? 219 : gifMaxY;
+            for (int y = startY; y <= endY; y++) {
+              gfx.pushImage(160, y, 160, 1, buf + y * 320 + 160);
+            }
+          }
+        }
+      } else {
+        // Fallback for non-16bpp color depths
+        uint16_t rowBuf[160];
+        if (fullScreen) {
+          // Push left half (0-159, height 240)
+          for (int y = 0; y < 240; y++) {
+            frame.readRect(0, y, 160, 1, rowBuf);
+            gfx.pushImage(0, y, 160, 1, rowBuf);
+          }
+          // Push right footer (160-319, rows 220-239)
+          for (int y = 220; y < 240; y++) {
+            frame.readRect(160, y, 160, 1, rowBuf);
+            gfx.pushImage(160, y, 160, 1, rowBuf);
+          }
+        } else {
+          // Push only the dirty band of the right half (160-319)
+          if (gifMinY <= gifMaxY) {
+            int startY = gifMinY < 0 ? 0 : gifMinY;
+            int endY = gifMaxY >= 220 ? 219 : gifMaxY;
+            for (int y = startY; y <= endY; y++) {
+              frame.readRect(160, y, 160, 1, rowBuf);
+              gfx.pushImage(160, y, 160, 1, rowBuf);
+            }
+          }
+        }
+      }
+      gfx.endWrite();
+    } else {
+      frame.pushSprite(0, 0);
+    }
+  }
+}
 
 // CPU load estimate: no FreeRTOS runtime-stats are enabled in the Arduino
 // build, so there's no true per-core utilization API. Instead we measure the
@@ -1174,16 +1235,29 @@ void drawLongTrendPage() {
     return;
   }
 
+  // longTrend[] only gets a row once a day rolls over (appendDailyLogIfNeeded),
+  // so on its own it stops at yesterday — append today's still-running total
+  // as one more bar so the rightmost bar actually matches the "today" label.
+  int64_t bars[LONG_TREND_DAYS];
+  int barCount = longTrendCount;
+  for (int i = 0; i < barCount; i++) bars[i] = longTrend[i];
+  if (barCount < LONG_TREND_DAYS) {
+    bars[barCount++] = STATE.trend[6];
+  } else {
+    memmove(bars, bars + 1, (LONG_TREND_DAYS - 1) * sizeof(int64_t));
+    bars[LONG_TREND_DAYS - 1] = STATE.trend[6];
+  }
+
   int64_t maxTokens = 1;
-  for (int i = 0; i < longTrendCount; i++) {
-    if (longTrend[i] > maxTokens) maxTokens = longTrend[i];
+  for (int i = 0; i < barCount; i++) {
+    if (bars[i] > maxTokens) maxTokens = bars[i];
   }
 
   int chartX = 10, chartY = 36, chartH = 148, chartW = 300;
   int barW = 6, gap = 4;
-  int startX = chartX + chartW - longTrendCount * (barW + gap);
-  for (int i = 0; i < longTrendCount; i++) {
-    int barH = (int)((float)longTrend[i] / maxTokens * chartH);
+  int startX = chartX + chartW - barCount * (barW + gap);
+  for (int i = 0; i < barCount; i++) {
+    int barH = (int)((float)bars[i] / maxTokens * chartH);
     int bx = startX + i * (barW + gap);
     int by = chartY + chartH - barH;
     g->fillRoundRect(bx, by, barW, max(barH, 2), 2, COL_ACCENT);
@@ -1345,6 +1419,10 @@ void GIFDraw(GIFDRAW* pDraw) {
         }
         if (clipStart < clipEnd) {
           g->pushImage(clipStart, y, clipEnd - clipStart, 1, usTemp + (clipStart - startX));
+          if (mixedMode) {
+            if (y < gifMinY) gifMinY = y;
+            if (y > gifMaxY) gifMaxY = y;
+          }
         }
         x += iCount;
         iCount = 0;
@@ -1372,6 +1450,10 @@ void GIFDraw(GIFDRAW* pDraw) {
     }
     if (clipStart < clipEnd) {
       g->pushImage(clipStart, y, clipEnd - clipStart, 1, usTemp + (clipStart - startX));
+      if (mixedMode) {
+        if (y < gifMinY) gifMinY = y;
+        if (y > gifMaxY) gifMaxY = y;
+      }
     }
   }
 }
@@ -1398,6 +1480,33 @@ void scanCats() {
   if (dir) dir.close();
   unlockSD();
   Serial.printf("[cats] %d GIF(s) in %s\n", catCount, CATS_DIR);
+}
+
+// "26% reset: 02:09" pinned to the bottom-left corner of the full-screen
+// cat page (GIF_PAGE only), on a solid black box so it stays legible over
+// any GIF frame. gifTick() runs unlocked on core 1, so STATE is copied under
+// the lock before drawing.
+void drawSessionResetOverlay() {
+  lockState();
+  int percent = STATE.sessionPercent;
+  String resets = STATE.sessionResets;
+  unlockState();
+  if (percent < 0 || !resets.length()) return;
+
+  String text = String(percent) + "% reset: " + resets;
+  int padX = 4, padY = 4;
+  int textW = (int)text.length() * 12;  // textSize 2 = 12px/char wide, 16px tall
+  int boxW = textW + padX * 2, boxH = 16 + padY * 2;
+  int boxY = 240 - boxH;
+  g->fillRect(0, boxY, boxW, boxH, 0x0000);
+  g->setTextSize(2);
+  g->setCursor(padX, boxY + padY);
+  g->setTextColor(COL_TEXT);
+  g->print(String(percent) + "% ");
+  g->setTextColor(COL_TEXT2);
+  g->print("reset: ");
+  g->setTextColor(COL_TEXT);
+  g->print(resets);
 }
 
 // A centered message when there are no cats to show (no SD, or empty /cats/).
@@ -1433,6 +1542,7 @@ void drawGifPlaceholder(bool offline) {
       g->print(msg);
     }
   }
+  if (currentPage == GIF_PAGE) drawSessionResetOverlay();
   if (offline) drawOfflineBanner();
   presentFrame();
 }
@@ -1460,6 +1570,7 @@ bool openRandomCat() {
     g->fillScreen(0x0000);  // clear the sprite; first frame's lines land on top, then present
   }
   gifOpen = true;
+  gifFirstFrame = true;
   return true;
 }
 
@@ -1478,11 +1589,27 @@ void gifTick(bool offline) {
     return;
   }
   int delayMs = 0;
+  if (gifFirstFrame) {
+    gifMinY = 0;
+    gifMaxY = 219;
+  } else {
+    gifMinY = 220;
+    gifMaxY = -1;
+  }
   lockSD();
   int more = gif->playFrame(false, &delayMs);  // bSync=false: we handle timing ourselves
   unlockSD();
+  if (gifFirstFrame) {
+    gifFirstFrame = false;
+  }
+  if (currentPage == GIF_PAGE) drawSessionResetOverlay();
   if (offline) drawOfflineBanner();
-  presentFrame();
+  if (mixedPageDirty) {
+    presentFrame(true);  // flush the static card update
+    mixedPageDirty = false;
+  } else {
+    presentFrame(false); // push only the GIF region
+  }
   if (more == 0) {                 // last frame drawn — rotate to a new random cat
     lockSD(); gif->close(); unlockSD();
     gifOpen = false;
@@ -1624,7 +1751,7 @@ void setup() {
   // independent of WiFi/network state, and only attempted once: SD I/O is
   // blocking, so a flaky card must not stall the 20s poll loop.
   sdSPI.begin(CYD_SD_SCLK, CYD_SD_MISO, CYD_SD_MOSI, CYD_SD_CS);
-  STATE.sdOk = SD.begin(CYD_SD_CS, sdSPI);
+  STATE.sdOk = SD.begin(CYD_SD_CS, sdSPI, 20000000); // 20 MHz SPI
   if (STATE.sdOk) {
     loadRuntimeConfig();
     gfx.setBrightness(cfgBrightness);  // honor the /config.json override
@@ -1696,7 +1823,7 @@ void loop() {
         lockState();
         drawMixedPageStatic();
         unlockState();
-        presentFrame();
+        mixedPageDirty = true;
       }
     }
   } else {

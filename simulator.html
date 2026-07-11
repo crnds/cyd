@@ -718,15 +718,21 @@ function drawLongTrendPage() {
     return;
   }
 
-  const days = STATE.longTrend;
+  // STATE.longTrend only gets an entry once a day rolls over, so on its own
+  // it stops at yesterday — append today's still-running total as one more
+  // bar so the rightmost bar actually matches the "today" label.
+  const bars = STATE.longTrend.map(d => d.tokens);
+  bars.push(STATE.trend[6]);
+  if (bars.length > LONG_TREND_DAYS) bars.shift();
+
   let maxTokens = 1;
-  for (const d of days) if (d.tokens > maxTokens) maxTokens = d.tokens;
+  for (const t of bars) if (t > maxTokens) maxTokens = t;
 
   const chartX = 10, chartY = 36, chartH = 148, chartW = 300;
   const barW = 6, gap = 4;
-  const startX = chartX + chartW - days.length * (barW + gap);
-  for (let i = 0; i < days.length; i++) {
-    const barH = Math.round(days[i].tokens / maxTokens * chartH);
+  const startX = chartX + chartW - bars.length * (barW + gap);
+  for (let i = 0; i < bars.length; i++) {
+    const barH = Math.round(bars[i] / maxTokens * chartH);
     const bx = startX + i * (barW + gap);
     const by = chartY + chartH - barH;
     gfx.fillRoundRect(bx, by, barW, Math.max(barH, 2), 2, COL_ACCENT);
@@ -739,7 +745,7 @@ function drawLongTrendPage() {
   gfx.setCursor(chartX + chartW - 30, chartY + chartH + 6);
   gfx.print('today');
   gfx.setCursor(chartX, chartY + chartH + 18);
-  gfx.print(days.length + ' days logged, peak ' + fmtTokens(maxTokens));
+  gfx.print(STATE.longTrend.length + ' days logged, peak ' + fmtTokens(maxTokens));
 }
 
 function drawFullStatBlock(y, title, percent, sub, color) {
@@ -826,7 +832,32 @@ function drawGifPage(offline) {
   const note = '(reads /cats/*.gif from the SD card)';
   gfx.setCursor((320 - note.length * 6) / 2, 148);
   gfx.print(note);
+  drawSessionResetOverlay();
   if (offline) drawOfflineBanner();
+}
+
+// "26% reset: 02:09" pinned to the bottom-left corner of the full-screen
+// cat page, on a solid black box so it stays legible over any GIF frame —
+// mirrors the firmware's drawSessionResetOverlay().
+function drawSessionResetOverlay() {
+  const percent = STATE.sessionPercent;
+  const resets = STATE.sessionResets;
+  if (percent < 0 || !resets.length) return;
+
+  const text = `${percent}% reset: ${resets}`;
+  const padX = 4, padY = 4;
+  const textW = text.length * 12;  // textSize 2 = 12px/char wide, 16px tall
+  const boxW = textW + padX * 2, boxH = 16 + padY * 2;
+  const boxY = 240 - boxH;
+  gfx.fillRect(0, boxY, boxW, boxH, 'rgb(0,0,0)');
+  gfx.setTextSize(2);
+  gfx.setCursor(padX, boxY + padY);
+  gfx.setTextColor(COL_TEXT);
+  gfx.print(`${percent}% `);
+  gfx.setTextColor(COL_TEXT2);
+  gfx.print("reset: ");
+  gfx.setTextColor(COL_TEXT);
+  gfx.print(resets);
 }
 
 function drawMixedPage(offline) {
@@ -1162,26 +1193,6 @@ function restartPollTimer() {
   STATE.pollTimer = setInterval(fetchUsage, ms);
 }
 
-// ── AUDIO (mirroring the firmware's page-change solfege beeps) ────
-// Do Re Mi Fa Sol La (C5..A5) for pages 1..6, ~70ms each. A square wave at
-// low gain approximates the board's low-duty LEDC output through its amp.
-const TONE_FREQS = [523, 587, 659, 698, 784, 880, 988];
-const TONE_DURATION_MS = 70;
-let audioCtx = null;
-function playPageTone(page) {
-  try {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.type = 'square';
-    osc.frequency.value = TONE_FREQS[page];
-    gain.gain.value = 0.02;  // low volume, like the firmware's TONE_DUTY
-    osc.connect(gain).connect(audioCtx.destination);
-    osc.start();
-    osc.stop(audioCtx.currentTime + TONE_DURATION_MS / 1000);
-  } catch (err) { /* audio unavailable — the beep is best-effort */ }
-}
-
 // Touch feedback: flash a 5px white border on all four edges for one frame,
 // then re-render to clear it. Mirrors flashTouchBorder() in the firmware.
 function flashTouchBorder() {
@@ -1195,7 +1206,6 @@ function flashTouchBorder() {
 
 canvas.addEventListener('click', () => {
   STATE.currentPage = (STATE.currentPage + 1) % PAGE_COUNT;
-  playPageTone(STATE.currentPage);
   render();
   flashTouchBorder();  // one-frame white edge flash on the new page: touch registered
 });

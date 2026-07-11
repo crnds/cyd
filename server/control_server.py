@@ -75,8 +75,13 @@ def probe_endpoint():
 
 def tail_file(path, n=LOG_TAIL_LINES):
     try:
-        with open(path, "r", errors="replace") as f:
-            return [line.rstrip("\n") for line in f.readlines()[-n:]]
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > 8192:
+                f.seek(size - 8192)
+            data = f.read()
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        return lines[-n:]
     except OSError:
         return []
 

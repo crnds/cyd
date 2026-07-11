@@ -37,8 +37,19 @@ STATE = {
     "limits": None,     # latest plan-limit snapshot from the OAuth usage endpoint
     "btc": None,        # {price} from Binance — fetched here so the board needs no TLS
     "weather": None,    # {tempC, code} for Bangkok from Open-Meteo, same reason
+    "activity_event": threading.Event(),
     "lock": threading.Lock(),
 }
+
+
+def is_client_active():
+    now = datetime.now(timezone.utc)
+    with STATE["lock"]:
+        # Active if a client requested within the last 3 minutes
+        for ip, ts in STATE["clients"].items():
+            if (now - ts).total_seconds() <= 180:
+                return True
+    return False
 
 LIMITS_INTERVAL_SEC = 120
 # The OAuth endpoint rate-limits aggressive polling; after a 429, back off
@@ -149,35 +160,53 @@ def fetch_limits():
 
 def limits_loop():
     was_empty = False
+    last_fetch = 0.0
+    first_run = True
     while True:
-        sleep_sec = LIMITS_INTERVAL_SEC
-        try:
-            limits = fetch_limits()
-            if limits:
-                STATE["limits"] = limits
-                if was_empty:
-                    log_err("limits_loop: recovered, snapshot refreshed")
-                was_empty = False
+        if not first_run and not is_client_active():
+            with STATE["lock"]:
+                STATE["activity_event"].clear()
+            STATE["activity_event"].wait(timeout=60)
+            continue
+        first_run = False
+
+        now = time.time()
+        sleep_sec = 5
+        if now - last_fetch >= LIMITS_INTERVAL_SEC:
+            try:
+                limits = fetch_limits()
+                if limits:
+                    STATE["limits"] = limits
+                    last_fetch = now
+                    if was_empty:
+                        log_err("limits_loop: recovered, snapshot refreshed")
+                    was_empty = False
+                else:
+                    # No usable token or null fields in the response; keep the
+                    # last-good snapshot. Log the transition only — this repeats
+                    # every cycle until the CLI refreshes the keychain token.
+                    if not was_empty:
+                        log_err("limits_loop: no snapshot (missing/expired token "
+                                "or null fields); keeping last-good")
+                    was_empty = True
+            except Exception as e:
+                # keep the last good snapshot; report shows it as-is
+                log_err(f"limits_loop: {type(e).__name__}: {e}")
+                if isinstance(e, urllib.error.HTTPError) and e.code == 429:
+                    try:
+                        retry_after = int(e.headers.get("Retry-After") or 0)
+                    except ValueError:
+                        retry_after = 0
+                    sleep_sec = min(max(LIMITS_429_BACKOFF_SEC, retry_after),
+                                    LIMITS_429_BACKOFF_MAX_SEC)
+                    log_err(f"limits_loop: backing off {sleep_sec}s "
+                            f"(Retry-After: {e.headers.get('Retry-After')!r})")
+                    last_fetch = now - LIMITS_INTERVAL_SEC + sleep_sec
             else:
-                # No usable token or null fields in the response; keep the
-                # last-good snapshot. Log the transition only — this repeats
-                # every cycle until the CLI refreshes the keychain token.
-                if not was_empty:
-                    log_err("limits_loop: no snapshot (missing/expired token "
-                            "or null fields); keeping last-good")
-                was_empty = True
-        except Exception as e:
-            # keep the last good snapshot; report shows it as-is
-            log_err(f"limits_loop: {type(e).__name__}: {e}")
-            if isinstance(e, urllib.error.HTTPError) and e.code == 429:
-                try:
-                    retry_after = int(e.headers.get("Retry-After") or 0)
-                except ValueError:
-                    retry_after = 0
-                sleep_sec = min(max(LIMITS_429_BACKOFF_SEC, retry_after),
-                                LIMITS_429_BACKOFF_MAX_SEC)
-                log_err(f"limits_loop: backing off {sleep_sec}s "
-                        f"(Retry-After: {e.headers.get('Retry-After')!r})")
+                sleep_sec = LIMITS_INTERVAL_SEC
+        else:
+            sleep_sec = max(1, int(LIMITS_INTERVAL_SEC - (now - last_fetch)))
+
         time.sleep(sleep_sec)
 
 
@@ -255,7 +284,14 @@ def market_loop():
     # BTC on a ~10s cadence, weather every 10 min. Each keeps its last good value
     # on failure so a transient outage doesn't blank the board's tiles.
     last_weather = 0.0
+    first_run = True
     while True:
+        if not first_run and not is_client_active():
+            with STATE["lock"]:
+                STATE["activity_event"].clear()
+            STATE["activity_event"].wait(timeout=60)
+            continue
+        first_run = False
         try:
             btc = fetch_btc()
             if btc:
@@ -325,13 +361,25 @@ def project_name(cwd):
 def scan_once():
     new_events = []
     for path in glob.glob(LOG_GLOB):
-        try:
-            size = os.path.getsize(path)
-        except OSError:
-            continue
-        offset = STATE["offsets"].get(path, 0)
-        if size < offset:
-            offset = 0  # file was truncated/replaced; re-read from the start
+        offset = STATE["offsets"].get(path)
+        if offset is None:
+            try:
+                mtime = os.path.getmtime(path)
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            if mtime < time.time() - RETENTION.total_seconds():
+                STATE["offsets"][path] = size
+                continue
+            offset = 0
+        else:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            if size < offset:
+                offset = 0  # file was truncated/replaced; re-read from the start
+
         if size == offset:
             continue
         try:
@@ -387,15 +435,20 @@ def scan_once():
     if new_events:
         with STATE["lock"]:
             STATE["events"].extend(new_events)
-
-    cutoff = datetime.now(timezone.utc) - RETENTION
-    with STATE["lock"]:
-        STATE["events"] = [e for e in STATE["events"] if e["ts"] >= cutoff]
-    STATE["seen"] = {k: ts for k, ts in STATE["seen"].items() if ts >= cutoff}
+            cutoff = datetime.now(timezone.utc) - RETENTION
+            STATE["events"] = [e for e in STATE["events"] if e["ts"] >= cutoff]
+            STATE["seen"] = {k: ts for k, ts in STATE["seen"].items() if ts >= cutoff}
 
 
 def scan_loop():
+    first_run = True
     while True:
+        if not first_run and not is_client_active():
+            with STATE["lock"]:
+                STATE["activity_event"].clear()
+            STATE["activity_event"].wait(timeout=60)
+            continue
+        first_run = False
         try:
             scan_once()
         except Exception as e:
@@ -518,6 +571,7 @@ class Handler(BaseHTTPRequestHandler):
         ip = self.client_address[0]
         with STATE["lock"]:
             STATE["clients"][ip] = datetime.now(timezone.utc)
+            STATE["activity_event"].set()
         if ip not in ("127.0.0.1", "::1"):
             # One heartbeat line per board poll; local probes stay quiet.
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {ip} GET /api/usage", flush=True)
