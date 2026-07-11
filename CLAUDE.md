@@ -117,9 +117,11 @@ reliable. Do not flash at the default speed.
   `active_now`, `last_activity_sec`, `projects[{name,tokens}]`,
   `models[{name,tokens,cost,percent}]` (today's cost split by model family,
   top 4 by cost, percent = share of today's estimated cost), `trend[7]`,
-  `limits{tz,session{percent,resets,resets_at_epoch,resets_in_sec},week{percent,resets}}`
-  (null if the keychain read hasn't succeeded; `resets_in_sec` is computed at
-  request time so it stays fresh between OAuth refreshes),
+  `limits{tz,fetched_at_epoch,age_sec,session{percent,resets,resets_at_epoch,resets_in_sec},week{percent,resets}}`
+  (null if the keychain read hasn't succeeded; `resets_in_sec` and `age_sec`
+  are computed at request time so they stay fresh between OAuth refreshes —
+  a large `age_sec` means the snapshot is stale, e.g. the loop is in a 429
+  backoff, which is clamped to 30 min even when Retry-After is longer),
   `btc{price}` / `weather{tempC,code}` (null until the first market fetch),
   `clients[{ip,last_seen_sec}]`, `generated_at`.
 - Dollar costs are **estimates** from a hardcoded per-model price table.

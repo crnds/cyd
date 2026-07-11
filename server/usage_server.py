@@ -43,8 +43,11 @@ STATE = {
 LIMITS_INTERVAL_SEC = 120
 # The OAuth endpoint rate-limits aggressive polling; after a 429, back off
 # hard — the last-good snapshot plus per-request resets_in_sec keeps the
-# board's display fresh in the meantime.
+# board's display fresh in the meantime. Retry-After is respected but clamped:
+# the endpoint has sent multi-hour values, which parked this loop (and froze
+# the displayed percent) until the next server restart.
 LIMITS_429_BACKOFF_SEC = 600
+LIMITS_429_BACKOFF_MAX_SEC = 1800
 OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 # BTC + Bangkok weather are fetched by the Mac (which has ample RAM + a TLS
@@ -80,6 +83,14 @@ def fmt_reset_time(iso_ts, with_date):
     return f"{dt.strftime('%b')} {dt.day} at {t}" if with_date else t
 
 
+def log_err(msg):
+    # stderr goes to /tmp/cydusage.err via launchd; without timestamps the
+    # log can't answer "when did this loop last run", which is the first
+    # question when the displayed percent goes stale.
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}",
+          file=sys.stderr, flush=True)
+
+
 def oauth_token():
     # Read the Claude Code OAuth token from the macOS Keychain at request
     # time; it is never written to disk or included in responses.
@@ -89,7 +100,13 @@ def oauth_token():
     )
     if out.returncode != 0:
         return None
-    return json.loads(out.stdout).get("claudeAiOauth", {}).get("accessToken")
+    creds = json.loads(out.stdout).get("claudeAiOauth", {})
+    # An expired access token would just 401 (only the CLI can refresh it) —
+    # skip the request rather than burn the endpoint's rate limit on it.
+    expires_at_ms = creds.get("expiresAt")
+    if expires_at_ms and expires_at_ms / 1000 <= time.time():
+        return None
+    return creds.get("accessToken")
 
 
 def fetch_limits():
@@ -113,6 +130,9 @@ def fetch_limits():
     week_reset = datetime.fromisoformat(week["resets_at"].replace("Z", "+00:00")).astimezone()
     return {
         "tz": TZ_NAME,
+        # Raw epoch of this fetch; the handler turns it into age_sec per
+        # request so clients can see when the snapshot has gone stale.
+        "fetched_at_epoch": time.time(),
         "session": {
             "percent": round(session["utilization"]),
             "resets": fmt_reset_time(session["resets_at"], with_date=False),
@@ -128,21 +148,36 @@ def fetch_limits():
 
 
 def limits_loop():
+    was_empty = False
     while True:
         sleep_sec = LIMITS_INTERVAL_SEC
         try:
             limits = fetch_limits()
             if limits:
                 STATE["limits"] = limits
+                if was_empty:
+                    log_err("limits_loop: recovered, snapshot refreshed")
+                was_empty = False
+            else:
+                # No usable token or null fields in the response; keep the
+                # last-good snapshot. Log the transition only — this repeats
+                # every cycle until the CLI refreshes the keychain token.
+                if not was_empty:
+                    log_err("limits_loop: no snapshot (missing/expired token "
+                            "or null fields); keeping last-good")
+                was_empty = True
         except Exception as e:
             # keep the last good snapshot; report shows it as-is
-            print(f"limits_loop: {type(e).__name__}: {e}", file=sys.stderr)
+            log_err(f"limits_loop: {type(e).__name__}: {e}")
             if isinstance(e, urllib.error.HTTPError) and e.code == 429:
                 try:
                     retry_after = int(e.headers.get("Retry-After") or 0)
                 except ValueError:
                     retry_after = 0
-                sleep_sec = max(LIMITS_429_BACKOFF_SEC, retry_after)
+                sleep_sec = min(max(LIMITS_429_BACKOFF_SEC, retry_after),
+                                LIMITS_429_BACKOFF_MAX_SEC)
+                log_err(f"limits_loop: backing off {sleep_sec}s "
+                        f"(Retry-After: {e.headers.get('Retry-After')!r})")
         time.sleep(sleep_sec)
 
 
@@ -440,15 +475,19 @@ def build_report():
         for ip, ts in sorted(client_snapshot, key=lambda kv: kv[1], reverse=True)
     ]
 
-    # Countdown to the session reset, computed at request time (not when the
-    # limits snapshot was fetched) so it stays accurate between OAuth refreshes.
+    # Countdown to the session reset and snapshot age, computed at request
+    # time (not when the limits snapshot was fetched) so they stay accurate
+    # between OAuth refreshes.
     limits = STATE["limits"]
-    if limits and limits.get("session", {}).get("resets_at_epoch"):
+    if limits:
         limits = dict(limits)
-        session_limits = dict(limits["session"])
-        session_limits["resets_in_sec"] = max(
-            0, int(session_limits["resets_at_epoch"] - time.time()))
-        limits["session"] = session_limits
+        if limits.get("fetched_at_epoch"):
+            limits["age_sec"] = max(0, int(time.time() - limits["fetched_at_epoch"]))
+        if limits.get("session", {}).get("resets_at_epoch"):
+            session_limits = dict(limits["session"])
+            session_limits["resets_in_sec"] = max(
+                0, int(session_limits["resets_at_epoch"] - time.time()))
+            limits["session"] = session_limits
 
     return {
         "generated_at": now.isoformat(),
