@@ -1193,21 +1193,31 @@ function restartPollTimer() {
   STATE.pollTimer = setInterval(fetchUsage, ms);
 }
 
-// Touch feedback: flash a 5px white border on all four edges for one frame,
-// then re-render to clear it. Mirrors flashTouchBorder() in the firmware.
-function flashTouchBorder() {
+// Touch feedback: flash a 5px white border on the left or right part of the screen
+// for one frame, then re-render to clear it. Mirrors flashTouchBorder() in the firmware.
+function flashTouchBorder(isRight) {
   const T = 5;
-  gfx.fillRect(0, 0, 320, T, COL_TEXT);        // top
-  gfx.fillRect(0, 240 - T, 320, T, COL_TEXT);  // bottom
-  gfx.fillRect(0, 0, T, 240, COL_TEXT);        // left
-  gfx.fillRect(320 - T, 0, T, 240, COL_TEXT);  // right
+  if (isRight) {
+    gfx.fillRect(160, 0, 160, T, COL_TEXT);        // top right
+    gfx.fillRect(160, 240 - T, 160, T, COL_TEXT);  // bottom right
+    gfx.fillRect(320 - T, 0, T, 240, COL_TEXT);    // right
+  } else {
+    gfx.fillRect(0, 0, 160, T, COL_TEXT);          // top left
+    gfx.fillRect(0, 240 - T, 160, T, COL_TEXT);    // bottom left
+    gfx.fillRect(0, 0, T, 240, COL_TEXT);          // left
+  }
   setTimeout(render, 60);
 }
 
-canvas.addEventListener('click', () => {
-  STATE.currentPage = (STATE.currentPage + 1) % PAGE_COUNT;
+canvas.addEventListener('click', (event) => {
+  const isRight = event.offsetX >= 160;
+  if (isRight) {
+    STATE.currentPage = (STATE.currentPage + 1) % PAGE_COUNT;
+  } else {
+    STATE.currentPage = (STATE.currentPage - 1 + PAGE_COUNT) % PAGE_COUNT;
+  }
   render();
-  flashTouchBorder();  // one-frame white edge flash on the new page: touch registered
+  flashTouchBorder(isRight);  // one-frame white edge flash on the new page: touch registered
 });
 
 document.getElementById('poll-now').addEventListener('click', fetchUsage);

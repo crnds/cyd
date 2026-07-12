@@ -2,5 +2,11 @@
   "wifi_ssid": "your-wifi-name",
   "wifi_password": "your-wifi-password",
   "server_host": "your-mac-name.local",
-  "server_port": 8787
+  "server_port": 8787,
+  "screen_rotation": 1,
+  "touch_x_min": 200,
+  "touch_x_max": 3800,
+  "touch_y_min": 3800,
+  "touch_y_max": 200,
+  "touch_offset_rotation": 0
 }

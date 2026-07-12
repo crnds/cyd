@@ -62,8 +62,13 @@ public:
       auto cfg = _touch_instance.config();
       cfg.x_min = 200;
       cfg.x_max = 3800;
-      cfg.y_min = 200;
-      cfg.y_max = 3800;
+      // At setRotation(1), LovyanGFX's touch convertRawXY() swaps raw X/Y
+      // before scaling — so the screen's left/right axis is actually driven
+      // by the RAW Y calibration, not x_min/x_max. Inverted here (rather
+      // than x_min/x_max) to match user's board so tapping right advances
+      // and tapping left goes back.
+      cfg.y_min = 3800;
+      cfg.y_max = 200;
       // Touch has its own pins on the CYD — software SPI, not the display bus.
       cfg.spi_host = -1;
       cfg.bus_shared = false;
@@ -77,6 +82,18 @@ public:
       _panel_instance.setTouch(&_touch_instance);
     }
     setPanel(&_panel_instance);
+  }
+
+  void applyRuntimeConfig(int rotation, int x_min, int x_max, int y_min, int y_max, int offset_rotation) {
+    setRotation(rotation);
+    auto cfg = _touch_instance.config();
+    cfg.x_min = x_min;
+    cfg.x_max = x_max;
+    cfg.y_min = y_min;
+    cfg.y_max = y_max;
+    cfg.offset_rotation = offset_rotation;
+    _touch_instance.config(cfg);
+    _panel_instance.setTouch(&_touch_instance);
   }
 };
 
@@ -96,17 +113,22 @@ lgfx::LovyanGFX* g = &gfx;
 
 void presentFrame(bool fullScreen = true);
 
-// Touch feedback: flash a 5px white border on all four edges for one frame,
-// straight to the panel over the already-pushed frame, then re-push the clean
-// frame to clear it. Drawn on `gfx` (not `g`) so it overlays the composited
-// page; presentFrame() restores the borderless frame.
-void flashTouchBorder() {
+// Touch feedback: flash a 5px white border on the left or right part of the screen
+// for one frame, straight to the panel over the already-pushed frame, then re-push
+// the clean frame to clear it. Drawn on `gfx` (not `g`) so it overlays the
+// composited page; presentFrame() restores the borderless frame.
+void flashTouchBorder(bool isRight) {
   const int T = 5;
   const uint16_t WHITE = 0xFFFF;
-  gfx.fillRect(0, 0, 320, T, WHITE);        // top
-  gfx.fillRect(0, 240 - T, 320, T, WHITE);  // bottom
-  gfx.fillRect(0, 0, T, 240, WHITE);        // left
-  gfx.fillRect(320 - T, 0, T, 240, WHITE);  // right
+  if (isRight) {
+    gfx.fillRect(160, 0, 160, T, WHITE);        // top right
+    gfx.fillRect(160, 240 - T, 160, T, WHITE);  // bottom right
+    gfx.fillRect(320 - T, 0, T, 240, WHITE);    // right
+  } else {
+    gfx.fillRect(0, 0, 160, T, WHITE);          // top left
+    gfx.fillRect(0, 240 - T, 160, T, WHITE);    // bottom left
+    gfx.fillRect(0, 0, T, 240, WHITE);          // left
+  }
   delay(60);
   presentFrame();
 }
@@ -315,6 +337,12 @@ String cfgWifiPassword = WIFI_PASSWORD;
 String cfgServerHost = SERVER_HOST;
 int cfgServerPort = SERVER_PORT;
 int cfgBrightness = 200;   // 0-255 panel backlight; overridable via /config.json
+int cfgScreenRotation = 1;
+int cfgTouchXMin = 200;
+int cfgTouchXMax = 3800;
+int cfgTouchYMin = 3800;   // inverted on user's board (drives left/right at rotation 1)
+int cfgTouchYMax = 200;
+int cfgTouchOffsetRotation = 0;
 
 // ── FORMATTING ─────────────────────────────────────────────
 String fmtTokens(int64_t t) {
@@ -674,6 +702,12 @@ void loadRuntimeConfig() {
     int sec = doc["poll_interval_sec"].as<int>();
     POLL_INTERVAL_MS = (uint32_t)constrain(sec, 5, 3600) * 1000;
   }
+  if (!doc["screen_rotation"].isNull()) cfgScreenRotation = doc["screen_rotation"].as<int>();
+  if (!doc["touch_x_min"].isNull()) cfgTouchXMin = doc["touch_x_min"].as<int>();
+  if (!doc["touch_x_max"].isNull()) cfgTouchXMax = doc["touch_x_max"].as<int>();
+  if (!doc["touch_y_min"].isNull()) cfgTouchYMin = doc["touch_y_min"].as<int>();
+  if (!doc["touch_y_max"].isNull()) cfgTouchYMax = doc["touch_y_max"].as<int>();
+  if (!doc["touch_offset_rotation"].isNull()) cfgTouchOffsetRotation = doc["touch_offset_rotation"].as<int>();
   Serial.println("[config] loaded overrides from /config.json");
 }
 
@@ -1762,6 +1796,7 @@ void setup() {
   } else {
     Serial.println("[sd] card not found or failed to mount");
   }
+  gfx.applyRuntimeConfig(cfgScreenRotation, cfgTouchXMin, cfgTouchXMax, cfgTouchYMin, cfgTouchYMax, cfgTouchOffsetRotation);
   logDiag((String("boot reason=") + resetReasonStr()).c_str());
 
   connectWifi();
@@ -1862,7 +1897,12 @@ void loop() {
   }
   if (touchDown && !touchWasDown && now - lastTouchMs > TOUCH_DEBOUNCE_MS) {
     lastTouchMs = now;
-    currentPage = (currentPage + 1) % PAGE_COUNT;
+    bool isRight = (tx >= 160);
+    if (isRight) {
+      currentPage = (currentPage + 1) % PAGE_COUNT;
+    } else {
+      currentPage = (currentPage - 1 + PAGE_COUNT) % PAGE_COUNT;
+    }
     
     // Handle initialization when entering a page
     if (currentPage == 6 && !offline) {
@@ -1882,7 +1922,7 @@ void loop() {
     }
     
     if (!catMode) render();  // catMode: gifTick() already redraws every pass
-    flashTouchBorder();  // one-frame white edge flash on the new page: touch registered
+    flashTouchBorder(isRight);  // one-frame white edge flash on the new page: touch registered
   }
   touchWasDown = touchDown;
 
