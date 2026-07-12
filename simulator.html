@@ -234,7 +234,7 @@ const LAST_USAGE_KEY = 'cyddashboard_v1_lastusage';
 // lands at x=319, regardless of PAGE_COUNT (mirrors the firmware fix for a
 // 5th dot pushing past the 320px screen edge).
 const DOT_SPACING = 12;
-const DOT_START_X = 316 - (PAGE_COUNT - 1) * DOT_SPACING;
+const DOT_START_X = 300 - (PAGE_COUNT - 1) * DOT_SPACING;
 const STALE_AFTER_SEC = 60;
 
 // Flash/RAM are on-device figures with no browser equivalent, so these
@@ -420,7 +420,7 @@ function drawFooter() {
   const pollMs = Number(document.getElementById('poll-interval').value) || POLL_DEFAULT_MS;
   let elapsed = performance.now() - STATE.lastPollMs;
   if (elapsed > pollMs) elapsed = pollMs;
-  const lineW = Math.round(elapsed / pollMs * 320);
+  const lineW = Math.round(elapsed / pollMs * 304);
   if (lineW > 0) gfx.fillRect(0, 239, lineW, 1, COL_TEXT2);
 }
 
@@ -430,7 +430,7 @@ function drawLimitBlock(y, title, percent, resets, resetsInSec) {
   gfx.setCursor(10, y);
   gfx.print(title);
 
-  const barX = 10, barY = y + 22, barW = 195, barH = 16;
+  const barX = 10, barY = y + 22, barW = 175, barH = 16;
   gfx.fillRoundRect(barX, barY, barW, barH, 3, COL_TRACK);
   if (percent >= 0) {
     const fillW = Math.round(Math.min(percent, 100) / 100 * barW);
@@ -439,7 +439,7 @@ function drawLimitBlock(y, title, percent, resets, resetsInSec) {
 
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(2);
-  gfx.setCursor(215, barY + 1);
+  gfx.setCursor(195, barY + 1);
   gfx.print(percent >= 0 ? percent + '% used' : '--');
 
   gfx.setTextColor(COL_TEXT2);
@@ -496,7 +496,7 @@ function drawProjectsPage() {
     for (let i = 0; i < shown; i++) if (STATE.projects[i].tokens > maxTokens) maxTokens = STATE.projects[i].tokens;
 
     let y = 22;
-    const barMaxW = 250;
+    const barMaxW = 230;
     for (let i = 0; i < shown; i++) {
       const p = STATE.projects[i];
       gfx.setTextColor(COL_TEXT);
@@ -517,7 +517,7 @@ function drawProjectsPage() {
   }
 
   // ── lower half: 7-day trend ──
-  gfx.fillRect(10, 128, 300, 1, COL_BORDER);
+  gfx.fillRect(10, 128, 284, 1, COL_BORDER);
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(1);
   gfx.setCursor(10, 134);
@@ -598,11 +598,11 @@ function drawCardLabel(x, y, label) {
 // (y=4 h=92), weather (y=100 h=56), BTC (y=160 h=56), 4px gaps. All cards
 // are 152px wide with 10px inner padding (content x=14 / x=174, width 132).
 function drawLimitsCard() {
-  gfx.fillRoundRect(4, 4, 152, 216, 8, COL_SURFACE);
-  gfx.drawRoundRect(4, 4, 152, 216, 8, COL_BORDER);
+  gfx.fillRoundRect(2, 4, 142, 216, 8, COL_SURFACE);
+  gfx.drawRoundRect(2, 4, 142, 216, 8, COL_BORDER);
 
   // ── left card: limits ──
-  drawCardLabel(14, 13, 'SESSION (5H)');
+  drawCardLabel(12, 13, 'SESSION (5H)');
 
   // Tick the session countdown down locally between polls.
   let sessionRem = STATE.sessionResetsInSec;
@@ -613,57 +613,57 @@ function drawLimitsCard() {
 
   gfx.setTextColor(COL_ACCENT);
   gfx.setTextSize(4);
-  gfx.setCursor(14, 28);
+  gfx.setCursor(12, 28);
   gfx.print(STATE.sessionPercent >= 0 ? STATE.sessionPercent + '%' : '--');
 
-  drawMiniBar(14, 64, 132, STATE.sessionPercent, COL_ACCENT);
+  drawMiniBar(12, 64, 122, STATE.sessionPercent, COL_ACCENT);
 
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(2);
-  gfx.setCursor(14, 76);
+  gfx.setCursor(12, 76);
   gfx.print('resets:');
-  gfx.setCursor(14, 94);
+  gfx.setCursor(12, 94);
   gfx.print(STATE.sessionResets || '--');
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(2);
-  gfx.setCursor(14, 112);
+  gfx.setCursor(12, 112);
   if (sessionRem >= 0) gfx.print('in ' + fmtCountdown(sessionRem));
 
-  gfx.fillRect(14, 136, 132, 1, COL_BORDER);
+  gfx.fillRect(12, 136, 122, 1, COL_BORDER);
 
-  drawCardLabel(14, 147, 'WEEK (ALL MODELS)');
+  drawCardLabel(12, 147, 'WEEK (ALL MODELS)');
 
   gfx.setTextColor(COL_ACCENT);
   gfx.setTextSize(3);
-  gfx.setCursor(14, 162);
+  gfx.setCursor(12, 162);
   gfx.print(STATE.weekPercent >= 0 ? STATE.weekPercent + '%' : '--');
 
-  drawMiniBar(14, 192, 132, STATE.weekPercent, COL_ACCENT);
+  drawMiniBar(12, 192, 122, STATE.weekPercent, COL_ACCENT);
 
   // "resets Jul 9 at 4:59am" is 22 chars = 132px at size1 — exactly the
   // card's inner width, so this line must stay size1.
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(1);
-  gfx.setCursor(14, 206);
+  gfx.setCursor(12, 206);
   gfx.print(STATE.weekResets ? 'resets ' + STATE.weekResets : 'resets --');
 }
 
 function drawStatusPage() {
   drawLimitsCard();
-  gfx.fillRoundRect(164, 4, 152, 92, 8, COL_SURFACE);
-  gfx.drawRoundRect(164, 4, 152, 92, 8, COL_BORDER);
-  gfx.fillRoundRect(164, 100, 152, 56, 8, COL_SURFACE);
-  gfx.drawRoundRect(164, 100, 152, 56, 8, COL_BORDER);
-  gfx.fillRoundRect(164, 160, 152, 56, 8, COL_SURFACE);
-  gfx.drawRoundRect(164, 160, 152, 56, 8, COL_BORDER);
+  gfx.fillRoundRect(150, 4, 150, 92, 8, COL_SURFACE);
+  gfx.drawRoundRect(150, 4, 150, 92, 8, COL_BORDER);
+  gfx.fillRoundRect(150, 100, 150, 56, 8, COL_SURFACE);
+  gfx.drawRoundRect(150, 100, 150, 56, 8, COL_BORDER);
+  gfx.fillRoundRect(150, 160, 150, 56, 8, COL_SURFACE);
+  gfx.drawRoundRect(150, 160, 150, 56, 8, COL_BORDER);
 
   // ── right cards: Bangkok clock/date, weather, BTC price ──
   const bkk = bangkokParts();
 
-  drawCardLabel(174, 13, 'BANGKOK');
+  drawCardLabel(160, 13, 'BANGKOK');
 
   gfx.setTextSize(4);
-  gfx.setCursor(174, 28);
+  gfx.setCursor(160, 28);
   if (bkk) {
     gfx.setTextColor(COL_TEXT);
     gfx.print(bkk.hour + '.' + bkk.minute);
@@ -671,7 +671,7 @@ function drawStatusPage() {
     gfx.setTextSize(1);
     // Bottom-align the small seconds against the big "HH.MM" cell (32px
     // tall at size4 vs. 8px at size1): x is the fixed 5-char size4 advance.
-    gfx.setCursor(174 + 5 * 24, 52);
+    gfx.setCursor(160 + 5 * 24, 52);
     gfx.print('.' + bkk.second);
   } else {
     gfx.setTextColor(COL_TEXT2);
@@ -680,24 +680,24 @@ function drawStatusPage() {
 
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(2);
-  gfx.setCursor(174, 66);
+  gfx.setCursor(160, 66);
   // Year dropped: "Mon 25 Jul 2026" at size2 would overrun the 132px inner
   // width; weekday+day+month fits at 120px.
   gfx.print(bkk ? (bkk.weekday + ' ' + bkk.day + ' ' + bkk.month) : '--');
 
-  drawCardLabel(174, 109, 'WEATHER');
+  drawCardLabel(160, 109, 'WEATHER');
 
-  drawWeatherIcon(174, 124, STATE.weatherCode);
+  drawWeatherIcon(160, 124, STATE.weatherCode);
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(3);
-  gfx.setCursor(204, 122);
+  gfx.setCursor(190, 122);
   gfx.print(STATE.weatherTempC > -900 ? Math.round(STATE.weatherTempC) + 'C' : '--');
 
-  drawCardLabel(174, 169, 'BTC/USDT');
+  drawCardLabel(160, 169, 'BTC/USDT');
 
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(3);
-  gfx.setCursor(174, 182);
+  gfx.setCursor(156, 182);
   gfx.print(fmtBtc(STATE.btcPrice));
 }
 
@@ -728,7 +728,7 @@ function drawLongTrendPage() {
   let maxTokens = 1;
   for (const t of bars) if (t > maxTokens) maxTokens = t;
 
-  const chartX = 10, chartY = 36, chartH = 148, chartW = 300;
+  const chartX = 10, chartY = 36, chartH = 148, chartW = 290;
   const barW = 6, gap = 4;
   const startX = chartX + chartW - bars.length * (barW + gap);
   for (let i = 0; i < bars.length; i++) {
@@ -754,7 +754,7 @@ function drawFullStatBlock(y, title, percent, sub, color) {
   gfx.setCursor(10, y);
   gfx.print(title);
 
-  const barX = 10, barY = y + 14, barW = 245, barH = 16;
+  const barX = 10, barY = y + 14, barW = 230, barH = 16;
   gfx.fillRoundRect(barX, barY, barW, barH, 3, COL_TRACK);
   if (percent >= 0) {
     const fillW = Math.round(Math.min(percent, 100) / 100 * barW);
@@ -804,10 +804,10 @@ function drawDevicePage() {
 // mirrors the firmware's drawOfflineBanner(). A solid bar behind the text
 // keeps it legible over a busy GIF frame on the real device.
 function drawOfflineBanner() {
-  gfx.fillRect(0, 0, 320, 44, COL_BG);
+  gfx.fillRect(0, 0, 304, 44, COL_BG);
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(5);
-  gfx.setCursor(55, 6);  // centered: "OFFLINE" is 7 chars * 30px = 210px; (320-210)/2 = 55
+  gfx.setCursor(47, 6);  // centered: "OFFLINE" is 7 chars * 30px = 210px; (304-210)/2 = 47
   gfx.print('OFFLINE');
 }
 
@@ -822,18 +822,21 @@ function drawGifPage(offline) {
   gfx.fillScreen(COL_BG);
   gfx.setTextColor(COL_ACCENT);
   gfx.setTextSize(3);
-  gfx.setCursor(124, 92);  // "CATS" = 4 chars * 18px = 72; (320-72)/2 = 124
+  gfx.setCursor(116, 92);  // "CATS" = 4 chars * 18px = 72; (304-72)/2 = 116
   gfx.print('CATS');
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(1);
   const msg = 'random cat GIFs play here on the device';
-  gfx.setCursor((320 - msg.length * 6) / 2, 132);
+  gfx.setCursor((304 - msg.length * 6) / 2, 132);
   gfx.print(msg);
   const note = '(reads /cats/*.gif from the SD card)';
-  gfx.setCursor((320 - note.length * 6) / 2, 148);
+  gfx.setCursor((304 - note.length * 6) / 2, 148);
   gfx.print(note);
   drawSessionResetOverlay();
   if (offline) drawOfflineBanner();
+  
+  // 5% right-edge padding
+  gfx.fillRect(304, 0, 16, 240, '#000000');
 }
 
 // "26% reset: 02:09" pinned to the bottom-left corner of the full-screen
@@ -871,19 +874,22 @@ function drawMixedPage(offline) {
   }
 
   // Draw right side GIF placeholder box
-  gfx.drawRoundRect(164, 4, 152, 216, 8, COL_BORDER);
+  gfx.drawRoundRect(150, 4, 150, 216, 8, COL_BORDER);
   gfx.setTextColor(COL_ACCENT);
   gfx.setTextSize(2);
-  gfx.setCursor(216, 92);
+  gfx.setCursor(202, 92);
   gfx.print('CATS');
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(1);
   const msg = 'cat GIFs loop';
-  gfx.setCursor(164 + (152 - msg.length * 6) / 2, 120);
+  gfx.setCursor(150 + (150 - msg.length * 6) / 2, 120);
   gfx.print(msg);
   const note = 'here on device';
-  gfx.setCursor(164 + (152 - note.length * 6) / 2, 136);
+  gfx.setCursor(150 + (150 - note.length * 6) / 2, 136);
   gfx.print(note);
+
+  // 5% right-edge padding
+  gfx.fillRect(304, 0, 16, 240, '#000000');
 }
 
 function render() {
@@ -915,6 +921,10 @@ function render() {
     case 4: drawLongTrendPage(); break;
   }
   drawFooter();
+  
+  // 5% right-edge padding (16px of 320px) always overlaid in black
+  gfx.fillRect(304, 0, 16, 240, '#000000');
+  
   document.getElementById('page-status').textContent =
     'page ' + (STATE.currentPage + 1) + '/' + PAGE_COUNT;
 }

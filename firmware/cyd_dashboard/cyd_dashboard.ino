@@ -145,7 +145,7 @@ const int GIF_PAGE = 5;  // 6th page (0-indexed): random cat GIFs from /cats/ on
 // lands at x=319, regardless of PAGE_COUNT (hardcoding a start x broke once
 // a 5th dot pushed past the 320px screen edge).
 const int DOT_SPACING = 12;
-const int DOT_START_X = 316 - (PAGE_COUNT - 1) * DOT_SPACING;
+const int DOT_START_X = 300 - (PAGE_COUNT - 1) * DOT_SPACING;
 
 // Total DRAM available to globals+heap on this ESP32 variant/partition
 // scheme — a fixed board constant (matches "Maximum is 327680 bytes" in the
@@ -204,26 +204,29 @@ bool gifFirstFrame = false;
 
 void presentFrame(bool fullScreen) {
   if (g == &frame) {
+    // Clear rightmost 16px (5% of 320) to black so it's always blank/padded
+    frame.fillRect(304, 0, 16, 240, 0x0000);
+    
     bool offline = !STATE.haveData;
     if (currentPage == 6 && !offline) {
       gfx.startWrite();
       if (frame.getColorDepth() == 16) {
         uint16_t* buf = (uint16_t*)frame.getBuffer();
         if (fullScreen) {
-          // Push left half (0-159, height 240) + right footer (160-319, rows 220-239)
+          // Push left half (0-159, height 240) + right footer (160-303, rows 220-239)
           for (int y = 0; y < 240; y++) {
             gfx.pushImage(0, y, 160, 1, buf + y * 320);
           }
           for (int y = 220; y < 240; y++) {
-            gfx.pushImage(160, y, 160, 1, buf + y * 320 + 160);
+            gfx.pushImage(160, y, 144, 1, buf + y * 320 + 160);
           }
         } else {
-          // Push only the dirty band of the right half (160-319) where the GIF is drawn
+          // Push only the dirty band of the right half (160-303) where the GIF is drawn
           if (gifMinY <= gifMaxY) {
             int startY = gifMinY < 0 ? 0 : gifMinY;
             int endY = gifMaxY >= 220 ? 219 : gifMaxY;
             for (int y = startY; y <= endY; y++) {
-              gfx.pushImage(160, y, 160, 1, buf + y * 320 + 160);
+              gfx.pushImage(160, y, 144, 1, buf + y * 320 + 160);
             }
           }
         }
@@ -236,19 +239,19 @@ void presentFrame(bool fullScreen) {
             frame.readRect(0, y, 160, 1, rowBuf);
             gfx.pushImage(0, y, 160, 1, rowBuf);
           }
-          // Push right footer (160-319, rows 220-239)
+          // Push right footer (160-303, rows 220-239)
           for (int y = 220; y < 240; y++) {
-            frame.readRect(160, y, 160, 1, rowBuf);
-            gfx.pushImage(160, y, 160, 1, rowBuf);
+            frame.readRect(160, y, 144, 1, rowBuf);
+            gfx.pushImage(160, y, 144, 1, rowBuf);
           }
         } else {
-          // Push only the dirty band of the right half (160-319)
+          // Push only the dirty band of the right half (160-303)
           if (gifMinY <= gifMaxY) {
             int startY = gifMinY < 0 ? 0 : gifMinY;
             int endY = gifMaxY >= 220 ? 219 : gifMaxY;
             for (int y = startY; y <= endY; y++) {
-              frame.readRect(160, y, 160, 1, rowBuf);
-              gfx.pushImage(160, y, 160, 1, rowBuf);
+              frame.readRect(160, y, 144, 1, rowBuf);
+              gfx.pushImage(160, y, 144, 1, rowBuf);
             }
           }
         }
@@ -434,7 +437,7 @@ void ensureMdns() {
 const int SPINNER_DOTS = 8;
 
 void drawWifiSpinner(int frame) {
-  const int cx = 160, cy = 120, r = 24, dotR = 4;
+  const int cx = 152, cy = 120, r = 24, dotR = 4;
   g->fillScreen(COL_BG);
   for (int i = 0; i < SPINNER_DOTS; i++) {
     float angle = i * 2 * PI / SPINNER_DOTS;
@@ -940,7 +943,7 @@ void drawFooter() {
   // next poll approaches (full width = fetch imminent).
   uint32_t elapsed = millis() - lastPollMs;
   if (elapsed > POLL_INTERVAL_MS) elapsed = POLL_INTERVAL_MS;
-  int lineW = (int)((float)elapsed / POLL_INTERVAL_MS * 320);
+  int lineW = (int)((float)elapsed / POLL_INTERVAL_MS * 304);
   if (lineW > 0) g->fillRect(0, 239, lineW, 1, COL_TEXT2);
 }
 
@@ -950,7 +953,7 @@ void drawLimitBlock(int y, const char* title, int percent, const String& resets,
   g->setCursor(10, y);
   g->print(title);
 
-  int barX = 10, barY = y + 22, barW = 195, barH = 16;
+  int barX = 10, barY = y + 22, barW = 175, barH = 16;
   g->fillRoundRect(barX, barY, barW, barH, 3, COL_TRACK);
   if (percent >= 0) {
     int fillW = (int)((float)min(percent, 100) / 100 * barW);
@@ -959,7 +962,7 @@ void drawLimitBlock(int y, const char* title, int percent, const String& resets,
 
   g->setTextColor(COL_TEXT);
   g->setTextSize(2);
-  g->setCursor(215, barY + 1);
+  g->setCursor(195, barY + 1);
   g->print(percent >= 0 ? String(percent) + "% used" : "--");
 
   g->setTextColor(COL_TEXT2);
@@ -1018,7 +1021,7 @@ void drawProjectsPage() {
     }
 
     int y = 22;
-    int barMaxW = 250;
+    int barMaxW = 230;
     for (int i = 0; i < shown; i++) {
       g->setTextColor(COL_TEXT);
       g->setTextSize(1);
@@ -1038,7 +1041,7 @@ void drawProjectsPage() {
   }
 
   // ── lower half: 7-day trend ──
-  g->fillRect(10, 128, 300, 1, COL_BORDER);
+  g->fillRect(10, 128, 284, 1, COL_BORDER);
   g->setTextColor(COL_TEXT);
   g->setTextSize(1);
   g->setCursor(10, 134);
@@ -1123,11 +1126,11 @@ void drawCardLabel(int x, int y, const char* label) {
 }
 
 void drawLimitsCard() {
-  g->fillRoundRect(4, 4, 152, 216, 8, COL_SURFACE);
-  g->drawRoundRect(4, 4, 152, 216, 8, COL_BORDER);
+  g->fillRoundRect(2, 4, 142, 216, 8, COL_SURFACE);
+  g->drawRoundRect(2, 4, 142, 216, 8, COL_BORDER);
 
   // ── left card: limits ──
-  drawCardLabel(14, 13, "SESSION (5H)");
+  drawCardLabel(12, 13, "SESSION (5H)");
 
   // Tick the session countdown down locally between polls.
   long sessionRem = STATE.sessionResetsInSec;
@@ -1138,38 +1141,38 @@ void drawLimitsCard() {
 
   g->setTextColor(COL_ACCENT);
   g->setTextSize(4);
-  g->setCursor(14, 28);
+  g->setCursor(12, 28);
   g->print(STATE.sessionPercent >= 0 ? String(STATE.sessionPercent) + "%" : "--");
 
-  drawMiniBar(14, 64, 132, STATE.sessionPercent, COL_ACCENT);
+  drawMiniBar(12, 64, 122, STATE.sessionPercent, COL_ACCENT);
 
   g->setTextColor(COL_TEXT2);
   g->setTextSize(2);
-  g->setCursor(14, 76);
+  g->setCursor(12, 76);
   g->print("resets:");
-  g->setCursor(14, 94);
+  g->setCursor(12, 94);
   g->print(STATE.sessionResets.length() ? STATE.sessionResets : "--");
   g->setTextColor(COL_TEXT);
   g->setTextSize(2);
-  g->setCursor(14, 112);
+  g->setCursor(12, 112);
   if (sessionRem >= 0) g->print("in " + fmtCountdown(sessionRem));
 
-  g->fillRect(14, 136, 132, 1, COL_BORDER);
+  g->fillRect(12, 136, 122, 1, COL_BORDER);
 
-  drawCardLabel(14, 147, "WEEK (ALL MODELS)");
+  drawCardLabel(12, 147, "WEEK (ALL MODELS)");
 
   g->setTextColor(COL_ACCENT);
   g->setTextSize(3);
-  g->setCursor(14, 162);
+  g->setCursor(12, 162);
   g->print(STATE.weekPercent >= 0 ? String(STATE.weekPercent) + "%" : "--");
 
-  drawMiniBar(14, 192, 132, STATE.weekPercent, COL_ACCENT);
+  drawMiniBar(12, 192, 122, STATE.weekPercent, COL_ACCENT);
 
   // "resets Jul 9 at 4:59am" is 22 chars = 132px at size1 — exactly the
   // card's inner width, so this line must stay size1.
   g->setTextColor(COL_TEXT2);
   g->setTextSize(1);
-  g->setCursor(14, 206);
+  g->setCursor(12, 206);
   g->print(STATE.weekResets.length() ? "resets " + STATE.weekResets : "resets --");
 }
 
@@ -1186,21 +1189,21 @@ void drawMixedPageStatic() {
 // are 152px wide with 10px inner padding (content x=14 / x=174, width 132).
 void drawStatusPage() {
   drawLimitsCard();
-  g->fillRoundRect(164, 4, 152, 92, 8, COL_SURFACE);
-  g->drawRoundRect(164, 4, 152, 92, 8, COL_BORDER);
-  g->fillRoundRect(164, 100, 152, 56, 8, COL_SURFACE);
-  g->drawRoundRect(164, 100, 152, 56, 8, COL_BORDER);
-  g->fillRoundRect(164, 160, 152, 56, 8, COL_SURFACE);
-  g->drawRoundRect(164, 160, 152, 56, 8, COL_BORDER);
+  g->fillRoundRect(150, 4, 150, 92, 8, COL_SURFACE);
+  g->drawRoundRect(150, 4, 150, 92, 8, COL_BORDER);
+  g->fillRoundRect(150, 100, 150, 56, 8, COL_SURFACE);
+  g->drawRoundRect(150, 100, 150, 56, 8, COL_BORDER);
+  g->fillRoundRect(150, 160, 150, 56, 8, COL_SURFACE);
+  g->drawRoundRect(150, 160, 150, 56, 8, COL_BORDER);
 
   // ── right cards: Bangkok clock/date, weather, BTC price ──
   struct tm timeinfo;
   bool haveTime = getLocalTime(&timeinfo, 0);
 
-  drawCardLabel(174, 13, "BANGKOK");
+  drawCardLabel(160, 13, "BANGKOK");
 
   g->setTextSize(4);
-  g->setCursor(174, 28);
+  g->setCursor(160, 28);
   if (haveTime) {
     char hm[8];
     snprintf(hm, sizeof(hm), "%02d.%02d", timeinfo.tm_hour, timeinfo.tm_min);
@@ -1212,7 +1215,7 @@ void drawStatusPage() {
     g->setTextSize(1);
     // Bottom-align the small seconds against the big "HH.MM" cell (32px
     // tall at size4 vs. 8px at size1): x is the fixed 5-char size4 advance.
-    g->setCursor(174 + 5 * 24, 52);
+    g->setCursor(160 + 5 * 24, 52);
     g->print(ss);
   } else {
     g->setTextColor(COL_TEXT2);
@@ -1221,7 +1224,7 @@ void drawStatusPage() {
 
   g->setTextColor(COL_TEXT2);
   g->setTextSize(2);
-  g->setCursor(174, 66);
+  g->setCursor(160, 66);
   if (haveTime) {
     // Year dropped: "Mon 25 Jul 2026" at size2 would overrun the 132px
     // inner width; weekday+day+month fits at 120px.
@@ -1236,20 +1239,20 @@ void drawStatusPage() {
     g->print("--");
   }
 
-  drawCardLabel(174, 109, "WEATHER");
+  drawCardLabel(160, 109, "WEATHER");
 
-  drawWeatherIcon(174, 124, STATE.weatherCode);
+  drawWeatherIcon(160, 124, STATE.weatherCode);
   g->setTextColor(COL_TEXT);
   g->setTextSize(3);
-  g->setCursor(204, 122);
+  g->setCursor(190, 122);
   // No degree glyph in the built-in ASCII font, so just suffix "C".
   g->print(STATE.weatherTempC > -900 ? String((int)round(STATE.weatherTempC)) + "C" : "--");
 
-  drawCardLabel(174, 169, "BTC/USDT");
+  drawCardLabel(160, 169, "BTC/USDT");
 
   g->setTextColor(COL_TEXT);
   g->setTextSize(3);
-  g->setCursor(174, 182);
+  g->setCursor(156, 182);
   g->print(fmtBtc(STATE.btcPrice));
 }
 
@@ -1287,7 +1290,7 @@ void drawLongTrendPage() {
     if (bars[i] > maxTokens) maxTokens = bars[i];
   }
 
-  int chartX = 10, chartY = 36, chartH = 148, chartW = 300;
+  int chartX = 10, chartY = 36, chartH = 148, chartW = 290;
   int barW = 6, gap = 4;
   int startX = chartX + chartW - barCount * (barW + gap);
   for (int i = 0; i < barCount; i++) {
@@ -1313,7 +1316,7 @@ void drawFullStatBlock(int y, const char* title, int percent, const String& sub,
   g->setCursor(10, y);
   g->print(title);
 
-  int barX = 10, barY = y + 14, barW = 245, barH = 16;
+  int barX = 10, barY = y + 14, barW = 230, barH = 16;
   g->fillRoundRect(barX, barY, barW, barH, 3, COL_TRACK);
   if (percent >= 0) {
     int fillW = (int)((float)min(percent, 100) / 100 * barW);
@@ -1365,10 +1368,10 @@ void drawDevicePage() {
 // playing cat GIF, or the no-cats placeholder) — a solid bar behind the text
 // keeps it legible over a busy GIF frame. Drawn last, right before presentFrame().
 void drawOfflineBanner() {
-  g->fillRect(0, 0, 320, 44, COL_BG);
+  g->fillRect(0, 0, 304, 44, COL_BG);
   g->setTextColor(COL_TEXT);
   g->setTextSize(5);
-  g->setCursor(55, 6);  // centered: "OFFLINE" is 7 chars * 30px = 210px; (320-210)/2 = 55
+  g->setCursor(47, 6);  // centered: "OFFLINE" is 7 chars * 30px = 210px; (304-210)/2 = 47
   g->print("OFFLINE");
 }
 
@@ -1446,10 +1449,10 @@ void GIFDraw(GIFDRAW* pDraw) {
         int clipEnd = endX;
         if (mixedMode) {
           if (clipStart < 160) clipStart = 160;
-          if (clipEnd > 320) clipEnd = 320;
+          if (clipEnd > 304) clipEnd = 304;
         } else {
           if (clipStart < 0) clipStart = 0;
-          if (clipEnd > 320) clipEnd = 320;
+          if (clipEnd > 304) clipEnd = 304;
         }
         if (clipStart < clipEnd) {
           g->pushImage(clipStart, y, clipEnd - clipStart, 1, usTemp + (clipStart - startX));
@@ -1477,10 +1480,10 @@ void GIFDraw(GIFDRAW* pDraw) {
     int clipEnd = endX;
     if (mixedMode) {
       if (clipStart < 160) clipStart = 160;
-      if (clipEnd > 320) clipEnd = 320;
+      if (clipEnd > 304) clipEnd = 304;
     } else {
       if (clipStart < 0) clipStart = 0;
-      if (clipEnd > 320) clipEnd = 320;
+      if (clipEnd > 304) clipEnd = 304;
     }
     if (clipStart < clipEnd) {
       g->pushImage(clipStart, y, clipEnd - clipStart, 1, usTemp + (clipStart - startX));
@@ -1555,24 +1558,24 @@ void drawGifPlaceholder(bool offline) {
       g->fillRect(160, 0, 160, 240, COL_BG);
       g->setTextColor(COL_ACCENT);
       g->setTextSize(2);
-      g->setCursor(216, 92);
+      g->setCursor(202, 92);
       g->print("CATS");
       g->setTextColor(COL_TEXT2);
       g->setTextSize(1);
       const char* msg = "no GIFs";
-      g->setCursor(160 + (160 - (int)strlen(msg) * 6) / 2, 120);
+      g->setCursor(160 + (144 - (int)strlen(msg) * 6) / 2, 120);
       g->print(msg);
     } else {
       g->fillScreen(COL_BG);
       g->setTextColor(COL_ACCENT);
       g->setTextSize(3);
-      g->setCursor(124, 92);  // "CATS" = 4 chars * 18px = 72; (320-72)/2 = 124
+      g->setCursor(116, 92);  // "CATS" = 4 chars * 18px = 72; (304-72)/2 = 116
       g->print("CATS");
       g->setTextColor(COL_TEXT2);
       g->setTextSize(1);
       const char* msg = STATE.sdOk ? "no GIFs found in /cats/ on the SD card"
                                    : "insert an SD card with /cats/ GIFs";
-      g->setCursor((320 - (int)strlen(msg) * 6) / 2, 132);
+      g->setCursor((304 - (int)strlen(msg) * 6) / 2, 132);
       g->print(msg);
     }
   }
@@ -1595,11 +1598,11 @@ bool openRandomCat() {
   int w = gif->getCanvasWidth(), h = gif->getCanvasHeight();
   bool offline = !STATE.haveData;
   if (currentPage == 6 && !offline) {
-    gifXOffset = 160 + (160 - w) / 2;
+    gifXOffset = 160 + (144 - w) / 2;
     gifYOffset = (220 - h) / 2;
     g->fillRect(160, 0, 160, 240, 0x0000); // clear only the right side
   } else {
-    gifXOffset = w < 320 ? (320 - w) / 2 : 0;
+    gifXOffset = w < 304 ? (304 - w) / 2 : 0;
     gifYOffset = h < 240 ? (240 - h) / 2 : 0;
     g->fillScreen(0x0000);  // clear the sprite; first frame's lines land on top, then present
   }
