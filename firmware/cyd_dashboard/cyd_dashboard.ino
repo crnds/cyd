@@ -15,6 +15,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <DNSServer.h>
+#include <WebServer.h>
 
 #include "pins.h"
 #include "config.h"
@@ -121,12 +123,12 @@ void flashTouchBorder(bool isRight) {
   const int T = 5;
   const uint16_t WHITE = 0xFFFF;
   if (isRight) {
-    gfx.fillRect(160, 0, 160, T, WHITE);        // top right
-    gfx.fillRect(160, 240 - T, 160, T, WHITE);  // bottom right
-    gfx.fillRect(320 - T, 0, T, 240, WHITE);    // right
+    gfx.fillRect(152, 0, 152, T, WHITE);        // top right
+    gfx.fillRect(152, 240 - T, 152, T, WHITE);  // bottom right
+    gfx.fillRect(304 - T, 0, T, 240, WHITE);    // right
   } else {
-    gfx.fillRect(0, 0, 160, T, WHITE);          // top left
-    gfx.fillRect(0, 240 - T, 160, T, WHITE);    // bottom left
+    gfx.fillRect(0, 0, 152, T, WHITE);          // top left
+    gfx.fillRect(0, 240 - T, 152, T, WHITE);    // bottom left
     gfx.fillRect(0, 0, T, 240, WHITE);          // left
   }
   delay(60);
@@ -134,18 +136,27 @@ void flashTouchBorder(bool isRight) {
 }
 
 // ── STATE ──────────────────────────────────────────────────
-// Non-const: overridable from /config.json (see loadRuntimeConfig). Set once at
-// boot before the two tasks start, then only read, so no lock is needed.
-uint32_t POLL_INTERVAL_MS = 20000;
+// Non-const: overridable from /config.json (see loadRuntimeConfig). Originally
+// set once at boot before the two tasks start; now also settable at runtime
+// from the Settings page's Poll Interval leaf (loop(), core 1), so it's
+// volatile -- networkTask (core 0) reads it every cycle (see applyPollInterval).
+volatile uint32_t POLL_INTERVAL_MS = 20000;
 const uint32_t TOUCH_DEBOUNCE_MS = 350;
-const int PAGE_COUNT = 7;
-const int GIF_PAGE = 5;  // 6th page (0-indexed): random cat GIFs from /cats/ on SD
+const int PAGE_COUNT = 8;
+const int GIF_PAGE = 6;    // 7th page (0-indexed): random cat GIFs from /cats/ on SD
+const int MIXED_PAGE = 7;  // 8th page: status + cats split
 
 // Footer pagination dots: right-aligned so the rightmost dot's edge always
 // lands at x=319, regardless of PAGE_COUNT (hardcoding a start x broke once
 // a 5th dot pushed past the 320px screen edge).
 const int DOT_SPACING = 12;
 const int DOT_START_X = 300 - (PAGE_COUNT - 1) * DOT_SPACING;
+
+// Invisible hit-box around the footer's connection-status dot (drawn at
+// 14,230 by drawFooter()) -- tapping it opens the hidden Settings page
+// instead of the normal left/right page navigation. Only checked when the
+// footer is actually on screen (!catMode), same as the dot itself.
+const int PULSE_HIT_X0 = 0, PULSE_HIT_X1 = 40, PULSE_HIT_Y0 = 214, PULSE_HIT_Y1 = 240;
 
 // Total DRAM available to globals+heap on this ESP32 variant/partition
 // scheme — a fixed board constant (matches "Maximum is 327680 bytes" in the
@@ -177,6 +188,14 @@ struct UsageState {
   long sessionResetsInSec = -1;  // countdown to session reset; -1 = unknown
   int weekPercent = -1;
   String weekResets;
+  long ctxTokens = -1;       // context window of the latest session; -1 = unknown
+  int ctxPercent = -1;
+  int weekModelPercent = -1; // per-model weekly limit; -1 = absent (row hidden)
+  String weekModelName;      // e.g. "Fable"
+  String weekModelResets;
+  float creditsUsed = -1;    // extra-usage dollars; -1 = unavailable
+  float creditsLimit = -1;
+  int creditsPercent = -1;
   uint32_t lastFetchOkMs = 0;
   double btcPrice = -1;      // BTC/USDT (from the Mac via /api/usage); -1 = unknown
   float weatherTempC = -999; // Bangkok temp (from the Mac via /api/usage); -999 = unknown
@@ -195,6 +214,22 @@ int64_t longTrend[LONG_TREND_DAYS];
 int longTrendCount = 0;  // valid entries, oldest at [0]; may be < LONG_TREND_DAYS early on
 
 int currentPage = 0;
+int cfgBootPage = 0;  // which page currentPage starts on; overridable via /config.json "boot_page"
+// Hidden Settings area, entered via the footer pulse dot: SET_LIST is a
+// scrollable list of setting names, SET_LEAF is the value-picker for
+// whichever one is open (see SettingDef/SETTINGS[] below).
+enum SettingsScreen { SET_OFF, SET_LIST, SET_LEAF };
+SettingsScreen settingsScreen = SET_OFF;
+int settingsListPage = 0;    // which page of the SET_LIST list is shown
+int settingsLeafIndex = -1;  // index into SETTINGS[] currently open in SET_LEAF
+// Shared two-tap safety for destructive settings (Restart, Forget WiFi): the
+// first tap on a `destructive` leaf's button arms it (see drawSettingsLeaf),
+// a second tap on the same button within CONFIRM_ARM_MS actually fires
+// apply(); anything else (a timeout, backing out, opening a different leaf)
+// clears the arm.
+const uint32_t CONFIRM_ARM_MS = 4000;
+uint32_t confirmArmedMs = 0;
+int confirmArmedRow = -1;
 bool mixedPageDirty = false;
 uint32_t lastPollMs = 0;
 uint32_t lastTouchMs = 0;
@@ -202,23 +237,82 @@ int gifMinY = 220;
 int gifMaxY = -1;
 bool gifFirstFrame = false;
 
+// ── PIXEL SHIFT (anti image-retention) ─────────────────────
+// A 24/7 static dashboard slowly polarizes the LCD (image persistence), so
+// the composed frame is blitted at an offset that orbits 0-2px, one step
+// every few minutes. Offsets only go right (into the 16px black padding past
+// x=304) and up (content starts at y≈4, and the y=239 progress line stays
+// on-screen), so no content is ever clipped away.
+const int8_t SHIFT_ORBIT[8][2] = {
+  {0, 0}, {1, 0}, {2, 0}, {2, -1}, {2, -2}, {1, -2}, {0, -2}, {0, -1}
+};
+uint32_t cfgShiftStepMs = 180000;  // dwell per step; /config.json "pixel_shift_min", 0 disables
+uint8_t shiftIdx = 0;
+int shiftX = 0, shiftY = 0;
+uint32_t lastShiftMs = 0;
+bool shiftDirty = false;  // set on step; the mixed page's partial pushes need one full re-push
+
+// Advance the pixel-shift orbit (core 1 only, like everything display-side).
+// Returns true on a step so the caller can repaint immediately — the panel
+// never straddles two offsets (shiftDirty forces the next presentFrame to be
+// a full blit).
+bool pixelShiftTick(uint32_t now) {
+  if (cfgShiftStepMs == 0 || g != &frame) return false;
+  if (now - lastShiftMs < cfgShiftStepMs) return false;
+  lastShiftMs = now;
+  shiftIdx = (uint8_t)((shiftIdx + 1) % 8);
+  shiftX = SHIFT_ORBIT[shiftIdx][0];
+  shiftY = SHIFT_ORBIT[shiftIdx][1];
+  shiftDirty = true;
+  return true;
+}
+
+// Blank the panel strips a shifted blit leaves uncovered (left shiftX
+// columns, bottom -shiftY rows) so no stale pixels linger at the edges.
+void clearShiftMargins() {
+  if (shiftX > 0) gfx.fillRect(0, 0, shiftX, 240, 0x0000);
+  if (shiftY < 0) gfx.fillRect(0, 240 + shiftY, 320, -shiftY, 0x0000);
+}
+
+bool checkHourlyFlash(bool& isEvenSecond) {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 0)) {
+    if (timeinfo.tm_min == 0 && timeinfo.tm_sec < 6) {
+      isEvenSecond = (timeinfo.tm_sec % 2 == 0);
+      return true;
+    }
+  }
+  return false;
+}
+
 void presentFrame(bool fullScreen) {
+  bool isEvenSecond = false;
+  if (checkHourlyFlash(isEvenSecond)) {
+    gfx.invertDisplay(isEvenSecond);
+  } else {
+    gfx.invertDisplay(false);
+  }
+
   if (g == &frame) {
     // Clear rightmost 16px (5% of 320) to black so it's always blank/padded
     frame.fillRect(304, 0, 16, 240, 0x0000);
     
     bool offline = !STATE.haveData;
-    if (currentPage == 6 && !offline) {
+    // All destination coords carry the pixel-shift offset; LovyanGFX clips
+    // pushes past the panel edge, so no bounds checks are needed. After an
+    // orbit step (shiftDirty) the partial path would leave half the screen at
+    // the old offset, so that one frame falls through to the full blit below.
+    if (currentPage == MIXED_PAGE && !offline && !shiftDirty) {
       gfx.startWrite();
       if (frame.getColorDepth() == 16) {
         uint16_t* buf = (uint16_t*)frame.getBuffer();
         if (fullScreen) {
           // Push left half (0-159, height 240) + right footer (160-303, rows 220-239)
           for (int y = 0; y < 240; y++) {
-            gfx.pushImage(0, y, 160, 1, buf + y * 320);
+            gfx.pushImage(shiftX, y + shiftY, 160, 1, buf + y * 320);
           }
           for (int y = 220; y < 240; y++) {
-            gfx.pushImage(160, y, 144, 1, buf + y * 320 + 160);
+            gfx.pushImage(160 + shiftX, y + shiftY, 144, 1, buf + y * 320 + 160);
           }
         } else {
           // Push only the dirty band of the right half (160-303) where the GIF is drawn
@@ -226,7 +320,7 @@ void presentFrame(bool fullScreen) {
             int startY = gifMinY < 0 ? 0 : gifMinY;
             int endY = gifMaxY >= 220 ? 219 : gifMaxY;
             for (int y = startY; y <= endY; y++) {
-              gfx.pushImage(160, y, 144, 1, buf + y * 320 + 160);
+              gfx.pushImage(160 + shiftX, y + shiftY, 144, 1, buf + y * 320 + 160);
             }
           }
         }
@@ -237,12 +331,12 @@ void presentFrame(bool fullScreen) {
           // Push left half (0-159, height 240)
           for (int y = 0; y < 240; y++) {
             frame.readRect(0, y, 160, 1, rowBuf);
-            gfx.pushImage(0, y, 160, 1, rowBuf);
+            gfx.pushImage(shiftX, y + shiftY, 160, 1, rowBuf);
           }
           // Push right footer (160-303, rows 220-239)
           for (int y = 220; y < 240; y++) {
             frame.readRect(160, y, 144, 1, rowBuf);
-            gfx.pushImage(160, y, 144, 1, rowBuf);
+            gfx.pushImage(160 + shiftX, y + shiftY, 144, 1, rowBuf);
           }
         } else {
           // Push only the dirty band of the right half (160-303)
@@ -251,14 +345,16 @@ void presentFrame(bool fullScreen) {
             int endY = gifMaxY >= 220 ? 219 : gifMaxY;
             for (int y = startY; y <= endY; y++) {
               frame.readRect(160, y, 144, 1, rowBuf);
-              gfx.pushImage(160, y, 144, 1, rowBuf);
+              gfx.pushImage(160 + shiftX, y + shiftY, 144, 1, rowBuf);
             }
           }
         }
       }
       gfx.endWrite();
     } else {
-      frame.pushSprite(0, 0);
+      frame.pushSprite(shiftX, shiftY);
+      clearShiftMargins();
+      shiftDirty = false;
     }
   }
 }
@@ -299,7 +395,7 @@ inline void unlockSD() { if (sdMutex) xSemaphoreGive(sdMutex); }
 // Random cat GIFs from /cats/ on the SD card, played endlessly on the 6th page.
 // Decode + draw happen on the render core (core 1) in gifTick(); SD reads there
 // are guarded by sdMutex so they can't collide with the network task's writes.
-// Allocated only while page 6 is showing (see loop's page-transition handler)
+// Allocated only while a cat page is showing (see loop's page-transition handler)
 // and freed on exit — its work buffers are ~24KB, and keeping them resident
 // permanently starved the mbedTLS handshake that the BTC/weather HTTPS fetches
 // need, so those tiles went blank ("--"). Off the GIF page this heap is free.
@@ -313,6 +409,8 @@ int gifXOffset = 0, gifYOffset = 0;  // centering offsets for the current GIF
 bool gifOpen = false;
 bool gifPlaceholderDrawn = false;
 uint32_t gifNextFrameMs = 0;
+uint32_t gifOpenedAtMs = 0;  // when the current GIF opened; used by the shuffle-interval cutoff
+uint32_t catShuffleMs = 0;   // 0 = let each GIF play to its natural end; core-1-only (read in gifTick(), called only from loop())
 
 // Server discovery: when SERVER_HOST ends in ".local" we resolve it via mDNS
 // (Bonjour) so the board finds the Mac by name even after its IP changes on
@@ -340,6 +438,27 @@ String cfgWifiPassword = WIFI_PASSWORD;
 String cfgServerHost = SERVER_HOST;
 int cfgServerPort = SERVER_PORT;
 int cfgBrightness = 200;   // 0-255 panel backlight; overridable via /config.json
+// Night mode: fixed 23:00-07:00 schedule (Bangkok has no DST, so tm_hour is
+// already correct local time -- no timezone math needed), dims to a fixed
+// 25% while on. Checked once/sec in loop() (core-1-only, like cfgShiftStepMs)
+// regardless of page/catMode/settings state, so it doesn't need a volatile
+// -- nightDimActive tracks whether the dim is currently applied, so
+// applyNightMode() can restore immediately if toggled off mid-dim.
+bool cfgNightModeOn = false;
+bool nightDimActive = false;
+const uint8_t NIGHT_MODE_DIM_VALUE = 64;  // ~25%, matches the brightness preset
+// Generic Settings-page persistence queue: a leaf's apply() (loop(), core 1)
+// mutates its live global directly, then queues the /config.json key/value
+// here; networkTask (core 0) drains it so the SD write never happens on the
+// render core. One queue serves every single-int setting (brightness, poll
+// interval, pixel-shift, etc.) -- see CONFIG_KEY_NAMES/queueConfigSave().
+volatile bool pendingConfigSave = false;
+volatile uint8_t pendingConfigKeyId = 0;
+volatile int32_t pendingConfigValue = 0;
+// Forget WiFi doesn't fit the single-int queue above (it erases two string
+// keys), and its restart must wait for the SD write to actually finish, so
+// it gets its own flag -- networkTask() does the erase then restarts.
+volatile bool pendingForgetWifi = false;
 int cfgScreenRotation = 1;
 int cfgTouchXMin = 200;
 int cfgTouchXMax = 3800;
@@ -516,12 +635,34 @@ bool applyUsageJson(const String& payload) {
     STATE.sessionResetsInSec = doc["limits"]["session"]["resets_in_sec"] | -1L;
     STATE.weekPercent = doc["limits"]["week"]["percent"] | -1;
     STATE.weekResets = doc["limits"]["week"]["resets"].as<String>();
+    STATE.weekModelPercent = doc["limits"]["week_model"]["percent"] | -1;
+    STATE.weekModelName = String(doc["limits"]["week_model"]["name"] | "");
+    STATE.weekModelResets = String(doc["limits"]["week_model"]["resets"] | "");
+    STATE.creditsUsed = doc["limits"]["credits"]["used"] | -1.0f;
+    STATE.creditsLimit = doc["limits"]["credits"]["limit"] | -1.0f;
+    STATE.creditsPercent = doc["limits"]["credits"]["percent"] | -1;
   } else {
     STATE.sessionPercent = -1;
     STATE.sessionResets = "";
     STATE.sessionResetsInSec = -1L;
     STATE.weekPercent = -1;
     STATE.weekResets = "";
+    STATE.weekModelPercent = -1;
+    STATE.weekModelName = "";
+    STATE.weekModelResets = "";
+    STATE.creditsUsed = -1;
+    STATE.creditsLimit = -1;
+    STATE.creditsPercent = -1;
+  }
+
+  // Context window of the latest session — computed by the server from the
+  // newest jsonl event; null until its first scan completes.
+  if (!doc["context"].isNull()) {
+    STATE.ctxTokens = doc["context"]["tokens"] | -1L;
+    STATE.ctxPercent = doc["context"]["percent"] | -1;
+  } else {
+    STATE.ctxTokens = -1;
+    STATE.ctxPercent = -1;
   }
 
   // BTC + weather are fetched by the Mac and delivered in this same payload (the
@@ -693,8 +834,16 @@ void loadRuntimeConfig() {
 
   JsonDocument doc;
   if (deserializeJson(doc, payload)) return;
-  if (!doc["wifi_ssid"].isNull()) cfgWifiSsid = doc["wifi_ssid"].as<String>();
-  if (!doc["wifi_password"].isNull()) cfgWifiPassword = doc["wifi_password"].as<String>();
+  // wifi_ssid/wifi_password from the card are used only when config.h's
+  // compiled WIFI_SSID is empty -- exactly the "never configured, let the AP
+  // setup portal's saved result take over" case (see runApSetup()). A real
+  // WIFI_SSID baked into config.h always wins, so editing config.h and
+  // reflashing -- the normal way to change WiFi -- isn't silently shadowed
+  // forever by whatever was once submitted through the portal.
+  if (cfgWifiSsid.length() == 0) {
+    if (!doc["wifi_ssid"].isNull()) cfgWifiSsid = doc["wifi_ssid"].as<String>();
+    if (!doc["wifi_password"].isNull()) cfgWifiPassword = doc["wifi_password"].as<String>();
+  }
   if (!doc["server_host"].isNull()) cfgServerHost = doc["server_host"].as<String>();
   if (!doc["server_port"].isNull()) cfgServerPort = doc["server_port"].as<int>();
   if (!doc["brightness"].isNull()) {
@@ -711,6 +860,22 @@ void loadRuntimeConfig() {
   if (!doc["touch_y_min"].isNull()) cfgTouchYMin = doc["touch_y_min"].as<int>();
   if (!doc["touch_y_max"].isNull()) cfgTouchYMax = doc["touch_y_max"].as<int>();
   if (!doc["touch_offset_rotation"].isNull()) cfgTouchOffsetRotation = doc["touch_offset_rotation"].as<int>();
+  if (!doc["pixel_shift_min"].isNull()) {
+    // Minutes per anti-retention orbit step; 0 pins the frame at (0,0).
+    int m = constrain(doc["pixel_shift_min"].as<int>(), 0, 60);
+    cfgShiftStepMs = (uint32_t)m * 60000;
+  }
+  if (!doc["boot_page"].isNull()) {
+    cfgBootPage = constrain(doc["boot_page"].as<int>(), 0, PAGE_COUNT - 1);
+  }
+  if (!doc["cat_shuffle_sec"].isNull()) {
+    // 0 disables the early cutoff (GIFs always play to their natural end).
+    int s = constrain(doc["cat_shuffle_sec"].as<int>(), 0, 300);
+    catShuffleMs = (uint32_t)s * 1000;
+  }
+  if (!doc["night_mode_preset"].isNull()) {
+    cfgNightModeOn = doc["night_mode_preset"].as<int>() != 0;
+  }
   Serial.println("[config] loaded overrides from /config.json");
 }
 
@@ -903,15 +1068,14 @@ void showBootSplash() {
 
 // ── DRAWING HELPERS ────────────────────────────────────────
 void drawFooter() {
-  // Status dot: pulses once a second while the most recent poll reached the
-  // server — big+green on the odd second, small+red on the even second, so the
-  // pulse is easy to read at a glance. Static amber when coasting on cached
-  // data (haveData true but connected false — render() only gets here when
+  // Status dot: blinks once a second while the most recent poll reached the
+  // server — green on the odd second, off on the even second, so the pulse is
+  // easy to read at a glance. Static amber when coasting on cached data
+  // (haveData true but connected false — render() only gets here when
   // haveData is true, so there's no "no data" case left to color for).
-  bool bigPhase = (millis() / 1000) % 2;
-  int dotR = (connected && bigPhase) ? 4 : 3;
-  uint16_t dotColor = !connected ? COL_ACCENT : (bigPhase ? COL_GOOD : COL_WARN);
-  g->fillCircle(14, 230, dotR, dotColor);
+  bool onPhase = (millis() / 1000) % 2;
+  if (!connected) g->fillCircle(14, 230, 3, COL_ACCENT);
+  else if (onPhase) g->fillCircle(14, 230, 4, COL_GOOD);
 
   for (int i = 0; i < PAGE_COUNT; i++) {
     uint16_t c = (i == currentPage) ? COL_ACCENT : COL_BORDER;
@@ -973,6 +1137,70 @@ void drawLimitBlock(int y, const char* title, int percent, const String& resets,
     line += " (" + fmtCountdown(resetsInSec) + ")";
   }
   g->print(line);
+}
+
+// One row of the /usage-style limits page: label left, right-aligned value,
+// thin 8px bar under. percent < 0 leaves the track empty (unknown).
+void drawLimitsRow(int y, const String& label, const String& right, int percent) {
+  g->setTextSize(1);
+  g->setTextColor(COL_TEXT);
+  g->setCursor(10, y);
+  g->print(label);
+  g->setTextColor(COL_TEXT2);
+  g->setCursor(294 - (int)right.length() * 6, y);
+  g->print(right);
+  g->fillRoundRect(10, y + 12, 284, 8, 2, COL_TRACK);
+  if (percent >= 0) {
+    int fillW = (int)((float)min(percent, 100) / 100 * 284 + 0.5f);
+    g->fillRoundRect(10, y + 12, max(fillW, 3), 8, 2, COL_ACCENT);
+  }
+}
+
+// "Resets Jul 16 at 04:59  58%" — or bare "58%", or "--" when unknown.
+String limitRowText(int percent, const String& resets) {
+  if (percent < 0) return "--";
+  String s;
+  if (resets.length()) s = "Resets " + resets + "  ";
+  s += String(percent) + "%";
+  return s;
+}
+
+// Page 6: the Claude Code /usage panel — context window, 5-hour limit,
+// weekly (all models), weekly per-model (hidden when the server sends null,
+// e.g. if the per-model limit is ever discontinued), usage credits. Rows
+// shift up when a row is absent.
+void drawLimitsPage() {
+  g->setTextColor(COL_TEXT);
+  g->setTextSize(1);
+  g->setCursor(10, 6);
+  g->print("USAGE LIMITS");
+
+  int y = 22;
+  String ctx = STATE.ctxTokens >= 0
+      ? fmtTokens(STATE.ctxTokens) + "  " + String(STATE.ctxPercent) + "%"
+      : String("--");
+  drawLimitsRow(y, "Context window", ctx, STATE.ctxPercent); y += 40;
+
+  drawLimitsRow(y, "5-hour limit",
+                limitRowText(STATE.sessionPercent, STATE.sessionResets),
+                STATE.sessionPercent); y += 40;
+
+  drawLimitsRow(y, "Weekly (all models)",
+                limitRowText(STATE.weekPercent, STATE.weekResets),
+                STATE.weekPercent); y += 40;
+
+  if (STATE.weekModelPercent >= 0) {
+    String name = STATE.weekModelName.length() ? STATE.weekModelName : String("model");
+    drawLimitsRow(y, "Weekly (" + name + ")",
+                  limitRowText(STATE.weekModelPercent, STATE.weekModelResets),
+                  STATE.weekModelPercent); y += 40;
+  }
+
+  if (STATE.creditsUsed >= 0) {
+    drawLimitsRow(y, "Usage credits",
+                  fmtCost(STATE.creditsUsed) + " of " + fmtCost(STATE.creditsLimit),
+                  STATE.creditsPercent);
+  }
 }
 
 void drawHomePage() {
@@ -1364,7 +1592,7 @@ void drawDevicePage() {
                      sdColor);
 }
 
-// "OFFLINE" banner overlaid on top of whatever page 6 is already showing (a
+// "OFFLINE" banner overlaid on top of whatever the cat player is already showing (a
 // playing cat GIF, or the no-cats placeholder) — a solid bar behind the text
 // keeps it legible over a busy GIF frame. Drawn last, right before presentFrame().
 void drawOfflineBanner() {
@@ -1417,7 +1645,7 @@ void GIFDraw(GIFDRAW* pDraw) {
   int y = gifYOffset + pDraw->iY + pDraw->y;
   
   bool offline = !STATE.haveData;
-  bool mixedMode = (currentPage == 6 && !offline);
+  bool mixedMode = (currentPage == MIXED_PAGE && !offline);
   int max_y = mixedMode ? 220 : 240;
   if (y < 0 || y >= max_y) return;
 
@@ -1551,7 +1779,7 @@ void drawSessionResetOverlay() {
 // OFFLINE banner is re-applied on top every call since offline state can
 // change independently of the placeholder's draw-once guard.
 void drawGifPlaceholder(bool offline) {
-  bool mixedMode = (currentPage == 6 && !offline);
+  bool mixedMode = (currentPage == MIXED_PAGE && !offline);
   if (!gifPlaceholderDrawn) {
     gifPlaceholderDrawn = true;
     if (mixedMode) {
@@ -1597,7 +1825,7 @@ bool openRandomCat() {
   if (!ok) return false;
   int w = gif->getCanvasWidth(), h = gif->getCanvasHeight();
   bool offline = !STATE.haveData;
-  if (currentPage == 6 && !offline) {
+  if (currentPage == MIXED_PAGE && !offline) {
     gifXOffset = 160 + (144 - w) / 2;
     gifYOffset = (220 - h) / 2;
     g->fillRect(160, 0, 160, 240, 0x0000); // clear only the right side
@@ -1608,10 +1836,11 @@ bool openRandomCat() {
   }
   gifOpen = true;
   gifFirstFrame = true;
+  gifOpenedAtMs = millis();
   return true;
 }
 
-// Called from loop() on core 1 while page 6 is showing, OR while offline on any
+// Called from loop() on core 1 while a cat page is showing, OR while offline on any
 // page (cats double as the offline screen — see catMode in loop()). Decodes at
 // most one frame per call (pacing itself via gifNextFrameMs) so touch stays
 // responsive; when a GIF ends it immediately opens another at random — endless
@@ -1647,7 +1876,11 @@ void gifTick(bool offline) {
   } else {
     presentFrame(false); // push only the GIF region
   }
-  if (more == 0) {                 // last frame drawn — rotate to a new random cat
+  // Rotate to a new random cat either at the GIF's natural end, or early if
+  // the Settings-page shuffle interval says this one has played long enough
+  // (catShuffleMs == 0 disables the early cutoff -- always play to the end).
+  bool shuffleDue = catShuffleMs > 0 && (now - gifOpenedAtMs) >= catShuffleMs;
+  if (more == 0 || shuffleDue) {
     lockSD(); gif->close(); unlockSD();
     gifOpen = false;
     gifNextFrameMs = now;          // open the next one on the following tick
@@ -1656,12 +1889,304 @@ void gifTick(bool offline) {
   }
 }
 
+// ── SETTINGS (hidden: tap the footer's pulse dot to enter) ─────────────────
+// A generic two-screen area: SET_LIST is a scrollable list of setting names
+// (drawSettingsList), SET_LEAF is a value-picker grid for whichever one is
+// open (drawSettingsLeaf). Every setting is one SettingDef row -- a label, a
+// small set of {value,label} options, and two plain function pointers (no
+// std::function/virtual dispatch -- flash is the scarce resource on this
+// board) -- so adding a setting is a data row + a short apply()/getCurrent()
+// pair, not a hand-copied page. This keeps the *rendering* identical for
+// brightness (still presets-only, no slider: the resistive panel isn't
+// precise enough for dragging) while making room for more settings later.
+struct SettingDef {
+  const char* label;      // list-row title
+  const char* leafTitle;  // leaf header (big title)
+  const char* subtitle;   // leaf subheading under the title; "" to omit
+  const char* hint;       // leaf hint line at the bottom
+  uint8_t cols, rows, count;   // button grid shape; rows*cols >= count
+  const int* values;           // raw option values, length == count
+  const char* const* valueLabels;  // button text, length == count
+  uint8_t btnTextSize;    // 1 or 2, sized to fit the longest valueLabel
+  bool destructive;       // reserved for confirm-arm actions (Tier 1+)
+  int (*getCurrent)();        // value to highlight as "on"
+  void (*apply)(int value);   // live mutation + queues SD persistence
+};
+
+const int BRIGHTNESS_VALUES[5] = {0, 64, 128, 191, 255};
+const char* const BRIGHTNESS_LABELS[5] = {"0%", "25%", "50%", "75%", "100%"};
+
+// Config keys persisted through the generic queue (see pendingConfigSave
+// above and saveIntConfigToSD()/networkTask() below). Index here must match
+// the id passed to queueConfigSave() from each setting's apply().
+enum ConfigKeyId {
+  CFGKEY_BRIGHTNESS = 0, CFGKEY_POLL_INTERVAL, CFGKEY_PIXEL_SHIFT, CFGKEY_BOOT_PAGE,
+  CFGKEY_CAT_SHUFFLE, CFGKEY_NIGHT_MODE, CFGKEY_ROTATION, CFGKEY_COUNT
+};
+const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT] = {
+  "brightness", "poll_interval_sec", "pixel_shift_min", "boot_page", "cat_shuffle_sec",
+  "night_mode_preset", "screen_rotation"
+};
+
+void queueConfigSave(uint8_t keyId, int32_t value) {
+  pendingConfigKeyId = keyId;
+  pendingConfigValue = value;
+  pendingConfigSave = true;
+}
+
+int getCurrentBrightness() { return cfgBrightness; }
+void applyBrightness(int v) {
+  cfgBrightness = (uint8_t)v;
+  gfx.setBrightness(cfgBrightness);  // apply immediately
+  queueConfigSave(CFGKEY_BRIGHTNESS, v);
+}
+
+// Destructive/action rows (Restart, and later Forget WiFi) have no "current
+// value" to highlight -- drawSettingsLeaf() skips getCurrent() for them
+// entirely via def.destructive, but the function pointer still needs a body.
+int getCurrentNone() { return -1; }
+
+const int ACTION_VALUES[1] = {0};  // dummy value: these rows are actions, not options
+void applyRestart(int v) { ESP.restart(); }
+const char* const RESTART_LABELS[1] = {"RESTART"};
+
+// Erasing the SD card's WiFi creds + the restart-into-AP-portal must both
+// happen on networkTask (core 0) -- see forgetWifiFromSD()/pendingForgetWifi
+// -- so apply() here just arms the flag and returns immediately.
+void applyForgetWifi(int v) { pendingForgetWifi = true; }
+const char* const FORGET_WIFI_LABELS[1] = {"FORGET WIFI"};
+
+// Poll interval: how often networkTask fetches /api/usage from the Mac.
+// Values are seconds (matches the "poll_interval_sec" config key directly,
+// no unit conversion needed at the SD-persistence layer).
+const int POLL_VALUES[5] = {5, 10, 20, 60, 300};
+const char* const POLL_LABELS[5] = {"5s", "10s", "20s", "60s", "5m"};
+int getCurrentPollInterval() { return (int)(POLL_INTERVAL_MS / 1000); }
+void applyPollInterval(int v) {
+  POLL_INTERVAL_MS = (uint32_t)v * 1000;  // read every cycle by networkTask (core 0)
+  queueConfigSave(CFGKEY_POLL_INTERVAL, v);
+}
+
+// Anti-retention pixel shift: cfgShiftStepMs is read only by pixelShiftTick(),
+// which is only called from loop() -- core-1-only, so this can be mutated
+// directly with no volatile/queue needed for the live value (unlike poll
+// interval, which crosses to networkTask on core 0).
+const int PIXEL_SHIFT_VALUES[4] = {0, 1, 3, 10};
+const char* const PIXEL_SHIFT_LABELS[4] = {"OFF", "1m", "3m", "10m"};
+int getCurrentPixelShift() { return (int)(cfgShiftStepMs / 60000); }
+void applyPixelShift(int v) {
+  cfgShiftStepMs = (uint32_t)v * 60000;
+  queueConfigSave(CFGKEY_PIXEL_SHIFT, v);
+}
+
+// Boot page: which of the 8 pages currentPage starts on next boot. All 8
+// (including the cat/mixed pages) are valid -- render()'s switch and loop()'s
+// catMode check already handle those generically regardless of how
+// currentPage got set, no special-casing needed.
+const int PAGE_VALUES[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+const char* const PAGE_LABELS[8] = {
+  "STATUS", "PROJECTS", "HOME", "DEVICE", "TRENDS", "LIMITS", "CATS", "MIXED"
+};
+int getCurrentBootPage() { return cfgBootPage; }
+void applyBootPage(int v) {
+  cfgBootPage = v;
+  currentPage = v;  // jump the live dashboard too -- a free, immediate effect
+  queueConfigSave(CFGKEY_BOOT_PAGE, v);
+}
+
+// Cat shuffle interval: how long each cat GIF plays before rotating to a new
+// random one. catShuffleMs is core-1-only (read in gifTick(), same as
+// cfgShiftStepMs), so no volatile/queue needed for the live value.
+const int CAT_SHUFFLE_VALUES[4] = {0, 5, 10, 30};
+const char* const CAT_SHUFFLE_LABELS[4] = {"OFF", "5s", "10s", "30s"};
+int getCurrentCatShuffle() { return (int)(catShuffleMs / 1000); }
+void applyCatShuffle(int v) {
+  catShuffleMs = (uint32_t)v * 1000;
+  queueConfigSave(CFGKEY_CAT_SHUFFLE, v);
+}
+
+const int NIGHT_MODE_VALUES[2] = {0, 1};
+const char* const NIGHT_MODE_LABELS[2] = {"OFF", "ON"};
+int getCurrentNightMode() { return cfgNightModeOn ? 1 : 0; }
+void applyNightMode(int v) {
+  cfgNightModeOn = (v != 0);
+  if (!cfgNightModeOn && nightDimActive) {
+    gfx.setBrightness(cfgBrightness);  // restore immediately if toggled off mid-dim
+    nightDimActive = false;
+  }
+  queueConfigSave(CFGKEY_NIGHT_MODE, v);
+}
+
+// Rotation flip: 1 = normal, 3 = 180 degrees (both are landscape; ILI9341
+// rotation 0-3 = 0/90/180/270). Applies live, no restart -- confirmed by
+// reading LovyanGFX's Panel_Device::convertRawXY()/setCalibrate(): the touch
+// affine transform is built once from panel_width/panel_height and the touch
+// x_min/x_max/y_min/y_max (all rotation-independent), while a *separate*
+// per-touch-read step recomputes `r = (panel_rotation + touch.offset_rotation)
+// & 3` and swaps/flips the already-transformed point accordingly -- so touch
+// automatically tracks any setRotation() change with the calibration values
+// completely untouched. No dedicated multi-key save function needed: only
+// screen_rotation actually changes, so this reuses the generic int queue.
+const int ROTATION_VALUES[2] = {1, 3};
+const char* const ROTATION_LABELS[2] = {"NORMAL", "FLIPPED"};
+int getCurrentRotation() { return cfgScreenRotation; }
+void applyRotation(int v) {
+  cfgScreenRotation = v;
+  gfx.applyRuntimeConfig(cfgScreenRotation, cfgTouchXMin, cfgTouchXMax, cfgTouchYMin, cfgTouchYMax, cfgTouchOffsetRotation);
+  queueConfigSave(CFGKEY_ROTATION, v);
+}
+
+const SettingDef SETTINGS[] = {
+  { "BRIGHTNESS", "BRIGHTNESS", "BACKLIGHT BRIGHTNESS", "TAP A LEVEL TO APPLY",
+    5, 1, 5, BRIGHTNESS_VALUES, BRIGHTNESS_LABELS, 2, false,
+    getCurrentBrightness, applyBrightness },
+  { "POLL INTERVAL", "POLL INTERVAL", "HOW OFTEN TO FETCH /API/USAGE", "TAP A RATE TO APPLY",
+    5, 1, 5, POLL_VALUES, POLL_LABELS, 2, false,
+    getCurrentPollInterval, applyPollInterval },
+  { "PIXEL SHIFT", "PIXEL SHIFT", "ANTI-RETENTION ORBIT INTERVAL", "TAP A RATE TO APPLY",
+    4, 1, 4, PIXEL_SHIFT_VALUES, PIXEL_SHIFT_LABELS, 2, false,
+    getCurrentPixelShift, applyPixelShift },
+  { "BOOT PAGE", "BOOT PAGE", "PAGE SHOWN AFTER POWER-ON", "TAP A PAGE TO APPLY",
+    4, 2, 8, PAGE_VALUES, PAGE_LABELS, 1, false,
+    getCurrentBootPage, applyBootPage },
+  { "RESTART", "RESTART", "", "TAP TWICE TO RESTART THE BOARD",
+    1, 1, 1, ACTION_VALUES, RESTART_LABELS, 2, true,
+    getCurrentNone, applyRestart },
+  { "FORGET WIFI", "FORGET WIFI", "", "TAP TWICE TO ERASE WIFI CREDS",
+    1, 1, 1, ACTION_VALUES, FORGET_WIFI_LABELS, 2, true,
+    getCurrentNone, applyForgetWifi },
+  { "CAT SHUFFLE", "CAT SHUFFLE", "HOW LONG EACH CAT GIF PLAYS", "TAP A RATE TO APPLY",
+    4, 1, 4, CAT_SHUFFLE_VALUES, CAT_SHUFFLE_LABELS, 2, false,
+    getCurrentCatShuffle, applyCatShuffle },
+  { "NIGHT MODE", "NIGHT MODE", "23:00-07:00, DIMS TO 25%", "TAP TO TOGGLE",
+    2, 1, 2, NIGHT_MODE_VALUES, NIGHT_MODE_LABELS, 2, false,
+    getCurrentNightMode, applyNightMode },
+  { "ROTATION", "ROTATION", "FOR UPSIDE-DOWN MOUNTING", "APPLIES IMMEDIATELY",
+    2, 1, 2, ROTATION_VALUES, ROTATION_LABELS, 1, false,
+    getCurrentRotation, applyRotation },
+};
+const int SETTINGS_COUNT = 9;
+
+const int SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
+const int SET_NEXT_X0 = 214, SET_NEXT_X1 = 304, SET_NEXT_Y0 = 0, SET_NEXT_Y1 = 34;
+const int SET_BTN_X0 = 11, SET_BTN_Y = 100, SET_BTN_W = 54, SET_BTN_H = 56;
+const int SET_BTN_STEP = 58, SET_BTN_STEP_Y = 62;  // STEP_Y only matters for rows>1
+const int SET_ROW_X0 = 10, SET_ROW_Y0 = 76, SET_ROW_W = 284, SET_ROW_H = 46, SET_ROW_STEP = 52;
+// A lone action button (count==1, e.g. Restart/Forget WiFi) gets the full
+// row width instead of one narrow preset-grid cell -- "TAP AGAIN" doesn't
+// fit in a 54px-wide button, and a wide button reads better for an action
+// anyway. Shares its x/width with the list rows for visual consistency.
+const int SET_WIDE_BTN_X0 = SET_ROW_X0, SET_WIDE_BTN_W = SET_ROW_W;
+const int SETTINGS_ROWS_PER_PAGE = 3;
+
+int settingsTotalListPages() {
+  return (SETTINGS_COUNT + SETTINGS_ROWS_PER_PAGE - 1) / SETTINGS_ROWS_PER_PAGE;
+}
+
+void drawSettingsList() {
+  g->fillScreen(COL_BG);
+
+  g->setTextColor(COL_ACCENT);
+  g->setTextSize(2);
+  g->setCursor(10, 10);
+  g->print("< BACK");
+
+  if (settingsListPage < settingsTotalListPages() - 1) {
+    g->setCursor(SET_NEXT_X0, 10);
+    g->print("NEXT >");
+  }
+
+  g->setTextColor(COL_ACCENT);
+  g->setTextSize(3);
+  g->setCursor(10, 40);
+  g->print("SETTINGS");
+
+  int startIdx = settingsListPage * SETTINGS_ROWS_PER_PAGE;
+  for (int i = 0; i < SETTINGS_ROWS_PER_PAGE; i++) {
+    int idx = startIdx + i;
+    if (idx >= SETTINGS_COUNT) break;
+    int y = SET_ROW_Y0 + i * SET_ROW_STEP;
+    g->fillRoundRect(SET_ROW_X0, y, SET_ROW_W, SET_ROW_H, 6, COL_SURFACE);
+    g->drawRoundRect(SET_ROW_X0, y, SET_ROW_W, SET_ROW_H, 6, COL_BORDER);
+    g->setTextColor(COL_TEXT);
+    g->setTextSize(2);
+    g->setCursor(SET_ROW_X0 + 12, y + (SET_ROW_H - 16) / 2);
+    g->print(SETTINGS[idx].label);
+    g->setTextColor(COL_ACCENT);
+    g->setCursor(SET_ROW_X0 + SET_ROW_W - 24, y + (SET_ROW_H - 16) / 2);
+    g->print(">");
+  }
+}
+
+void drawSettingsLeaf() {
+  const SettingDef& def = SETTINGS[settingsLeafIndex];
+  g->fillScreen(COL_BG);
+
+  g->setTextColor(COL_ACCENT);
+  g->setTextSize(2);
+  g->setCursor(10, 10);
+  g->print("< BACK");
+
+  g->setTextColor(COL_ACCENT);
+  g->setTextSize(3);
+  g->setCursor(10, 40);
+  g->print(def.leafTitle);
+
+  if (def.subtitle[0]) {
+    g->setTextColor(COL_TEXT2);
+    g->setTextSize(1);
+    g->setCursor(10, 76);
+    g->print(def.subtitle);
+  }
+
+  // Only lit when the current value is an exact preset -- a value loaded from
+  // an older/hand-edited config.json just shows no selection until the user
+  // taps one, rather than lying about which preset is "closest". Destructive
+  // rows have no "current value" -- they're armed/unarmed instead (see
+  // confirmArmedRow), so getCurrent() isn't even called for them.
+  int current = def.destructive ? -1 : def.getCurrent();
+  bool armed = def.destructive && confirmArmedRow == settingsLeafIndex &&
+               (millis() - confirmArmedMs < CONFIRM_ARM_MS);
+  int btnW = (def.count == 1) ? SET_WIDE_BTN_W : SET_BTN_W;
+  for (int i = 0; i < def.count; i++) {
+    int col = i % def.cols;
+    int row = i / def.cols;
+    int x = (def.count == 1) ? SET_WIDE_BTN_X0 : SET_BTN_X0 + col * SET_BTN_STEP;
+    int y = SET_BTN_Y + row * SET_BTN_STEP_Y;
+    bool on = armed || (!def.destructive && def.values[i] == current);
+    uint16_t fill = armed ? COL_WARN : (on ? COL_ACCENT : COL_SURFACE);
+    uint16_t border = armed ? COL_WARN : (on ? COL_ACCENT : COL_BORDER);
+    g->fillRoundRect(x, y, btnW, SET_BTN_H, 6, fill);
+    g->drawRoundRect(x, y, btnW, SET_BTN_H, 6, border);
+    const char* label = armed ? "TAP AGAIN" : def.valueLabels[i];
+    int lw = (int)strlen(label) * 6 * def.btnTextSize;
+    g->setTextColor(on ? COL_BG : COL_TEXT);
+    g->setTextSize(def.btnTextSize);
+    g->setCursor(x + (btnW - lw) / 2, y + (SET_BTN_H - 8 * def.btnTextSize) / 2);
+    g->print(label);
+  }
+
+  g->setTextColor(COL_TEXT2);
+  g->setTextSize(1);
+  int hw = (int)strlen(def.hint) * 6;
+  int hintY = (def.rows > 1) ? 230 : 168;  // clears the 2-row grid (e.g. Boot Page)
+  g->setCursor((320 - hw) / 2, hintY);
+  g->print(def.hint);
+}
+
+void renderSettings() {
+  // Neither screen touches STATE, so no stateMutex needed here.
+  if (settingsScreen == SET_LEAF) drawSettingsLeaf();
+  else drawSettingsList();
+  presentFrame();
+}
+
 void render() {
-  // Page 6 is animated frame-by-frame by gifTick() in loop(), not drawn here.
-  // Offline mode is also driven by gifTick() (cats + an OFFLINE banner, see
-  // catMode in loop()), so render() is never called while offline — no
-  // separate offline branch needed here.
-  if (currentPage == GIF_PAGE || currentPage == 6) return;
+  // The cat pages are animated frame-by-frame by gifTick() in loop(), not
+  // drawn here. Offline mode is also driven by gifTick() (cats + an OFFLINE
+  // banner, see catMode in loop()), so render() is never called while
+  // offline — no separate offline branch needed here.
+  if (currentPage == GIF_PAGE || currentPage == MIXED_PAGE) return;
   // Hold the lock across all STATE reads (draw helpers read String members the
   // network task may reassign), then release before the SPI pushSprite so the
   // task's next brief STATE copy isn't delayed by the display write.
@@ -1673,6 +2198,7 @@ void render() {
     case 2: drawHomePage(); break;
     case 3: drawDevicePage(); break;
     case 4: drawLongTrendPage(); break;
+    case 5: drawLimitsPage(); break;    // /usage-style limits panel
   }
   drawFooter();
   unlockState();
@@ -1750,7 +2276,223 @@ void networkTask(void* param) {
     // BTC + weather arrive inside the /api/usage payload (fetched by the Mac),
     // so there are no separate market fetches on the board anymore.
 
+    if (pendingConfigSave) {
+      pendingConfigSave = false;
+      saveIntConfigToSD(CONFIG_KEY_NAMES[pendingConfigKeyId], pendingConfigValue);
+    }
+
+    if (pendingForgetWifi) {
+      pendingForgetWifi = false;
+      forgetWifiFromSD();
+      ESP.restart();  // only after the erase above has actually landed on SD
+    }
+
     vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
+// ── WIFI AP SETUP (first-boot config portal) ───────────────
+// Entered only when STATE.sdOk is true AND cfgWifiSsid is empty after
+// loadRuntimeConfig() runs — i.e. WIFI_SSID was left blank in config.h and no
+// wifi_ssid key has ever been saved to /config.json. Requires the SD card
+// because /config.json is the only writable place credentials can persist
+// (config.h is baked into flash at compile time); with no card there's
+// nowhere to save to, so this is skipped and connectWifi() just runs with
+// the (empty) compiled defaults as it always has.
+//
+// Runs entirely inside setup(), before networkTask/loop() start, so it's
+// free to block: brings up an open softAP + captive portal, waits for a
+// phone to submit new WiFi creds, writes them to /config.json, then
+// ESP.restart()s into the normal boot path (which now finds a saved
+// wifi_ssid and skips this on the next boot). Never returns normally.
+void saveWifiCredsToSD(const String& ssid, const String& password) {
+  JsonDocument doc;
+  File in = SD.open("/config.json", FILE_READ);
+  if (in) {
+    String payload = in.readString();
+    in.close();
+    deserializeJson(doc, payload);  // malformed/missing -> doc just stays empty
+  }
+  doc["wifi_ssid"] = ssid;
+  doc["wifi_password"] = password;
+
+  SD.remove("/config.json");  // FILE_WRITE appends on this SD library -- remove for a clean overwrite
+  File out = SD.open("/config.json", FILE_WRITE);
+  if (out) {
+    serializeJson(doc, out);
+    out.close();
+  }
+}
+
+// Persists any single-int Settings value to /config.json, merging with any
+// existing keys just like saveWifiCredsToSD(). Called from networkTask (core
+// 0) only -- see pendingConfigSave in networkTask() -- so this never
+// contends with the render core for the SD bus outside of sdMutex. One
+// generic function serves every setting whose live value is a plain int
+// (brightness today; poll interval/pixel-shift/etc. in later tiers), rather
+// than a near-duplicate save function per setting.
+void saveIntConfigToSD(const char* key, int32_t value) {
+  if (!STATE.sdOk) return;
+  lockSD();
+  JsonDocument doc;
+  File in = SD.open("/config.json", FILE_READ);
+  if (in) {
+    String payload = in.readString();
+    in.close();
+    deserializeJson(doc, payload);
+  }
+  doc[key] = value;
+
+  SD.remove("/config.json");
+  File out = SD.open("/config.json", FILE_WRITE);
+  if (out) {
+    serializeJson(doc, out);
+    out.close();
+  }
+  unlockSD();
+}
+
+// Erases the saved WiFi credentials from /config.json (Forget WiFi), leaving
+// every other key untouched. Only meaningful when config.h's compiled
+// WIFI_SSID is blank -- if it's baked in, cfgWifiSsid will still be non-empty
+// at the next boot regardless of this, and runApSetup() won't trigger (same
+// precedent as loadRuntimeConfig(): a compiled WIFI_SSID always wins). Called
+// from networkTask (core 0) only, via pendingForgetWifi -- see networkTask().
+void forgetWifiFromSD() {
+  if (!STATE.sdOk) return;
+  lockSD();
+  JsonDocument doc;
+  File in = SD.open("/config.json", FILE_READ);
+  if (in) {
+    String payload = in.readString();
+    in.close();
+    deserializeJson(doc, payload);
+  }
+  doc.remove("wifi_ssid");
+  doc.remove("wifi_password");
+
+  SD.remove("/config.json");
+  File out = SD.open("/config.json", FILE_WRITE);
+  if (out) {
+    serializeJson(doc, out);
+    out.close();
+  }
+  unlockSD();
+}
+
+void drawApSetupScreen(const char* apName, IPAddress ip, int stations) {
+  g->fillScreen(COL_BG);
+  g->setTextColor(COL_ACCENT);
+  g->setTextSize(3);
+  g->setCursor(10, 16);
+  g->print("WIFI SETUP");
+
+  g->setTextColor(COL_TEXT);
+  g->setTextSize(2);
+  g->setCursor(10, 64);
+  g->print("1. Join WiFi:");
+  g->setTextColor(COL_ACCENT);
+  g->setCursor(10, 88);
+  g->print(apName);
+
+  g->setTextColor(COL_TEXT);
+  g->setCursor(10, 124);
+  g->print("2. Open in browser:");
+  g->setTextColor(COL_ACCENT);
+  g->setCursor(10, 148);
+  g->print(ip.toString());
+
+  g->setTextColor(COL_TEXT2);
+  g->setTextSize(1);
+  g->setCursor(10, 200);
+  g->print(stations > 0 ? "Phone connected -- fill in the form" : "Waiting for a phone to join...");
+  presentFrame();
+}
+
+void runApSetup() {
+  logDiag("ap_setup_entered");
+
+  // AP_STA (not plain AP) so scanNetworks() below still works, letting the
+  // setup page offer a pick-list of nearby SSIDs instead of requiring exact,
+  // error-prone manual typing on a phone keyboard.
+  WiFi.mode(WIFI_AP_STA);
+  int found = WiFi.scanNetworks();
+
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  char apName[24];
+  snprintf(apName, sizeof(apName), "CYD-Setup-%02X%02X", mac[4], mac[5]);
+  WiFi.softAP(apName);  // open network, no password -- see AP setup design notes
+  IPAddress apIp = WiFi.softAPIP();
+
+  String options;
+  for (int i = 0; i < found; i++) {
+    options += "<option value=\"" + WiFi.SSID(i) + "\">";
+  }
+
+  DNSServer dnsServer;
+  dnsServer.start(53, "*", apIp);  // redirect all DNS lookups to us (captive portal)
+
+  WebServer server(80);
+
+  server.on("/", HTTP_GET, [&server, &options]() {
+    String html = String(
+      "<!DOCTYPE html><html><head><meta name=viewport content='width=device-width,initial-scale=1'>"
+      "<title>CYD Setup</title><style>"
+      "body{font-family:sans-serif;background:#08090d;color:#f1f5f9;padding:24px;max-width:360px;margin:auto}"
+      "h2{color:#F4620E}input{width:100%;box-sizing:border-box;padding:10px;margin:6px 0;"
+      "border-radius:6px;border:1px solid #333;background:#161b27;color:#fff}"
+      "button{width:100%;padding:12px;background:#F4620E;color:#fff;border:none;"
+      "border-radius:6px;font-size:16px;margin-top:12px}"
+      "</style></head><body>"
+      "<h2>CYD Dashboard Setup</h2>"
+      "<p>Join your home WiFi, then the board reboots into the dashboard.</p>"
+      "<form action='/save' method='POST'>"
+      "<input list='nets' name='ssid' placeholder='WiFi name' autocomplete='off' required>"
+      "<datalist id='nets'>") + options + String("</datalist>"
+      "<input name='password' type='password' placeholder='WiFi password'>"
+      "<button type='submit'>Save &amp; Reboot</button>"
+      "</form></body></html>");
+    server.send(200, "text/html", html);
+  });
+
+  server.on("/save", HTTP_POST, [&server]() {
+    String ssid = server.arg("ssid");
+    String password = server.arg("password");
+    if (ssid.length() == 0) {
+      server.send(400, "text/plain", "SSID required");
+      return;
+    }
+    saveWifiCredsToSD(ssid, password);
+    logDiag("ap_setup_saved_rebooting");
+    server.send(200, "text/html",
+      "<html><body style='font-family:sans-serif;background:#08090d;color:#f1f5f9;padding:24px'>"
+      "<h2 style='color:#F4620E'>Saved</h2><p>Rebooting into the dashboard...</p></body></html>");
+    delay(500);
+    ESP.restart();
+  });
+
+  // Captive-portal auto-popup: redirect any unrecognized path to the setup
+  // page. This covers the common cases well enough; if a phone's OS doesn't
+  // auto-open the popup, the on-screen IP works from any browser too.
+  server.onNotFound([&server, apIp]() {
+    server.sendHeader("Location", String("http://") + apIp.toString() + "/", true);
+    server.send(302, "text/plain", "");
+  });
+
+  server.begin();
+
+  uint32_t lastDrawMs = 0;
+  drawApSetupScreen(apName, apIp, WiFi.softAPgetStationNum());
+  for (;;) {
+    dnsServer.processNextRequest();
+    server.handleClient();
+    uint32_t now = millis();
+    if (now - lastDrawMs >= 1000) {
+      lastDrawMs = now;
+      drawApSetupScreen(apName, apIp, WiFi.softAPgetStationNum());
+    }
+    delay(5);
   }
 }
 
@@ -1765,7 +2507,7 @@ void setup() {
   // during setup's single-threaded initial fetch (uncontended there).
   stateMutex = xSemaphoreCreateMutex();
   sdMutex = xSemaphoreCreateMutex();  // must exist before the first logDiag/SD access below
-  randomSeed(esp_random());           // so the cat picked on page 6 differs each boot
+  randomSeed(esp_random());           // so the cat picked on the cat pages differs each boot
 
   // Allocate the frame buffer before WiFi grabs heap. 16-bit needs ~154KB
   // contiguous; if that fails, 8-bit (~77KB, slight color quantization).
@@ -1791,6 +2533,7 @@ void setup() {
   STATE.sdOk = SD.begin(CYD_SD_CS, sdSPI, 20000000); // 20 MHz SPI
   if (STATE.sdOk) {
     loadRuntimeConfig();
+    currentPage = cfgBootPage;  // honor the /config.json "boot_page" override
     gfx.setBrightness(cfgBrightness);  // honor the /config.json override
     loadLongTrendFromSD();
     loadEnvCache();     // show last-known BTC/weather immediately, before any live fetch
@@ -1801,6 +2544,12 @@ void setup() {
   }
   gfx.applyRuntimeConfig(cfgScreenRotation, cfgTouchXMin, cfgTouchXMax, cfgTouchYMin, cfgTouchYMax, cfgTouchOffsetRotation);
   logDiag((String("boot reason=") + resetReasonStr()).c_str());
+
+  // First-boot config portal: only when there's an SD card to persist the
+  // result to and no WiFi SSID has ever been configured. See runApSetup().
+  if (STATE.sdOk && cfgWifiSsid.length() == 0) {
+    runApSetup();  // blocks until configured, then restarts -- never returns
+  }
 
   connectWifi();
   connected = fetchUsage();  // also carries BTC + weather from the Mac
@@ -1825,11 +2574,37 @@ void loop() {
   uint32_t loopStartUs = micros();
   uint32_t now = millis();
 
-  // Cats own the screen on page 6, AND whenever offline (the cat GIF loop
+  // Cats own the screen on the cat pages, AND whenever offline (the cat GIF loop
   // doubles as the offline screen, with an OFFLINE banner overlaid on top —
   // see drawOfflineBanner()/gifTick()).
   bool offline = !STATE.haveData;
-  bool catMode = (currentPage == GIF_PAGE) || (currentPage == 6) || offline;
+  bool catMode = (currentPage == GIF_PAGE) || (currentPage == MIXED_PAGE) || offline;
+
+  // Anti-retention pixel shift. In cat mode the resulting shiftDirty is
+  // consumed by gifTick's own presentFrame (placeholder included); on pages
+  // 0-4 the render() below repaints at the new offset right away.
+  pixelShiftTick(now);
+
+  // Night mode: applies regardless of page/catMode/settings state, on its
+  // own 1s timer (decoupled from the render cadence below, which is skipped
+  // in catMode/settings). Only calls setBrightness() on a transition edge.
+  if (cfgNightModeOn) {
+    static uint32_t lastNightCheckMs = 0;
+    if (now - lastNightCheckMs >= 1000) {
+      lastNightCheckMs = now;
+      struct tm ti;
+      if (getLocalTime(&ti, 0)) {
+        bool inWindow = (ti.tm_hour >= 23 || ti.tm_hour < 7);
+        if (inWindow && !nightDimActive) {
+          gfx.setBrightness(NIGHT_MODE_DIM_VALUE);
+          nightDimActive = true;
+        } else if (!inWindow && nightDimActive) {
+          gfx.setBrightness(cfgBrightness);
+          nightDimActive = false;
+        }
+      }
+    }
+  }
 
   // catMode-transition bookkeeping: close the GIF on the way out, and reset
   // the placeholder/timer on the way in.
@@ -1850,11 +2625,15 @@ void loop() {
     prevCatMode = catMode;
   }
 
-  if (catMode) {
+  if (settingsScreen != SET_OFF) {
+    // Static page: no clock/session countdown to tick, no progress line, no
+    // GIF playback -- drawn once on entry/change (see renderSettings() calls
+    // in the touch handler below), not on a periodic cadence.
+  } else if (catMode) {
     // Cats animate frame-by-frame; they own the whole screen (no footer or
     // poll-progress line) and need no 1s repaint.
     gifTick(offline);
-    if (currentPage == 6 && !offline) {
+    if (currentPage == MIXED_PAGE && !offline) {
       static uint32_t lastMixedRenderMs = 0;
       if (now - lastMixedRenderMs >= 1000) {
         lastMixedRenderMs = now;
@@ -1869,7 +2648,7 @@ void loop() {
     // countdown, and the Bangkok clock's ticking seconds. Fetches run on core 0,
     // so this cadence is unaffected by network state.
     static uint32_t lastRenderMs = 0;
-    if (now - lastRenderMs >= 1000) {
+    if (now - lastRenderMs >= 1000 || shiftDirty) {
       lastRenderMs = now;
       render();
     }
@@ -1881,11 +2660,17 @@ void loop() {
     if (connected) {
       uint32_t elapsed = now - lastPollMs;
       if (elapsed > POLL_INTERVAL_MS) elapsed = POLL_INTERVAL_MS;
-      int w = (int)((float)elapsed / POLL_INTERVAL_MS * 320);
+      int w = (int)((float)elapsed / POLL_INTERVAL_MS * 304);
       if (w < lineW) {
         lineW = w;  // new poll cycle: the full repaint already cleared the line
       } else if (w > lineW) {
-        gfx.fillRect(lineW, 239, w - lineW, 1, COL_TEXT2);
+        bool isEvenSecond = false;
+        bool isFlashWindow = checkHourlyFlash(isEvenSecond);
+        if (!(isFlashWindow && isEvenSecond)) {
+          // Direct panel write, bypasses presentFrame — apply the pixel-shift
+          // offset itself so it lands on the same row as the blitted frame.
+          gfx.fillRect(lineW + shiftX, 239 + shiftY, w - lineW, 1, COL_TEXT2);
+        }
         lineW = w;
       }
     } else {
@@ -1900,32 +2685,100 @@ void loop() {
   }
   if (touchDown && !touchWasDown && now - lastTouchMs > TOUCH_DEBOUNCE_MS) {
     lastTouchMs = now;
-    bool isRight = (tx >= 160);
-    if (isRight) {
-      currentPage = (currentPage + 1) % PAGE_COUNT;
+
+    if (settingsScreen == SET_LEAF) {
+      const SettingDef& def = SETTINGS[settingsLeafIndex];
+      if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
+        confirmArmedRow = -1;
+        settingsScreen = SET_LIST;
+        renderSettings();
+      } else {
+        int btnW = (def.count == 1) ? SET_WIDE_BTN_W : SET_BTN_W;
+        for (int i = 0; i < def.count; i++) {
+          int col = i % def.cols;
+          int row = i / def.cols;
+          int x = (def.count == 1) ? SET_WIDE_BTN_X0 : SET_BTN_X0 + col * SET_BTN_STEP;
+          int y = SET_BTN_Y + row * SET_BTN_STEP_Y;
+          if (tx >= x && tx < x + btnW && ty >= y && ty < y + SET_BTN_H) {
+            if (def.destructive) {
+              bool armed = (confirmArmedRow == settingsLeafIndex &&
+                            now - confirmArmedMs < CONFIRM_ARM_MS);
+              if (armed) {
+                confirmArmedRow = -1;
+                def.apply(def.values[i]);  // may never return (e.g. ESP.restart())
+              } else {
+                confirmArmedRow = settingsLeafIndex;
+                confirmArmedMs = now;
+              }
+            } else {
+              def.apply(def.values[i]);
+            }
+            renderSettings();
+            break;
+          }
+        }
+      }
+    } else if (settingsScreen == SET_LIST) {
+      if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
+        if (settingsListPage > 0) {
+          settingsListPage--;
+          renderSettings();
+        } else {
+          settingsScreen = SET_OFF;
+          if (!catMode) render();  // catMode: gifTick() resumes drawing next pass
+        }
+      } else if (settingsListPage < settingsTotalListPages() - 1 &&
+                 tx >= SET_NEXT_X0 && tx < SET_NEXT_X1 && ty >= SET_NEXT_Y0 && ty < SET_NEXT_Y1) {
+        settingsListPage++;
+        renderSettings();
+      } else {
+        int startIdx = settingsListPage * SETTINGS_ROWS_PER_PAGE;
+        for (int i = 0; i < SETTINGS_ROWS_PER_PAGE; i++) {
+          int idx = startIdx + i;
+          if (idx >= SETTINGS_COUNT) break;
+          int y = SET_ROW_Y0 + i * SET_ROW_STEP;
+          if (tx >= SET_ROW_X0 && tx < SET_ROW_X0 + SET_ROW_W && ty >= y && ty < y + SET_ROW_H) {
+            settingsLeafIndex = idx;
+            confirmArmedRow = -1;
+            settingsScreen = SET_LEAF;
+            renderSettings();
+            break;
+          }
+        }
+      }
+    } else if (!catMode && tx >= PULSE_HIT_X0 && tx < PULSE_HIT_X1 &&
+               ty >= PULSE_HIT_Y0 && ty < PULSE_HIT_Y1) {
+      settingsScreen = SET_LIST;
+      settingsListPage = 0;
+      renderSettings();
     } else {
-      currentPage = (currentPage - 1 + PAGE_COUNT) % PAGE_COUNT;
+      bool isRight = (tx >= 152);
+      if (isRight) {
+        currentPage = (currentPage + 1) % PAGE_COUNT;
+      } else {
+        currentPage = (currentPage - 1 + PAGE_COUNT) % PAGE_COUNT;
+      }
+
+      // Handle initialization when entering a page
+      if (currentPage == MIXED_PAGE && !offline) {
+        lockState();
+        g->fillScreen(COL_BG);
+        drawMixedPageStatic();
+        unlockState();
+        presentFrame();
+
+        if (gifOpen) { lockSD(); gif->close(); unlockSD(); }
+        gifOpen = false;
+        gifNextFrameMs = 0;
+      } else if (currentPage == GIF_PAGE) {
+        if (gifOpen) { lockSD(); gif->close(); unlockSD(); }
+        gifOpen = false;
+        gifNextFrameMs = 0;
+      }
+
+      if (!catMode) render();  // catMode: gifTick() already redraws every pass
+      flashTouchBorder(isRight);  // one-frame white edge flash on the new page: touch registered
     }
-    
-    // Handle initialization when entering a page
-    if (currentPage == 6 && !offline) {
-      lockState();
-      g->fillScreen(COL_BG);
-      drawMixedPageStatic();
-      unlockState();
-      presentFrame();
-      
-      if (gifOpen) { lockSD(); gif->close(); unlockSD(); }
-      gifOpen = false;
-      gifNextFrameMs = 0;
-    } else if (currentPage == GIF_PAGE) {
-      if (gifOpen) { lockSD(); gif->close(); unlockSD(); }
-      gifOpen = false;
-      gifNextFrameMs = 0;
-    }
-    
-    if (!catMode) render();  // catMode: gifTick() already redraws every pass
-    flashTouchBorder(isRight);  // one-frame white edge flash on the new page: touch registered
   }
   touchWasDown = touchDown;
 

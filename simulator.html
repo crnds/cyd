@@ -192,12 +192,15 @@ pre {
         <label for="poll-interval">Poll every</label>
         <select id="poll-interval" aria-label="Poll interval">
           <option value="5000">5s</option>
+          <option value="10000">10s</option>
           <option value="20000" selected>20s (firmware default)</option>
           <option value="60000">60s</option>
+          <option value="300000">5m</option>
         </select>
         <label class="toggle"><input type="checkbox" id="sim-offline"> Simulate server offline</label>
         <label class="toggle"><input type="checkbox" id="mock-data"> Use mock data</label>
         <label class="toggle"><input type="checkbox" id="sim-sd-missing"> Simulate SD card missing</label>
+        <label class="toggle"><input type="checkbox" id="force-hourly-flash"> Force hourly flash (test)</label>
       </div>
       <div class="status-line">
         <span id="conn-status"><span class="dot bad"></span>not connected</span>
@@ -221,8 +224,17 @@ pre {
 <script>
 // ── CONSTANTS (mirroring cyd_dashboard.ino) ───────────────
 const POLL_DEFAULT_MS = 20000;
-const PAGE_COUNT = 7;
-const GIF_PAGE = 5;  // 6th page: random cat GIFs on the device (stand-in here — see drawGifPage)
+const PAGE_COUNT = 8;
+const GIF_PAGE = 6;   // 7th page: random cat GIFs on the device (stand-in here — see drawGifPage)
+const MIXED_PAGE = 7; // 8th page: status + cats split
+
+// Anti-retention pixel shift — mirrors the firmware's SHIFT_ORBIT/cfgShiftStepMs:
+// the whole frame is blitted at an offset that orbits 0-2px (right/up only, so
+// nothing is clipped away), one step every 3 minutes.
+const SHIFT_ORBIT = [[0,0],[1,0],[2,0],[2,-1],[2,-2],[1,-2],[0,-2],[0,-1]];
+// mirrors the firmware's cfgShiftStepMs -- not const since the Settings
+// page's Pixel Shift leaf (applyPixelShift) can now change it at runtime.
+let SHIFT_STEP_MS = 180000;  // firmware default; /config.json pixel_shift_min * 60000
 // Consecutive failed polls before haveData is forced back to false, mirroring
 // the firmware's fetchFailCycles/OFFLINE_AFTER_CYCLES.
 const OFFLINE_AFTER_CYCLES = 3;
@@ -237,12 +249,199 @@ const DOT_SPACING = 12;
 const DOT_START_X = 300 - (PAGE_COUNT - 1) * DOT_SPACING;
 const STALE_AFTER_SEC = 60;
 
+// Invisible hit-box around the footer's connection-status dot (14,230) --
+// clicking it opens the hidden Settings page, mirrors the firmware's
+// PULSE_HIT_X0/X1/Y0/Y1.
+const PULSE_HIT_X0 = 0, PULSE_HIT_X1 = 40, PULSE_HIT_Y0 = 214, PULSE_HIT_Y1 = 240;
+
+// Settings (generic LIST + leaf GRID) geometry -- mirrors the firmware's
+// SET_BACK_*/SET_NEXT_*/SET_BTN_*/SET_ROW_* exactly.
+const SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
+const SET_NEXT_X0 = 214, SET_NEXT_X1 = 304, SET_NEXT_Y0 = 0, SET_NEXT_Y1 = 34;
+const SET_BTN_X0 = 11, SET_BTN_Y = 100, SET_BTN_W = 54, SET_BTN_H = 56;
+const SET_BTN_STEP = 58, SET_BTN_STEP_Y = 62;  // STEP_Y only matters for rows>1
+const SET_ROW_X0 = 10, SET_ROW_Y0 = 76, SET_ROW_W = 284, SET_ROW_H = 46, SET_ROW_STEP = 52;
+// A lone action button (count==1, e.g. Restart/Forget WiFi) gets the full
+// row width instead of one narrow preset-grid cell -- mirrors the firmware's
+// SET_WIDE_BTN_X0/W.
+const SET_WIDE_BTN_X0 = SET_ROW_X0, SET_WIDE_BTN_W = SET_ROW_W;
+const SETTINGS_ROWS_PER_PAGE = 3;
+const BRIGHTNESS_KEY = 'cyddashboard_v1_brightness';
+const BOOT_PAGE_KEY = 'cyddashboard_v1_bootpage';
+const CAT_SHUFFLE_KEY = 'cyddashboard_v1_catshuffle';
+const NIGHT_MODE_KEY = 'cyddashboard_v1_nightmode';
+const ROTATION_KEY = 'cyddashboard_v1_rotation';
+
+// SettingDef table -- mirrors the firmware's SettingDef struct/SETTINGS[]
+// array field-for-field (label/leafTitle/subtitle/hint/cols/rows/count/
+// values/valueLabels/btnTextSize/destructive/getCurrent/apply), just as a
+// plain JS array of objects instead of a C struct array.
+function getCurrentBrightness() { return STATE.cfgBrightness; }
+function applyBrightness(v) {
+  STATE.cfgBrightness = v;
+  localStorage.setItem(BRIGHTNESS_KEY, String(v));
+  applyBrightnessFilter();
+}
+// Destructive/action rows have no "current value" -- drawSettingsLeaf()
+// skips getCurrent() for them via .destructive, but the field still needs a
+// function. A page reload is the simulator's stand-in for ESP.restart(): no
+// real device to reboot, but it's the closest browser equivalent (STATE
+// re-initializes fresh, same as the board re-running setup()).
+function getCurrentNone() { return -1; }
+function applyRestart(v) { location.reload(); }
+
+// Forget WiFi: no real WiFi/AP-portal to simulate in a browser, so this is a
+// console-log stand-in (same "no-op for firmware-only effects" pattern as
+// Restart's reload) -- it doesn't erase brightness/boot-page, matching the
+// firmware which only touches wifi_ssid/wifi_password.
+function applyForgetWifi(v) {
+  console.log('[sim] Forget WiFi: on real hardware this erases wifi_ssid/' +
+              'wifi_password from config.json and restarts into the AP setup portal.');
+  location.reload();
+}
+
+// Cat shuffle interval: cosmetic/persisted only -- the simulator's cat page
+// is a static placeholder (see drawGifPage), not real GIF playback, so
+// there's no pacing to actually hook this into (same firmware-only-effect
+// exception already documented for cat GIFs generally).
+function getCurrentCatShuffle() { return STATE.catShuffleSec; }
+function applyCatShuffle(v) {
+  STATE.catShuffleSec = v;
+  localStorage.setItem(CAT_SHUFFLE_KEY, String(v));
+}
+
+// Night mode: fixed 23:00-07:00 schedule, dims to a fixed 25% while active --
+// mirrors the firmware's cfgNightModeOn/nightDimActive/NIGHT_MODE_DIM_VALUE.
+// bangkokParts() is this simulator's getLocalTime() stand-in (no DST, fixed
+// UTC+7, matching GMT_OFFSET_SEC), checked once/sec from tick() below.
+let nightDimActive = false;
+let lastNightCheckMs = 0;
+function getCurrentNightMode() { return STATE.cfgNightModeOn ? 1 : 0; }
+function applyNightMode(v) {
+  STATE.cfgNightModeOn = v !== 0;
+  localStorage.setItem(NIGHT_MODE_KEY, String(v));
+  if (!STATE.cfgNightModeOn && nightDimActive) {
+    applyBrightnessFilter();  // restore immediately if toggled off mid-dim
+    nightDimActive = false;
+  }
+}
+function checkNightMode() {
+  const now = performance.now();
+  if (now - lastNightCheckMs < 1000) return;
+  lastNightCheckMs = now;
+  if (!STATE.cfgNightModeOn) return;
+  const bkk = bangkokParts();
+  if (!bkk) return;
+  const hour = parseInt(bkk.hour, 10);
+  const inWindow = hour >= 23 || hour < 7;
+  if (inWindow && !nightDimActive) {
+    canvas.style.filter = 'brightness(25%)';
+    nightDimActive = true;
+  } else if (!inWindow && nightDimActive) {
+    applyBrightnessFilter();
+    nightDimActive = false;
+  }
+}
+
+// Rotation flip: applies live on real hardware (see the firmware's
+// applyRotation() comment for why touch needs no recalibration). A real
+// 180deg canvas transform would need offsetX/offsetY math the click handler
+// doesn't do, so this is a console-log stand-in + persisted value only,
+// same "no-op for firmware-only effects" pattern as Restart/Forget WiFi.
+function getCurrentRotation() { return STATE.cfgScreenRotation; }
+function applyRotation(v) {
+  STATE.cfgScreenRotation = v;
+  localStorage.setItem(ROTATION_KEY, String(v));
+  console.log('[sim] Rotation: on real hardware this calls gfx.applyRuntimeConfig() ' +
+              'immediately, no restart -- see cyd_dashboard.ino for why touch needs no recalibration.');
+}
+
+// Poll interval: wired to the sidebar's real "#poll-interval" select + its
+// restartPollTimer(), so picking a preset here actually changes the
+// simulated fetch cadence -- a genuine effect, not just a cosmetic stand-in.
+function getCurrentPollInterval() {
+  return Number(document.getElementById('poll-interval').value) / 1000;
+}
+function applyPollInterval(v) {
+  document.getElementById('poll-interval').value = String(v * 1000);
+  restartPollTimer();
+}
+
+// Pixel shift: SHIFT_STEP_MS is only read by render()'s shift-orbit advance
+// (the browser has one thread, so no cross-core concern to mirror here).
+function getCurrentPixelShift() { return SHIFT_STEP_MS / 60000; }
+function applyPixelShift(v) { SHIFT_STEP_MS = v * 60000; }
+
+// Boot page: all 8 pages (including cats/mixed) are valid -- drawScreenContent()
+// already dispatches generically off STATE.currentPage regardless of how it
+// was set, no special-casing needed here either.
+function getCurrentBootPage() { return STATE.cfgBootPage; }
+function applyBootPage(v) {
+  STATE.cfgBootPage = v;
+  STATE.currentPage = v;  // jump the live dashboard too, mirrors the firmware
+  localStorage.setItem(BOOT_PAGE_KEY, String(v));
+}
+
+const SETTINGS = [
+  { label: 'BRIGHTNESS', leafTitle: 'BRIGHTNESS', subtitle: 'BACKLIGHT BRIGHTNESS',
+    hint: 'TAP A LEVEL TO APPLY', cols: 5, rows: 1, count: 5,
+    values: [0, 64, 128, 191, 255], valueLabels: ['0%', '25%', '50%', '75%', '100%'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentBrightness, apply: applyBrightness },
+  { label: 'POLL INTERVAL', leafTitle: 'POLL INTERVAL', subtitle: 'HOW OFTEN TO FETCH /API/USAGE',
+    hint: 'TAP A RATE TO APPLY', cols: 5, rows: 1, count: 5,
+    values: [5, 10, 20, 60, 300], valueLabels: ['5s', '10s', '20s', '60s', '5m'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentPollInterval, apply: applyPollInterval },
+  { label: 'PIXEL SHIFT', leafTitle: 'PIXEL SHIFT', subtitle: 'ANTI-RETENTION ORBIT INTERVAL',
+    hint: 'TAP A RATE TO APPLY', cols: 4, rows: 1, count: 4,
+    values: [0, 1, 3, 10], valueLabels: ['OFF', '1m', '3m', '10m'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentPixelShift, apply: applyPixelShift },
+  { label: 'BOOT PAGE', leafTitle: 'BOOT PAGE', subtitle: 'PAGE SHOWN AFTER POWER-ON',
+    hint: 'TAP A PAGE TO APPLY', cols: 4, rows: 2, count: 8,
+    values: [0, 1, 2, 3, 4, 5, 6, 7],
+    valueLabels: ['STATUS', 'PROJECTS', 'HOME', 'DEVICE', 'TRENDS', 'LIMITS', 'CATS', 'MIXED'],
+    btnTextSize: 1, destructive: false,
+    getCurrent: getCurrentBootPage, apply: applyBootPage },
+  { label: 'RESTART', leafTitle: 'RESTART', subtitle: '',
+    hint: 'TAP TWICE TO RESTART THE BOARD', cols: 1, rows: 1, count: 1,
+    values: [0], valueLabels: ['RESTART'],
+    btnTextSize: 2, destructive: true,
+    getCurrent: getCurrentNone, apply: applyRestart },
+  { label: 'FORGET WIFI', leafTitle: 'FORGET WIFI', subtitle: '',
+    hint: 'TAP TWICE TO ERASE WIFI CREDS', cols: 1, rows: 1, count: 1,
+    values: [0], valueLabels: ['FORGET WIFI'],
+    btnTextSize: 2, destructive: true,
+    getCurrent: getCurrentNone, apply: applyForgetWifi },
+  { label: 'CAT SHUFFLE', leafTitle: 'CAT SHUFFLE', subtitle: 'HOW LONG EACH CAT GIF PLAYS',
+    hint: 'TAP A RATE TO APPLY', cols: 4, rows: 1, count: 4,
+    values: [0, 5, 10, 30], valueLabels: ['OFF', '5s', '10s', '30s'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentCatShuffle, apply: applyCatShuffle },
+  { label: 'NIGHT MODE', leafTitle: 'NIGHT MODE', subtitle: '23:00-07:00, DIMS TO 25%',
+    hint: 'TAP TO TOGGLE', cols: 2, rows: 1, count: 2,
+    values: [0, 1], valueLabels: ['OFF', 'ON'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentNightMode, apply: applyNightMode },
+  { label: 'ROTATION', leafTitle: 'ROTATION', subtitle: 'FOR UPSIDE-DOWN MOUNTING',
+    hint: 'APPLIES IMMEDIATELY', cols: 2, rows: 1, count: 2,
+    values: [1, 3], valueLabels: ['NORMAL', 'FLIPPED'],
+    btnTextSize: 1, destructive: false,
+    getCurrent: getCurrentRotation, apply: applyRotation },
+];
+const SETTINGS_COUNT = 9;
+function settingsTotalListPages() {
+  return Math.ceil(SETTINGS_COUNT / SETTINGS_ROWS_PER_PAGE);
+}
+const CONFIRM_ARM_MS = 4000;
+
 // Flash/RAM are on-device figures with no browser equivalent, so these
 // mirror the last arduino-cli compile report rather than a live query
 // (they only change when the sketch is recompiled, same as on the board).
-const FLASH_USED_BYTES = 1184479;
+const FLASH_USED_BYTES = 1303463;
 const FLASH_TOTAL_BYTES = 1310720;
-const STATIC_RAM_BYTES = 53116;
+const STATIC_RAM_BYTES = 57392;
 const TOTAL_RAM_BYTES = 327680;
 
 // SD card capacity has no browser equivalent either, so this mocks a
@@ -275,6 +474,14 @@ const STATE = {
   sessionResetsInSec: -1, // countdown to session reset; -1 = unknown
   weekPercent: -1,
   weekResets: '',
+  ctxTokens: -1,          // context window of the latest session; -1 = unknown
+  ctxPercent: -1,
+  weekModelPercent: -1,   // per-model weekly limit; -1 = absent (row hidden)
+  weekModelName: '',      // e.g. 'Fable'
+  weekModelResets: '',
+  creditsUsed: -1,        // extra-usage dollars; -1 = unavailable
+  creditsLimit: -1,
+  creditsPercent: -1,
   lastFetchOkMs: 0,
   btcPrice: -1,           // BTC/USDT from Binance; -1 = not fetched yet
   weatherTempC: -999,     // Bangkok current temp from Open-Meteo; -999 = not fetched yet
@@ -288,6 +495,20 @@ const STATE = {
   pollTimer: null,
   weatherTimer: null,
   btcTimer: null,
+  shiftIdx: 0,          // pixel-shift orbit position, mirrors the firmware's shiftIdx
+  lastShiftMs: 0,       // last orbit step, mirrors the firmware's lastShiftMs
+  // 'off' | 'list' | 'leaf' -- mirrors the firmware's SettingsScreen enum
+  settingsScreen: 'off',
+  settingsListPage: 0,
+  settingsLeafIndex: -1,
+  confirmArmedMs: 0,    // mirrors the firmware's confirm-arm mechanic for destructive rows
+  confirmArmedRow: -1,
+  cfgBrightness: 200,   // 0-255, mirrors the firmware's cfgBrightness
+  cfgBootPage: 0,       // mirrors the firmware's cfgBootPage
+  catShuffleSec: 0,     // mirrors the firmware's catShuffleMs (seconds here); cosmetic only --
+                        // the simulator's cat page is a placeholder, no real GIF playback to pace
+  cfgNightModeOn: false, // mirrors the firmware's cfgNightModeOn
+  cfgScreenRotation: 1,  // mirrors the firmware's cfgScreenRotation (1=normal, 3=flipped)
 };
 
 // ── SIMULATED GFX (LovyanGFX-ish API on canvas) ───────────
@@ -380,15 +601,14 @@ function fmtGB(bytes) { return (bytes / (1024 ** 3)).toFixed(1) + 'GB'; }
 
 // ── PAGE DRAWING (line-for-line port of the .ino) ─────────
 function drawFooter() {
-  // Status dot: pulses once a second while the most recent poll reached the
-  // server — big+green on the odd second, small+red on the even second, so the
-  // pulse is easy to read at a glance. Static amber when coasting on cached
-  // data (haveData true but connected false — render() only reaches here when
+  // Status dot: blinks once a second while the most recent poll reached the
+  // server — green on the odd second, off on the even second, so the pulse is
+  // easy to read at a glance. Static amber when coasting on cached data
+  // (haveData true but connected false — render() only reaches here when
   // haveData is true).
-  const bigPhase = Math.floor(performance.now() / 1000) % 2;
-  const dotR = (STATE.connected && bigPhase) ? 4 : 3;
-  const dotColor = !STATE.connected ? COL_ACCENT : (bigPhase ? COL_GOOD : COL_WARN);
-  gfx.fillCircle(14, 230, dotR, dotColor);
+  const onPhase = Math.floor(performance.now() / 1000) % 2;
+  if (!STATE.connected) gfx.fillCircle(14, 230, 3, COL_ACCENT);
+  else if (onPhase) gfx.fillCircle(14, 230, 4, COL_GOOD);
 
   for (let i = 0; i < PAGE_COUNT; i++) {
     const c = (i === STATE.currentPage) ? COL_ACCENT : COL_BORDER;
@@ -450,6 +670,61 @@ function drawLimitBlock(y, title, percent, resets, resetsInSec) {
     line += ' (' + fmtCountdown(resetsInSec) + ')';
   }
   gfx.print(line);
+}
+
+// One row of the /usage-style limits page: label left, right-aligned value,
+// thin 8px bar under. percent < 0 leaves the track empty (unknown).
+function drawLimitsRow(y, label, right, percent) {
+  gfx.setTextSize(1);
+  gfx.setTextColor(COL_TEXT);
+  gfx.setCursor(10, y);
+  gfx.print(label);
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setCursor(294 - right.length * 6, y);
+  gfx.print(right);
+  gfx.fillRoundRect(10, y + 12, 284, 8, 2, COL_TRACK);
+  if (percent >= 0) {
+    const fillW = Math.round(Math.min(percent, 100) / 100 * 284);
+    gfx.fillRoundRect(10, y + 12, Math.max(fillW, 3), 8, 2, COL_ACCENT);
+  }
+}
+
+// "Resets Jul 16 at 04:59  58%" — or bare "58%", or "--" when unknown.
+function limitRowText(percent, resets) {
+  if (percent < 0) return '--';
+  return (resets ? 'Resets ' + resets + '  ' : '') + percent + '%';
+}
+
+// Page 6: the Claude Code /usage panel — context window, 5-hour limit,
+// weekly (all models), weekly per-model (hidden when the server sends null),
+// usage credits. Rows shift up when a row is absent.
+function drawLimitsPage() {
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(1);
+  gfx.setCursor(10, 6);
+  gfx.print('USAGE LIMITS');
+
+  let y = 22;
+  const ctx_ = STATE.ctxTokens >= 0
+    ? fmtTokens(STATE.ctxTokens) + '  ' + STATE.ctxPercent + '%' : '--';
+  drawLimitsRow(y, 'Context window', ctx_, STATE.ctxPercent); y += 40;
+
+  drawLimitsRow(y, '5-hour limit',
+    limitRowText(STATE.sessionPercent, STATE.sessionResets), STATE.sessionPercent); y += 40;
+
+  drawLimitsRow(y, 'Weekly (all models)',
+    limitRowText(STATE.weekPercent, STATE.weekResets), STATE.weekPercent); y += 40;
+
+  if (STATE.weekModelPercent >= 0) {
+    drawLimitsRow(y, 'Weekly (' + (STATE.weekModelName || 'model') + ')',
+      limitRowText(STATE.weekModelPercent, STATE.weekModelResets), STATE.weekModelPercent); y += 40;
+  }
+
+  if (STATE.creditsUsed >= 0) {
+    drawLimitsRow(y, 'Usage credits',
+      fmtCost(STATE.creditsUsed) + ' of ' + fmtCost(STATE.creditsLimit),
+      STATE.creditsPercent);
+  }
 }
 
 function drawHomePage() {
@@ -800,7 +1075,7 @@ function drawDevicePage() {
                      sdColor);
 }
 
-// "OFFLINE" banner overlaid on top of whatever page 6 is already showing —
+// "OFFLINE" banner overlaid on top of whatever page 8 is already showing —
 // mirrors the firmware's drawOfflineBanner(). A solid bar behind the text
 // keeps it legible over a busy GIF frame on the real device.
 function drawOfflineBanner() {
@@ -892,7 +1167,199 @@ function drawMixedPage(offline) {
   gfx.fillRect(304, 0, 16, 240, '#000000');
 }
 
+// ── SETTINGS (hidden: click the footer's pulse dot to enter) ─────────────
+// Near-line-for-line port of the firmware's drawSettingsList()/
+// drawSettingsLeaf() -- a generic scrollable list of setting names drilling
+// into a generic value-picker grid, driven by the SETTINGS[] table above
+// instead of a hand-copied page per setting. There's no real backlight in a
+// browser, so brightness's chosen preset is also applied as a CSS filter on
+// the canvas (see applyBrightnessFilter) purely as a simulator
+// visualization; it isn't part of the firmware parity.
+function drawSettingsList() {
+  gfx.fillScreen(COL_BG);
+
+  gfx.setTextColor(COL_ACCENT);
+  gfx.setTextSize(2);
+  gfx.setCursor(10, 10);
+  gfx.print('< BACK');
+
+  if (STATE.settingsListPage < settingsTotalListPages() - 1) {
+    gfx.setCursor(SET_NEXT_X0, 10);
+    gfx.print('NEXT >');
+  }
+
+  gfx.setTextColor(COL_ACCENT);
+  gfx.setTextSize(3);
+  gfx.setCursor(10, 40);
+  gfx.print('SETTINGS');
+
+  const startIdx = STATE.settingsListPage * SETTINGS_ROWS_PER_PAGE;
+  for (let i = 0; i < SETTINGS_ROWS_PER_PAGE; i++) {
+    const idx = startIdx + i;
+    if (idx >= SETTINGS_COUNT) break;
+    const y = SET_ROW_Y0 + i * SET_ROW_STEP;
+    gfx.fillRoundRect(SET_ROW_X0, y, SET_ROW_W, SET_ROW_H, 6, COL_SURFACE);
+    gfx.drawRoundRect(SET_ROW_X0, y, SET_ROW_W, SET_ROW_H, 6, COL_BORDER);
+    gfx.setTextColor(COL_TEXT);
+    gfx.setTextSize(2);
+    gfx.setCursor(SET_ROW_X0 + 12, y + (SET_ROW_H - 16) / 2);
+    gfx.print(SETTINGS[idx].label);
+    gfx.setTextColor(COL_ACCENT);
+    gfx.setCursor(SET_ROW_X0 + SET_ROW_W - 24, y + (SET_ROW_H - 16) / 2);
+    gfx.print('>');
+  }
+
+  gfx.fillRect(304, 0, 16, 240, '#000000');
+}
+
+function drawSettingsLeaf() {
+  const def = SETTINGS[STATE.settingsLeafIndex];
+  gfx.fillScreen(COL_BG);
+
+  gfx.setTextColor(COL_ACCENT);
+  gfx.setTextSize(2);
+  gfx.setCursor(10, 10);
+  gfx.print('< BACK');
+
+  gfx.setTextColor(COL_ACCENT);
+  gfx.setTextSize(3);
+  gfx.setCursor(10, 40);
+  gfx.print(def.leafTitle);
+
+  if (def.subtitle) {
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setTextSize(1);
+    gfx.setCursor(10, 76);
+    gfx.print(def.subtitle);
+  }
+
+  const current = def.destructive ? -1 : def.getCurrent();
+  const armed = def.destructive && STATE.confirmArmedRow === STATE.settingsLeafIndex &&
+                (performance.now() - STATE.confirmArmedMs < CONFIRM_ARM_MS);
+  const btnW = def.count === 1 ? SET_WIDE_BTN_W : SET_BTN_W;
+  for (let i = 0; i < def.count; i++) {
+    const col = i % def.cols;
+    const row = Math.floor(i / def.cols);
+    const x = def.count === 1 ? SET_WIDE_BTN_X0 : SET_BTN_X0 + col * SET_BTN_STEP;
+    const y = SET_BTN_Y + row * SET_BTN_STEP_Y;
+    const on = armed || (!def.destructive && def.values[i] === current);
+    const fill = armed ? COL_WARN : (on ? COL_ACCENT : COL_SURFACE);
+    const border = armed ? COL_WARN : (on ? COL_ACCENT : COL_BORDER);
+    gfx.fillRoundRect(x, y, btnW, SET_BTN_H, 6, fill);
+    gfx.drawRoundRect(x, y, btnW, SET_BTN_H, 6, border);
+    const label = armed ? 'TAP AGAIN' : def.valueLabels[i];
+    const lw = label.length * 6 * def.btnTextSize;
+    gfx.setTextColor(on ? COL_BG : COL_TEXT);
+    gfx.setTextSize(def.btnTextSize);
+    gfx.setCursor(x + (btnW - lw) / 2, y + (SET_BTN_H - 8 * def.btnTextSize) / 2);
+    gfx.print(label);
+  }
+
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(1);
+  const hw = def.hint.length * 6;
+  const hintY = def.rows > 1 ? 230 : 168;  // clears the 2-row grid (e.g. Boot Page)
+  gfx.setCursor((320 - hw) / 2, hintY);
+  gfx.print(def.hint);
+
+  gfx.fillRect(304, 0, 16, 240, '#000000');
+}
+
+// Simulator-only: visualizes the selected backlight preset since a browser
+// canvas has no real backlight to dim. Not part of firmware parity.
+function applyBrightnessFilter() {
+  const pct = Math.round(STATE.cfgBrightness / 255 * 100);
+  canvas.style.filter = 'brightness(' + pct + '%)';
+}
+
+function loadBrightness() {
+  const raw = localStorage.getItem(BRIGHTNESS_KEY);
+  if (raw === null) return;
+  const v = parseInt(raw, 10);
+  if (!Number.isNaN(v)) STATE.cfgBrightness = v;
+}
+
+function loadBootPage() {
+  const raw = localStorage.getItem(BOOT_PAGE_KEY);
+  if (raw === null) return;
+  const v = parseInt(raw, 10);
+  if (!Number.isNaN(v)) { STATE.cfgBootPage = v; STATE.currentPage = v; }
+}
+
+function loadCatShuffle() {
+  const raw = localStorage.getItem(CAT_SHUFFLE_KEY);
+  if (raw === null) return;
+  const v = parseInt(raw, 10);
+  if (!Number.isNaN(v)) STATE.catShuffleSec = v;
+}
+
+function loadNightMode() {
+  const raw = localStorage.getItem(NIGHT_MODE_KEY);
+  if (raw === null) return;
+  STATE.cfgNightModeOn = raw !== '0';
+}
+
+function loadRotation() {
+  const raw = localStorage.getItem(ROTATION_KEY);
+  if (raw === null) return;
+  const v = parseInt(raw, 10);
+  if (!Number.isNaN(v)) STATE.cfgScreenRotation = v;
+}
+
 function render() {
+  // Pixel shift: advance the orbit on the firmware's cadence, blank the panel
+  // (the firmware's clearShiftMargins() edge strips), then draw the whole
+  // frame translated by the current offset — the canvas twin of presentFrame's
+  // frame.pushSprite(shiftX, shiftY).
+  const nowMs = performance.now();
+  if (SHIFT_STEP_MS > 0 && nowMs - STATE.lastShiftMs >= SHIFT_STEP_MS) {
+    STATE.lastShiftMs = nowMs;
+    STATE.shiftIdx = (STATE.shiftIdx + 1) % 8;
+  }
+  const shiftX = SHIFT_ORBIT[STATE.shiftIdx][0];
+  const shiftY = SHIFT_ORBIT[STATE.shiftIdx][1];
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, 320, 240);
+  ctx.save();
+  ctx.translate(shiftX, shiftY);
+  drawScreenContent();
+  ctx.restore();
+  if (shiftX !== 0 || shiftY !== 0) {
+    document.getElementById('page-status').textContent +=
+      ' · shift (' + shiftX + ',' + shiftY + ')';
+  }
+
+  const bkk = bangkokParts();
+  if (bkk) {
+    const min = parseInt(bkk.minute);
+    const sec = parseInt(bkk.second);
+    if (min === 0 && sec < 6) {
+      if (sec % 2 === 0) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'difference';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, 320, 240);
+        ctx.restore();
+        document.getElementById('page-status').textContent = 'HOURLY SIGNAL (INVERT FLASH)';
+      }
+    }
+  }
+}
+
+function drawScreenContent() {
+  // Settings takes priority over everything else, mirroring the firmware's
+  // loop() where settingsScreen != SET_OFF short-circuits the catMode/
+  // normal-render split.
+  if (STATE.settingsScreen === 'leaf') {
+    drawSettingsLeaf();
+    document.getElementById('page-status').textContent = 'SETTINGS: ' + SETTINGS[STATE.settingsLeafIndex].label;
+    return;
+  }
+  if (STATE.settingsScreen === 'list') {
+    drawSettingsList();
+    document.getElementById('page-status').textContent = 'SETTINGS (list)';
+    return;
+  }
   // Offline mode also shows cats (with an OFFLINE banner on top) instead of a bare offline screen — mirrors
   // the firmware's catMode in loop().
   if (!STATE.haveData) {
@@ -903,13 +1370,13 @@ function render() {
   if (STATE.currentPage === GIF_PAGE) {
     drawGifPage(false);
     document.getElementById('page-status').textContent =
-      'page 6/' + PAGE_COUNT + ' (cat GIFs)';
+      'page 7/' + PAGE_COUNT + ' (cat GIFs)';
     return;
   }
-  if (STATE.currentPage === 6) {
+  if (STATE.currentPage === MIXED_PAGE) {
     drawMixedPage(false);
     document.getElementById('page-status').textContent =
-      'page 7/' + PAGE_COUNT + ' (status + cats)';
+      'page 8/' + PAGE_COUNT + ' (status + cats)';
     return;
   }
   gfx.fillScreen(COL_BG);
@@ -919,6 +1386,7 @@ function render() {
     case 2: drawHomePage(); break;
     case 3: drawDevicePage(); break;
     case 4: drawLongTrendPage(); break;
+    case 5: drawLimitsPage(); break;    // /usage-style limits panel
   }
   drawFooter();
   
@@ -948,7 +1416,10 @@ const MOCK = {
     tz: 'Asia/Bangkok',
     session: { percent: 27, resets: '03:19', resets_in_sec: 5400 },
     week: { percent: 86, resets: 'Jul 9 at 04:59' },
+    week_model: { name: 'Fable', percent: 58, resets: 'Jul 16 at 04:59' },  // set null to test the hidden row
+    credits: { used: 0.41, limit: 10.0, percent: 4 },
   },
+  context: { tokens: 80000, percent: 40 },
   btc: { price: 109432 },
   weather: { tempC: 34, code: 3 },
 };
@@ -1024,12 +1495,31 @@ function applyData(doc) {
     STATE.sessionResetsInSec = doc.limits.session?.resets_in_sec ?? -1;
     STATE.weekPercent = doc.limits.week?.percent ?? -1;
     STATE.weekResets = doc.limits.week?.resets ?? '';
+    STATE.weekModelPercent = doc.limits.week_model?.percent ?? -1;
+    STATE.weekModelName = doc.limits.week_model?.name ?? '';
+    STATE.weekModelResets = doc.limits.week_model?.resets ?? '';
+    STATE.creditsUsed = doc.limits.credits?.used ?? -1;
+    STATE.creditsLimit = doc.limits.credits?.limit ?? -1;
+    STATE.creditsPercent = doc.limits.credits?.percent ?? -1;
   } else {
     STATE.sessionPercent = -1;
     STATE.sessionResets = '';
     STATE.sessionResetsInSec = -1;
     STATE.weekPercent = -1;
     STATE.weekResets = '';
+    STATE.weekModelPercent = -1;
+    STATE.weekModelName = '';
+    STATE.weekModelResets = '';
+    STATE.creditsUsed = -1;
+    STATE.creditsLimit = -1;
+    STATE.creditsPercent = -1;
+  }
+  if (doc.context) {
+    STATE.ctxTokens = doc.context.tokens ?? -1;
+    STATE.ctxPercent = doc.context.percent ?? -1;
+  } else {
+    STATE.ctxTokens = -1;
+    STATE.ctxPercent = -1;
   }
   // BTC + weather now ride along in the usage payload (the Mac fetches them, the
   // board can't do TLS — see the server's market_loop). Mirrors the firmware's
@@ -1086,6 +1576,18 @@ function bangkokParts() {
   });
   const parts = {};
   for (const p of fmt.formatToParts(new Date())) parts[p.type] = p.value;
+  
+  const forceFlash = document.getElementById('force-hourly-flash')?.checked;
+  if (forceFlash) {
+    const sec = Math.floor(Date.now() / 1000) % 10;
+    return {
+      weekday: parts.weekday, month: parts.month, day: parts.day, year: parts.year,
+      hour: parts.hour === '24' ? '00' : parts.hour,
+      minute: '00',
+      second: '0' + sec,
+    };
+  }
+
   return {
     weekday: parts.weekday, month: parts.month, day: parts.day, year: parts.year,
     hour: parts.hour === '24' ? '00' : parts.hour, minute: parts.minute, second: parts.second,
@@ -1208,19 +1710,95 @@ function restartPollTimer() {
 function flashTouchBorder(isRight) {
   const T = 5;
   if (isRight) {
-    gfx.fillRect(160, 0, 160, T, COL_TEXT);        // top right
-    gfx.fillRect(160, 240 - T, 160, T, COL_TEXT);  // bottom right
-    gfx.fillRect(320 - T, 0, T, 240, COL_TEXT);    // right
+    gfx.fillRect(152, 0, 152, T, COL_TEXT);        // top right
+    gfx.fillRect(152, 240 - T, 152, T, COL_TEXT);  // bottom right
+    gfx.fillRect(304 - T, 0, T, 240, COL_TEXT);    // right
   } else {
-    gfx.fillRect(0, 0, 160, T, COL_TEXT);          // top left
-    gfx.fillRect(0, 240 - T, 160, T, COL_TEXT);    // bottom left
+    gfx.fillRect(0, 0, 152, T, COL_TEXT);          // top left
+    gfx.fillRect(0, 240 - T, 152, T, COL_TEXT);    // bottom left
     gfx.fillRect(0, 0, T, 240, COL_TEXT);          // left
   }
   setTimeout(render, 60);
 }
 
 canvas.addEventListener('click', (event) => {
-  const isRight = event.offsetX >= 160;
+  const tx = event.offsetX, ty = event.offsetY;
+  const catMode = (STATE.currentPage === GIF_PAGE) || (STATE.currentPage === MIXED_PAGE) || !STATE.haveData;
+
+  if (STATE.settingsScreen === 'leaf') {
+    const def = SETTINGS[STATE.settingsLeafIndex];
+    if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
+      STATE.confirmArmedRow = -1;
+      STATE.settingsScreen = 'list';
+      render();
+    } else {
+      const btnW = def.count === 1 ? SET_WIDE_BTN_W : SET_BTN_W;
+      for (let i = 0; i < def.count; i++) {
+        const col = i % def.cols;
+        const row = Math.floor(i / def.cols);
+        const x = def.count === 1 ? SET_WIDE_BTN_X0 : SET_BTN_X0 + col * SET_BTN_STEP;
+        const y = SET_BTN_Y + row * SET_BTN_STEP_Y;
+        if (tx >= x && tx < x + btnW && ty >= y && ty < y + SET_BTN_H) {
+          if (def.destructive) {
+            const armed = STATE.confirmArmedRow === STATE.settingsLeafIndex &&
+                          performance.now() - STATE.confirmArmedMs < CONFIRM_ARM_MS;
+            if (armed) {
+              STATE.confirmArmedRow = -1;
+              def.apply(def.values[i]);  // may reload the page (Restart)
+            } else {
+              STATE.confirmArmedRow = STATE.settingsLeafIndex;
+              STATE.confirmArmedMs = performance.now();
+            }
+          } else {
+            def.apply(def.values[i]);
+          }
+          render();
+          break;
+        }
+      }
+    }
+    return;
+  }
+
+  if (STATE.settingsScreen === 'list') {
+    if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
+      if (STATE.settingsListPage > 0) {
+        STATE.settingsListPage--;
+        render();
+      } else {
+        STATE.settingsScreen = 'off';
+        render();
+      }
+    } else if (STATE.settingsListPage < settingsTotalListPages() - 1 &&
+               tx >= SET_NEXT_X0 && tx < SET_NEXT_X1 && ty >= SET_NEXT_Y0 && ty < SET_NEXT_Y1) {
+      STATE.settingsListPage++;
+      render();
+    } else {
+      const startIdx = STATE.settingsListPage * SETTINGS_ROWS_PER_PAGE;
+      for (let i = 0; i < SETTINGS_ROWS_PER_PAGE; i++) {
+        const idx = startIdx + i;
+        if (idx >= SETTINGS_COUNT) break;
+        const y = SET_ROW_Y0 + i * SET_ROW_STEP;
+        if (tx >= SET_ROW_X0 && tx < SET_ROW_X0 + SET_ROW_W && ty >= y && ty < y + SET_ROW_H) {
+          STATE.settingsLeafIndex = idx;
+          STATE.confirmArmedRow = -1;
+          STATE.settingsScreen = 'leaf';
+          render();
+          break;
+        }
+      }
+    }
+    return;
+  }
+
+  if (!catMode && tx >= PULSE_HIT_X0 && tx < PULSE_HIT_X1 && ty >= PULSE_HIT_Y0 && ty < PULSE_HIT_Y1) {
+    STATE.settingsScreen = 'list';
+    STATE.settingsListPage = 0;
+    render();
+    return;
+  }
+
+  const isRight = tx >= 152;
   if (isRight) {
     STATE.currentPage = (STATE.currentPage + 1) % PAGE_COUNT;
   } else {
@@ -1235,6 +1813,7 @@ document.getElementById('poll-interval').addEventListener('change', restartPollT
 document.getElementById('sim-offline').addEventListener('change', fetchUsage);
 document.getElementById('mock-data').addEventListener('change', fetchUsage);
 document.getElementById('sim-sd-missing').addEventListener('change', render);
+document.getElementById('force-hourly-flash').addEventListener('change', render);
 
 // Repaint at ~20fps so the bottom progress line advances smoothly, matching
 // the firmware's incremental line top-ups between its 1s full repaints.
@@ -1245,6 +1824,7 @@ document.getElementById('sim-sd-missing').addEventListener('change', render);
 function tick() {
   const start = performance.now();
   render();
+  checkNightMode();
   const busyMs = performance.now() - start;
   const sample = busyMs / 50 * 100;
   STATE.cpuPercentAvg = STATE.cpuPercentAvg * 0.9 + sample * 0.1;
@@ -1252,6 +1832,12 @@ function tick() {
 setInterval(tick, 50);
 
 loadLongTrend();
+loadBrightness();
+loadBootPage();
+loadCatShuffle();
+loadNightMode();
+loadRotation();
+applyBrightnessFilter();
 render();
 fetchUsage();
 restartPollTimer();

@@ -3,10 +3,16 @@
   "wifi_password": "your-wifi-password",
   "server_host": "your-mac-name.local",
   "server_port": 8787,
+  "poll_interval_sec": 20,
   "screen_rotation": 1,
   "touch_x_min": 200,
   "touch_x_max": 3800,
   "touch_y_min": 3800,
   "touch_y_max": 200,
-  "touch_offset_rotation": 0
+  "touch_offset_rotation": 0,
+  "pixel_shift_min": 3,
+  "brightness": 200,
+  "boot_page": 0,
+  "cat_shuffle_sec": 0,
+  "night_mode_preset": 0
 }

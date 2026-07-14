@@ -18,6 +18,9 @@ PORT = 8787
 SCAN_INTERVAL_SEC = 15
 RETENTION = timedelta(days=8)
 ACTIVE_WINDOW_SEC = 180
+# Assumed model context size for the "context window" percent — the jsonl
+# events don't carry the model's actual limit, so 200K is hardcoded.
+CONTEXT_WINDOW_TOKENS = 200000
 
 # Approximate $/M tokens by model family. Not exact billing — cache_creation
 # and cache_read are rough multipliers of the input rate.
@@ -35,6 +38,7 @@ STATE = {
     "seen": {},         # (message_id, request_id) -> ts, dedupes streamed rewrites
     "clients": {},      # client ip -> last request ts, shows who is polling us
     "limits": None,     # latest plan-limit snapshot from the OAuth usage endpoint
+    "context": None,    # {tokens, ts} — newest assistant event's context size
     "btc": None,        # {price} from Binance — fetched here so the board needs no TLS
     "weather": None,    # {tempC, code} for Bangkok from Open-Meteo, same reason
     "activity_event": threading.Event(),
@@ -72,6 +76,43 @@ WEATHER_URL = ("https://api.open-meteo.com/v1/forecast?latitude=13.7563"
                "&timezone=Asia%2FBangkok")
 BTC_INTERVAL_SEC = 10
 WEATHER_INTERVAL_SEC = 600
+
+# The CYD polls every ~20s nonstop; that's frequent enough that macOS never
+# accumulates a long idle gap and just never commits to real system sleep.
+# Harmless on AC power, but if this Mac is ever left running unattended on
+# battery it silently drains to empty overnight instead of sleeping. Pausing
+# (fully closing) the listening socket below this threshold lets idle sleep
+# proceed; the board already has a graceful OFFLINE/cat-mode fallback for
+# exactly this "server unreachable" case.
+BATTERY_LOW_PCT = 50
+BATTERY_CHECK_INTERVAL_SEC = 60
+
+
+def battery_status():
+    # Returns (percent, on_ac) or None (desktop Macs / parse failure / no
+    # battery report yet). Parsed from `pmset -g batt` text since the stdlib
+    # has no battery API; on_ac comes from the first line, percent from the
+    # "NN%" in the battery detail line below it.
+    try:
+        out = subprocess.run(["/usr/bin/pmset", "-g", "batt"],
+                              capture_output=True, text=True, timeout=5)
+        if out.returncode != 0:
+            return None
+        lines = out.stdout.splitlines()
+        on_ac = "AC Power" in (lines[0] if lines else "")
+        for line in lines[1:]:
+            idx = line.find("%")
+            if idx == -1:
+                continue
+            start = idx
+            while start > 0 and line[start - 1].isdigit():
+                start -= 1
+            if start == idx:
+                continue
+            return int(line[start:idx]), on_ac
+        return None
+    except Exception:
+        return None
 
 
 def local_tz_name():
@@ -130,31 +171,75 @@ def fetch_limits():
     })
     with urllib.request.urlopen(req, timeout=10) as resp:
         doc = json.loads(resp.read())
+    if "five_hour" not in doc and "seven_day" not in doc:
+        return None
     session = doc.get("five_hour") or {}
     week = doc.get("seven_day") or {}
-    # resets_at can be null right after a window resets — treat that like a
-    # missing snapshot (keep last-good) rather than crashing on .replace().
-    if (session.get("utilization") is None or week.get("utilization") is None
-            or not session.get("resets_at") or not week.get("resets_at")):
-        return None
     now = datetime.now().astimezone()
-    week_reset = datetime.fromisoformat(week["resets_at"].replace("Z", "+00:00")).astimezone()
+
+    def window(win, with_date):
+        # resets_at is null between windows (right after a reset, before the
+        # next activity opens a new one) — that means 0% used, no countdown.
+        # Rejecting it wholesale kept the stale pre-reset snapshot on screen.
+        if not win.get("resets_at"):
+            return {"percent": round(win.get("utilization") or 0), "resets": ""}
+        reset_dt = datetime.fromisoformat(win["resets_at"].replace("Z", "+00:00"))
+        return {
+            "percent": round(win.get("utilization") or 0),
+            "resets": fmt_reset_time(
+                win["resets_at"],
+                with_date=with_date and reset_dt.astimezone().date() != now.date()),
+            # Raw epoch so resets_in_sec can be computed fresh per request
+            # even when this snapshot is minutes old.
+            "resets_at_epoch": reset_dt.timestamp(),
+        }
+
+    # Per-model weekly limit (e.g. "Weekly - Fable") from the limits[] array.
+    # May disappear from the response entirely — clients hide the row on null.
+    week_model = None
+    for lim in (doc.get("limits") or []):
+        if lim.get("kind") == "weekly_scoped" and lim.get("percent") is not None:
+            scope = lim.get("scope") or {}
+            name = ((scope.get("model") or {}).get("display_name")) or ""
+            week_model = window(
+                {"utilization": lim["percent"], "resets_at": lim.get("resets_at")},
+                with_date=True)
+            week_model["name"] = name
+            break
+
+    # Extra-usage credits ("$0.41 of $10.00"). Prefer the structured `spend`
+    # object; fall back to the flatter `extra_usage`. Null when disabled.
+    credits = None
+    spend = doc.get("spend") or {}
+    extra = doc.get("extra_usage") or {}
+    if spend.get("enabled") and spend.get("used"):
+        exp = spend["used"].get("exponent", 2)
+        used = spend["used"].get("amount_minor", 0) / (10 ** exp)
+        limit = (spend.get("limit") or {}).get("amount_minor", 0) / (10 ** exp)
+        pct = spend.get("percent")
+        if pct is None:
+            pct = round(used / limit * 100) if limit else 0
+        credits = {"used": round(used, 2), "limit": round(limit, 2),
+                   "percent": round(pct)}
+    elif extra.get("is_enabled") and extra.get("monthly_limit") is not None:
+        dp = extra.get("decimal_places", 2)
+        used = (extra.get("used_credits") or 0) / (10 ** dp)
+        limit = (extra.get("monthly_limit") or 0) / (10 ** dp)
+        pct = extra.get("utilization")
+        if pct is None:
+            pct = used / limit * 100 if limit else 0
+        credits = {"used": round(used, 2), "limit": round(limit, 2),
+                   "percent": round(pct)}
+
     return {
         "tz": TZ_NAME,
         # Raw epoch of this fetch; the handler turns it into age_sec per
         # request so clients can see when the snapshot has gone stale.
         "fetched_at_epoch": time.time(),
-        "session": {
-            "percent": round(session["utilization"]),
-            "resets": fmt_reset_time(session["resets_at"], with_date=False),
-            # Raw epoch so resets_in_sec can be computed fresh per request
-            # even when this snapshot is minutes old.
-            "resets_at_epoch": datetime.fromisoformat(session["resets_at"].replace("Z", "+00:00")).timestamp(),
-        },
-        "week": {
-            "percent": round(week["utilization"]),
-            "resets": fmt_reset_time(week["resets_at"], with_date=week_reset.date() != now.date()),
-        },
+        "session": window(session, with_date=False),
+        "week": window(week, with_date=True),
+        "week_model": week_model,
+        "credits": credits,
     }
 
 
@@ -360,6 +445,7 @@ def project_name(cwd):
 
 def scan_once():
     new_events = []
+    newest_ctx = None  # {tokens, ts} of the newest event in this batch
     for path in glob.glob(LOG_GLOB):
         offset = STATE["offsets"].get(path)
         if offset is None:
@@ -430,6 +516,14 @@ def scan_once():
                 "tokens": total_tokens(usage),
                 "cost": estimate_cost(usage, message.get("model")),
             })
+            # Context window of the latest session = the newest assistant
+            # event's prompt size (input + both cache tiers, no output).
+            ctx_tokens = (
+                (usage.get("input_tokens") or 0)
+                + (usage.get("cache_read_input_tokens") or 0)
+                + (usage.get("cache_creation_input_tokens") or 0))
+            if newest_ctx is None or ts > newest_ctx["ts"]:
+                newest_ctx = {"tokens": ctx_tokens, "ts": ts}
         STATE["offsets"][path] = offset + len(consumable)
 
     if new_events:
@@ -438,6 +532,9 @@ def scan_once():
             cutoff = datetime.now(timezone.utc) - RETENTION
             STATE["events"] = [e for e in STATE["events"] if e["ts"] >= cutoff]
             STATE["seen"] = {k: ts for k, ts in STATE["seen"].items() if ts >= cutoff}
+            prev = STATE["context"]
+            if newest_ctx and (prev is None or newest_ctx["ts"] > prev["ts"]):
+                STATE["context"] = newest_ctx
 
 
 def scan_loop():
@@ -463,6 +560,7 @@ def build_report():
 
     with STATE["lock"]:
         events = list(STATE["events"])
+        ctx = STATE["context"]
 
     today_tokens = today_cost = 0
     last5h_tokens = last5h_cost = 0
@@ -530,17 +628,30 @@ def build_report():
 
     # Countdown to the session reset and snapshot age, computed at request
     # time (not when the limits snapshot was fetched) so they stay accurate
-    # between OAuth refreshes.
+    # between OAuth refreshes. Mutate per-request copies only — the snapshot
+    # in STATE["limits"] must stay pristine.
     limits = STATE["limits"]
     if limits:
         limits = dict(limits)
         if limits.get("fetched_at_epoch"):
             limits["age_sec"] = max(0, int(time.time() - limits["fetched_at_epoch"]))
-        if limits.get("session", {}).get("resets_at_epoch"):
-            session_limits = dict(limits["session"])
-            session_limits["resets_in_sec"] = max(
-                0, int(session_limits["resets_at_epoch"] - time.time()))
-            limits["session"] = session_limits
+        for key in ("session", "week", "week_model"):
+            win = limits.get(key) or {}
+            if not win.get("resets_at_epoch"):
+                continue
+            win = dict(win)
+            remaining = int(win["resets_at_epoch"] - time.time())
+            if remaining <= 0:
+                # The window this snapshot describes has already ended; the
+                # OAuth loop may not have a fresh one yet (nulled resets_at
+                # until new activity, or a 429 backoff). Serve it as reset
+                # rather than a stale percent stuck past its own reset time.
+                win["percent"] = 0
+                win["resets"] = ""
+                remaining = 0
+            if key == "session":
+                win["resets_in_sec"] = remaining
+            limits[key] = win
 
     return {
         "generated_at": now.isoformat(),
@@ -553,6 +664,9 @@ def build_report():
         "models": models,
         "trend": trend,
         "limits": limits,
+        "context": ({"tokens": ctx["tokens"],
+                     "percent": round(ctx["tokens"] / CONTEXT_WINDOW_TOKENS * 100)}
+                    if ctx else None),
         "btc": STATE["btc"],
         "weather": STATE["weather"],
         "clients": clients,
@@ -589,14 +703,50 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
+def start_http_server():
+    server = Server(("0.0.0.0", PORT), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"Serving usage stats on http://0.0.0.0:{PORT}/api/usage")
+    return server
+
+
+def battery_guard_loop():
+    # Owns the HTTP server's lifecycle: fully unbinds the listening socket
+    # while on battery below BATTERY_LOW_PCT (so the board sees OFFLINE
+    # instead of the Mac's battery hitting 0%), and rebinds once the Mac is
+    # back on AC or the battery has recovered.
+    server = start_http_server()
+    paused = False
+    while True:
+        time.sleep(BATTERY_CHECK_INTERVAL_SEC)
+        status = battery_status()
+        if status is None:
+            continue
+        percent, on_ac = status
+        should_pause = (not on_ac) and percent <= BATTERY_LOW_PCT
+        try:
+            if should_pause and not paused:
+                log_err(f"battery_guard: {percent}% on battery, pausing HTTP "
+                        f"server so macOS can sleep")
+                server.shutdown()
+                server.server_close()
+                server = None
+                paused = True
+            elif not should_pause and paused:
+                log_err(f"battery_guard: recovered ({percent}%, "
+                        f"on_ac={on_ac}), resuming HTTP server")
+                server = start_http_server()
+                paused = False
+        except Exception as e:
+            log_err(f"battery_guard: {type(e).__name__}: {e}")
+
+
 def main():
     scan_once()
     threading.Thread(target=scan_loop, daemon=True).start()
     threading.Thread(target=limits_loop, daemon=True).start()
     threading.Thread(target=market_loop, daemon=True).start()
-    server = Server(("0.0.0.0", PORT), Handler)
-    print(f"Serving usage stats on http://0.0.0.0:{PORT}/api/usage")
-    server.serve_forever()
+    battery_guard_loop()
 
 
 if __name__ == "__main__":

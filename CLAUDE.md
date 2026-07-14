@@ -10,7 +10,7 @@ Display" (CYD) — a 2.8″ 320×240 landscape touch screen. Three moving parts:
 ```
 Mac laptop                                   CYD board (ESP32, on WiFi)
 server/usage_server.py  ──HTTP /api/usage──▶ firmware/cyd_dashboard/*.ino
-(reads local logs + OAuth usage endpoint)    (polls every 20s, 6 tap-to-cycle pages)
+(reads local logs + OAuth usage endpoint)    (polls every 20s, 8 tap-to-cycle pages)
 
 simulator.html = a browser stand-in for the board, fetching the same endpoint
 ```
@@ -38,9 +38,11 @@ colors, formatting, or the OFFLINE screen must be made in *both*, using the
   both, keeping the `// 0x....` comment in the simulator.
 - The page-drawing functions (`drawHomePage`, `drawProjectsPage` — which now
   also renders the 7-day trend in its lower half, `drawStatusPage`,
-  `drawDevicePage`, `drawLongTrendPage`, `drawLimitBlock`, `drawFooter`,
+  `drawDevicePage`, `drawLongTrendPage`, `drawLimitsPage` — the /usage-style
+  limits panel (context window, 5h, weekly all/per-model, credits),
+  `drawLimitBlock`, `drawFooter`,
   `drawOfflineScreen`) are near line-for-line ports of each other.
-- **Exception — page 6 (cat GIFs) is NOT a pixel-faithful twin.** On the device
+- **Exception — page 7 (cat GIFs) is NOT a pixel-faithful twin.** On the device
   it decodes and plays random GIFs from `/cats/` on the SD card frame-by-frame
   (AnimatedGIF, in the firmware's `gifTick()`), which the canvas simulator can't
   emulate. The simulator's `drawGifPage()` shows the same "CATS" title/layout as
@@ -68,23 +70,38 @@ pages; `#sim-offline` / `#mock-data` checkboxes exercise those states.
 
 **Compile the firmware (no board needed — verifies it builds):**
 ```
-arduino-cli compile --fqbn esp32:esp32:esp32 firmware/cyd_dashboard
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app firmware/cyd_dashboard
 ```
 Requires: `esp32:esp32` core + `LovyanGFX`, `ArduinoJson`, and `AnimatedGIF`
-(the page-6 cat player) libs (ESPmDNS ships with the core). A `config.h` must
-exist (copy `config.example.h`); it's gitignored. Build is now ≈ 96% flash
-(the GIF decoder pushed it up from ~87%) — tight but it fits; watch the budget
-when adding code.
+(the page-6 cat player) libs (`WebServer`/`DNSServer`, used by the first-boot
+AP setup portal, ship with the core, as does ESPmDNS). A `config.h` must
+exist (copy `config.example.h`); it's gitignored.
+
+**Flash size is 4MB on this board, partitioned as `huge_app` (3MB
+app/1MB SPIFFS, no OTA)** — confirmed against the physical board, not just
+the default assumption. This project never uses OTA or SPIFFS (all
+persistence is the SD card — see "SD card layout" below), so trading away
+the OTA partition for a single large app slot is free headroom with no
+downside. **Always pass `PartitionScheme=huge_app`** in the FQBN for both
+compiling and flashing — the plain default scheme (`PartitionScheme=default`,
+1.2MB app) is what this project outgrew; building without the option reverts
+to that tiny partition and will fail to fit. Current build is ≈ 41% of the
+3MB app partition (~1.8MB headroom) — comfortable room for now, but still
+worth re-checking the compile output's byte count after large additions.
 
 **Flash (needs the board plugged in):**
 ```
 arduino-cli board list                          # find the /dev/cu.usbserial-* port
-arduino-cli compile --fqbn esp32:esp32:esp32:UploadSpeed=115200 --upload -p <PORT> firmware/cyd_dashboard
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app,UploadSpeed=115200 --upload -p <PORT> firmware/cyd_dashboard
 ```
 **ALWAYS flash at the low 115200 baud** (`UploadSpeed=115200` on the FQBN).
 This board's USB-serial link is flaky at the 921600 default and fails
 mid-write with "The chip stopped responding" — 115200 is slow (~80s) but
-reliable. Do not flash at the default speed.
+reliable. Do not flash at the default speed. Switching partition schemes
+doesn't need a separate erase step — a normal upload rewrites the bootloader,
+partition table, and app fresh at their fixed flash offsets regardless of
+scheme, and this project has never written anything to SPIFFS/internal
+flash storage for the scheme change to orphan.
 
 ## Server internals (`usage_server.py`)
 
@@ -111,19 +128,36 @@ reliable. Do not flash at the default speed.
      fetch these HTTPS endpoints itself (TCP 443 connected but the TLS buffer
      alloc failed). Proxying them through this plain-HTTP endpoint keeps all TLS
      off the board — the firmware has no `WiFiClientSecure` at all now.
+- **`battery_guard_loop` owns the HTTP server's lifecycle** (`start_http_server`
+  binds/unbinds it, `main()` no longer calls `serve_forever()` directly). The
+  CYD's ~20s poll cadence gives macOS no long-enough idle gap to ever commit to
+  real system sleep — confirmed by logs showing zero gaps in board polling
+  across a night the Mac ran unattended on battery, draining 100%→1% before a
+  forced emergency sleep. Below `BATTERY_LOW_PCT` (50%) while on battery power
+  (checked every `BATTERY_CHECK_INTERVAL_SEC` via `pmset -g batt`), the loop
+  fully closes the listening socket so idle sleep can proceed; the board falls
+  back to its existing OFFLINE/cat-mode handling. Rebinds once back on AC or
+  recovered above the threshold. Harmless on AC (own charger keeps the Mac
+  awake anyway) — this only matters when it's briefly run on battery.
 - **Endpoint `GET /api/usage`** returns one JSON blob. Both clients parse it,
   so it's a contract — changing a field name means editing the firmware and
   simulator too. Current keys: `today`/`last5h`/`week` (`{tokens,cost}`),
   `active_now`, `last_activity_sec`, `projects[{name,tokens}]`,
   `models[{name,tokens,cost,percent}]` (today's cost split by model family,
   top 4 by cost, percent = share of today's estimated cost), `trend[7]`,
-  `limits{tz,fetched_at_epoch,age_sec,session{percent,resets,resets_at_epoch,resets_in_sec},week{percent,resets}}`
+  `limits{tz,fetched_at_epoch,age_sec,session{percent,resets,resets_at_epoch,resets_in_sec},week{percent,resets},week_model,credits}`
   (null if the keychain read hasn't succeeded; `resets_in_sec` and `age_sec`
   are computed at request time so they stay fresh between OAuth refreshes —
   a large `age_sec` means the snapshot is stale, e.g. the loop is in a 429
-  backoff, which is clamped to 30 min even when Retry-After is longer),
-  `btc{price}` / `weather{tempC,code}` (null until the first market fetch),
-  `clients[{ip,last_seen_sec}]`, `generated_at`.
+  backoff, which is clamped to 30 min even when Retry-After is longer;
+  `week_model{name,percent,resets}` is the per-model weekly limit from the
+  OAuth response's `limits[]` array — null whenever no `weekly_scoped` entry
+  exists, and clients must hide the row then; `credits{used,limit,percent}`
+  is the extra-usage spend in dollars, null when disabled),
+  `context{tokens,percent}` (the newest jsonl event's prompt size = the
+  current session's context window, percent of a hardcoded 200K; null until
+  the first log scan), `btc{price}` / `weather{tempC,code}` (null until the
+  first market fetch), `clients[{ip,last_seen_sec}]`, `generated_at`.
 - Dollar costs are **estimates** from a hardcoded per-model price table.
 - Remote (non-localhost) requests are logged one line each to stdout —
   `tail -f /tmp/cydusage.log` is a live heartbeat of the board's polling.
@@ -176,6 +210,26 @@ reliable. Do not flash at the default speed.
 - **Self-healing for "set up once and leave":** `WiFi.setAutoReconnect(true)`,
   non-blocking reconnect in `networkTask` (core 0), and an `ESP.restart()`
   after ~15 min (`RESTART_AFTER_CYCLES`) of no WiFi.
+- **First-boot AP setup portal (`runApSetup()`).** Deliberately narrow trigger:
+  only when `STATE.sdOk` is true AND `cfgWifiSsid` is empty after
+  `loadRuntimeConfig()` (i.e. `WIFI_SSID` left blank in `config.h` and no
+  `wifi_ssid` ever saved to `/config.json`) — a genuine "never configured"
+  board, not a router-down/out-of-range retry (that's what the self-healing
+  above already handles; conflating the two would turn a transient outage
+  into an open, unattended config surface). Runs synchronously inside
+  `setup()`, before `networkTask`/`loop()` start, so it's free to block: opens
+  an **open** (no password) softAP `CYD-Setup-XXXX`, a DNS server that
+  redirects every lookup to itself (captive-portal trick), and a `WebServer`
+  serving a one-field SSID/password form (with a scanned-network `<datalist>`
+  for autocomplete) at `192.168.4.1`. Submitting writes `wifi_ssid`/
+  `wifi_password` into `/config.json` (merged with any existing keys) and
+  `ESP.restart()`s — the next boot finds a saved SSID and skips straight to
+  `connectWifi()`. No SD card means nowhere to persist to, so it's skipped
+  entirely in that case and boot proceeds exactly as before (empty-default
+  `connectWifi()` attempt, which just times out into the normal offline/cat
+  flow). The on-screen setup screen (`drawApSetupScreen`) is not part of the
+  simulator-parity rule — it's a boot-time-only, firmware-only screen, same
+  exception as the cat GIF playback.
 - **Offline = the cat GIFs + an "OFFLINE" banner**, not a dimmed dashboard.
   `loop()` computes `catMode = (currentPage == GIF_PAGE) || offline`, so cats
   play on *any* page whenever offline, and `gifTick(offline)` overlays
@@ -186,15 +240,49 @@ reliable. Do not flash at the default speed.
   false — without that, a real outage would just freeze the last-known
   dashboard forever instead of ever showing offline.
 - Token fields are `int64_t` (weekly totals exceed the 32-bit `long` range).
-- **Page 6 = cat GIF player.** `gifTick()` (called from `loop()` on core 1)
+- **Page 7 = cat GIF player** (page 8 = status + cats split). `gifTick()`
+  (called from `loop()` on core 1)
   decodes at most one frame per pass via AnimatedGIF and paces itself with
   `gifNextFrameMs`, so touch stays responsive; when a GIF ends it opens another
   at random from `catFiles[]` (scanned once at boot by `scanCats()`) — endless.
-  `render()` early-returns for `GIF_PAGE`; `loop()` skips the footer/progress
-  line whenever `catMode` is active (page 6, or offline on any page) so the
+  `render()` early-returns for `GIF_PAGE`/`MIXED_PAGE`; `loop()` skips the
+  footer/progress
+  line whenever `catMode` is active (a cat page, or offline on any page) so the
   cats own the whole screen. This is the one deliberate break from the
   firmware/simulator parity rule.
-- **`sdMutex` — the second lock.** Page 6 is the only code that reads the SD
+- **Hidden Settings area** (`settingsScreen`: `SET_OFF`/`SET_LIST`/`SET_LEAF`).
+  Tapping an invisible hit-box over the footer's connection-status pulse dot
+  (`PULSE_HIT_*`, only live on non-cat/non-offline pages) opens `SET_LIST`, a
+  paginated list of setting names (9 settings, 3 per page); tapping a row
+  opens `SET_LEAF`, a generic value-picker button grid for that one setting.
+  Both screens, and every setting, are driven by one data table (`SettingDef
+  SETTINGS[]`, plain function pointers — no `std::function`/virtual dispatch,
+  flash is scarce here) rather than a hand-copied page per setting: adding a
+  setting is a label + a small `values[]`/`valueLabels[]` array + a short
+  `getCurrent()`/`apply()` pair. Most settings (Brightness, Poll Interval,
+  Pixel Shift, Boot Page, Cat Shuffle, Night Mode, Rotation) persist through
+  one generic queue (`pendingConfigSave`/`pendingConfigKeyId`/
+  `pendingConfigValue` → `saveIntConfigToSD()`, drained by `networkTask` on
+  core 0 so the SD write never happens on the render core) since they're all
+  plain-int config values; Forget WiFi is the one exception (erases two
+  *string* keys) and gets its own small SD function. Destructive rows
+  (`destructive: true`, e.g. Restart, Forget WiFi) share one two-tap
+  **confirm-arm** mechanic (`confirmArmedRow`/`confirmArmedMs`, ~4s window)
+  rather than a modal dialog — the whole area is `settingsScreen`/
+  `loop()`-driven, not modal. `loop()`'s `if (settingsScreen != SET_OFF)
+  {...} else if (catMode) {...} else {...}` gate means nothing redraws
+  periodically while Settings is open — every repaint is triggered
+  explicitly from the touch handler. **Rotation applies live, no restart** —
+  confirmed by reading LovyanGFX's `Panel_Device::convertRawXY()`/
+  `setCalibrate()`: the touch affine transform is built once from
+  `panel_width`/`panel_height` and the touch `x_min`/`x_max`/`y_min`/`y_max`
+  (all rotation-independent), while a separate per-touch-read step recomputes
+  `r = (panel_rotation + touch.offset_rotation) & 3` and swaps/flips the
+  already-transformed point accordingly — so touch automatically tracks any
+  `setRotation()` change with the calibration values completely untouched;
+  no dedicated multi-key save function needed, just the existing
+  `screen_rotation` key through the generic queue.
+- **`sdMutex` — the second lock.** The cat pages are the only code that reads the SD
   card from the render core (core 1); all other SD I/O is on `networkTask`
   (core 0). `sdMutex` (via `lockSD`/`unlockSD`) serializes the HSPI/SD bus
   between the two. Only nesting allowed is `sdMutex` → `stateMutex` (as in
@@ -206,8 +294,20 @@ reliable. Do not flash at the default speed.
   I/O runs on `networkTask` (core 0) — never add SD access to `loop()`:
   - `/config.json` — runtime overrides for the compiled `config.h`
     (`loadRuntimeConfig`): `wifi_ssid`, `wifi_password`, `server_host`,
-    `server_port`, `brightness` (0-255), `poll_interval_sec` (clamped 5-3600).
-    Lets a set-once board be retuned without reflashing.
+    `server_port`, `brightness` (0-255), `poll_interval_sec` (clamped 5-3600),
+    `screen_rotation` (1 normal / 3 flipped 180° — see the Settings area's
+    Rotation note above), `touch_x_min`/`touch_x_max`/`touch_y_min`/
+    `touch_y_max`/`touch_offset_rotation` (physical touch calibration,
+    board-specific, not exposed in the on-device Settings UI),
+    `pixel_shift_min` (minutes per anti-retention orbit step, clamped 0-60,
+    0 = off), `boot_page` (0-7, which page `currentPage` starts on),
+    `cat_shuffle_sec` (0-300, forces a cat GIF to rotate before its natural
+    end; 0 = always play to the end), `night_mode_preset` (0/1, fixed
+    23:00-07:00 auto-dim to 25%). All of these except `wifi_ssid`/
+    `wifi_password`/`server_host`/`server_port`/the touch calibration keys
+    are also settable at runtime from the on-device Settings area (see
+    above) — lets a set-once board be retuned without reflashing or pulling
+    the SD card.
   - `/last_usage.json` — last-good `/api/usage` blob; `/last_env.json` — last
     BTC/weather. Both restored at boot so the dashboard shows real (if stale)
     data and the BTC/weather tiles aren't blank while the Mac is unreachable.
@@ -219,10 +319,10 @@ reliable. Do not flash at the default speed.
   - `/splash.bmp` — optional 320×240 24-bit boot splash, shown ~1.5s before the
     WiFi spinner (`drawBmpFromSD`/`showBootSplash`). A self-hosted asset loaded
     from SD rather than baked into the near-full flash; absent → no splash.
-  - `/cats/*.gif` — the page-6 cat GIF library (see the GIF-player note above).
+  - `/cats/*.gif` — the page-7 cat GIF library (see the GIF-player note above).
     Prepared board-side by `prepare_cat_gifs.py` (downloads from Cataas, resizes
-    to ≤320×240, thins frames, optimizes with gifsicle); absent → page 6 shows
-    the "CATS" placeholder instead of playing.
+    to ≤320×240, thins frames, optimizes with gifsicle); absent → the cat pages
+    show the "CATS" placeholder instead of playing.
 
 ## Conventions
 
