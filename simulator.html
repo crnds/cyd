@@ -465,6 +465,7 @@ const COL_TRACK   = 'rgb(90,89,90)';    // 0x5ACB neutral grey track
 const STATE = {
   projects: [],           // [{name, tokens}]
   trend: [0,0,0,0,0,0,0],
+  last24hTokens: 0,       // rolling trailing-24h total, mirrors STATE.last24hTokens
   longTrend: [],          // {date,tokens}[] mirroring the firmware's SD-backed 30-day log
   lastLoggedDate: null,   // date string of the last day appended, mirrors STATE.lastLoggedYday
   haveData: false,        // true once any data (live or cached) has been applied
@@ -483,9 +484,11 @@ const STATE = {
   creditsLimit: -1,
   creditsPercent: -1,
   lastFetchOkMs: 0,
-  btcPrice: -1,           // BTC/USDT from Binance; -1 = not fetched yet
-  weatherTempC: -999,     // Bangkok current temp from Open-Meteo; -999 = not fetched yet
-  weatherCode: -1,        // Open-Meteo WMO weather_code; -1 = not fetched yet
+  btcPrice: -1,           // BTC/USDT; -1 = not received yet. Arrives inside /api/usage
+                          // (fetched by the Mac), same as the firmware -- not fetched
+                          // directly from Binance here (see applyData()).
+  weatherTempC: -999,     // Bangkok current temp; -999 = not received yet (see above)
+  weatherCode: -1,        // WMO weather_code; -1 = not received yet (see above)
   // simulator-only
   lastPollMs: 0,          // when the last poll cycle started (progress line)
   currentPage: 0,
@@ -493,8 +496,6 @@ const STATE = {
   connected: false,     // did the most recent fetch reach the server?
   fetchFailCycles: 0,   // consecutive failed polls; mirrors the firmware's counter
   pollTimer: null,
-  weatherTimer: null,
-  btcTimer: null,
   shiftIdx: 0,          // pixel-shift orbit position, mirrors the firmware's shiftIdx
   lastShiftMs: 0,       // last orbit step, mirrors the firmware's lastShiftMs
   // 'off' | 'list' | 'leaf' -- mirrors the firmware's SettingsScreen enum
@@ -574,6 +575,33 @@ const gfx = {
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fill();
+  },
+  drawCircle(x, y, r, c) {
+    ctx.strokeStyle = c;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(x + 0.5, y + 0.5, r, 0, Math.PI * 2);
+    ctx.stroke();
+  },
+  drawLine(x0, y0, x1, y1, c) {
+    ctx.strokeStyle = c;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x0 + 0.5, y0 + 0.5);
+    ctx.lineTo(x1 + 0.5, y1 + 0.5);
+    ctx.stroke();
+  },
+  // Mirrors LovyanGFX's drawWideLine(x0,y0,x1,y1,r,color) — r is the
+  // wedge-line's half-width (radius), same unit as its firmware counterpart.
+  drawWideLine(x0, y0, x1, y1, r, c) {
+    ctx.strokeStyle = c;
+    ctx.lineWidth = r * 2;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x0 + 0.5, y0 + 0.5);
+    ctx.lineTo(x1 + 0.5, y1 + 0.5);
+    ctx.stroke();
+    ctx.lineCap = 'butt';
   },
 };
 
@@ -817,37 +845,39 @@ function drawProjectsPage() {
 
 // Simple vector weather icon (line-for-line port of the firmware's
 // drawWeatherIcon), mapped from Open-Meteo's WMO weather_code.
+// Scaled down (~0.65x) from the original so the weather card can shrink to
+// match the BTC card's minimum content height (see drawStatusPage).
 function drawWeatherIcon(x, y, code) {
   if (code < 0) {
     gfx.setTextColor(COL_TEXT2);
     gfx.setTextSize(1);
-    gfx.setCursor(x, y + 6);
+    gfx.setCursor(x, y + 4);
     gfx.print('--');
     return;
   }
-  const cx = x + 10, cy = y + 10;
+  const cx = x + 8, cy = y + 7;
   if (code === 0 || code === 1) {
-    gfx.fillCircle(cx, cy, 6, COL_ACCENT);
-    gfx.fillRect(cx - 1, y - 2, 2, 4, COL_ACCENT);
-    gfx.fillRect(cx - 1, y + 18, 2, 4, COL_ACCENT);
-    gfx.fillRect(x - 2, cy - 1, 4, 2, COL_ACCENT);
-    gfx.fillRect(x + 20, cy - 1, 4, 2, COL_ACCENT);
+    gfx.fillCircle(cx, cy, 4, COL_ACCENT);
+    gfx.fillRect(cx - 1, y - 1, 2, 3, COL_ACCENT);
+    gfx.fillRect(cx - 1, y + 12, 2, 3, COL_ACCENT);
+    gfx.fillRect(x - 2, cy - 1, 3, 2, COL_ACCENT);
+    gfx.fillRect(x + 13, cy - 1, 3, 2, COL_ACCENT);
     return;
   }
-  gfx.fillCircle(cx - 5, cy - 1, 5, COL_TEXT2);
-  gfx.fillCircle(cx + 2, cy - 3, 6, COL_TEXT2);
-  gfx.fillCircle(cx + 8, cy - 1, 5, COL_TEXT2);
-  gfx.fillRoundRect(cx - 9, cy - 1, 24, 7, 3, COL_TEXT2);
+  gfx.fillCircle(cx - 3, cy - 1, 3, COL_TEXT2);
+  gfx.fillCircle(cx + 1, cy - 2, 4, COL_TEXT2);
+  gfx.fillCircle(cx + 5, cy - 1, 3, COL_TEXT2);
+  gfx.fillRoundRect(cx - 6, cy - 1, 16, 5, 2, COL_TEXT2);
   if (code >= 95) {
-    gfx.fillRect(cx, cy + 7, 3, 6, COL_ACCENT);
+    gfx.fillRect(cx, cy + 5, 2, 4, COL_ACCENT);
   } else if ((code >= 71 && code <= 77) || code === 85 || code === 86) {
-    gfx.fillCircle(cx - 4, cy + 10, 1, COL_TEXT);
-    gfx.fillCircle(cx + 2, cy + 10, 1, COL_TEXT);
-    gfx.fillCircle(cx + 8, cy + 10, 1, COL_TEXT);
+    gfx.fillCircle(cx - 3, cy + 7, 1, COL_TEXT);
+    gfx.fillCircle(cx + 1, cy + 7, 1, COL_TEXT);
+    gfx.fillCircle(cx + 5, cy + 7, 1, COL_TEXT);
   } else if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
-    gfx.fillRect(cx - 4, cy + 7, 2, 6, COL_BLUE);
-    gfx.fillRect(cx + 2, cy + 7, 2, 6, COL_BLUE);
-    gfx.fillRect(cx + 8, cy + 7, 2, 6, COL_BLUE);
+    gfx.fillRect(cx - 3, cy + 5, 1, 4, COL_BLUE);
+    gfx.fillRect(cx + 1, cy + 5, 1, 4, COL_BLUE);
+    gfx.fillRect(cx + 5, cy + 5, 1, 4, COL_BLUE);
   }
 }
 
@@ -869,9 +899,9 @@ function drawCardLabel(x, y, label) {
 }
 
 // Card layout: one tall left card = session/week limits (always accent
-// orange); the right column is three stacked cards = Bangkok clock/date
-// (y=4 h=92), weather (y=100 h=56), BTC (y=160 h=56), 4px gaps. All cards
-// are 152px wide with 10px inner padding (content x=14 / x=174, width 132).
+// orange); the right column is two stacked cards = Bangkok clock/date+weather
+// merged (y=4 h=152), BTC (y=160 h=56), 4px gap. All cards are 152px wide
+// with 10px inner padding (content x=14 / x=174, width 132).
 function drawLimitsCard() {
   gfx.fillRoundRect(2, 4, 142, 216, 8, COL_SURFACE);
   gfx.drawRoundRect(2, 4, 142, 216, 8, COL_BORDER);
@@ -923,22 +953,97 @@ function drawLimitsCard() {
   gfx.print(STATE.weekResets ? 'resets ' + STATE.weekResets : 'resets --');
 }
 
+// Minimal analog clock: a bare circle, 12/3/6/9 tick dots, and hour/minute
+// hands — no numerals, no second hand. Angles are screen-space (y grows
+// down) with a -90° offset so 0 minutes/hours points straight up (12
+// o'clock); increasing angle then sweeps clockwise on screen, matching a
+// real clock face.
+function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour24, resetMinute) {
+  gfx.drawCircle(cx, cy, r, COL_TEXT);
+  // 12 short hour ticks radiating in from the rim, same -90° zero-at-top
+  // convention as the hands below.
+  for (let i = 0; i < 12; i++) {
+    const tickRad = (i * 30 - 90) * Math.PI / 180;
+    const x0 = cx + Math.cos(tickRad) * (r - 1);
+    const y0 = cy + Math.sin(tickRad) * (r - 1);
+    const x1 = cx + Math.cos(tickRad) * (r - 5);
+    const y1 = cy + Math.sin(tickRad) * (r - 5);
+    gfx.drawLine(x0, y0, x1, y1, COL_TEXT);
+  }
+
+  // Session (5h) reset time: a thin green radius from center to rim, static
+  // (unlike the hands) at whatever hour/minute the session next resets.
+  if (haveReset) {
+    const resetAngle = ((resetHour24 % 12) + resetMinute / 60) * 30 - 90;
+    const resetRad = resetAngle * Math.PI / 180;
+    const rx = cx + Math.cos(resetRad) * (r - 2);
+    const ry = cy + Math.sin(resetRad) * (r - 2);
+    gfx.drawLine(cx, cy, rx, ry, COL_GOOD);
+  }
+
+  const hourAngle = ((hour24 % 12) + minute / 60) * 30 - 90;
+  const minAngle = (minute + second / 60) * 6 - 90;
+  const secAngle = second * 6 - 90;
+  const hourRad = hourAngle * Math.PI / 180;
+  const minRad = minAngle * Math.PI / 180;
+  const secRad = secAngle * Math.PI / 180;
+
+  const hx = cx + Math.cos(hourRad) * r * 0.5;
+  const hy = cy + Math.sin(hourRad) * r * 0.5;
+  const mx = cx + Math.cos(minRad) * r * 0.8;
+  const my = cy + Math.sin(minRad) * r * 0.8;
+  const sx = cx + Math.cos(secRad) * r * 0.9;
+  const sy = cy + Math.sin(secRad) * r * 0.9;
+
+  // Hour/minute hands drawn wide (wedge lines) for a bolder look; the second
+  // hand stays a thin single-pixel line to keep it visually distinct.
+  gfx.drawWideLine(cx, cy, hx, hy, 2.0, COL_TEXT);
+  gfx.drawWideLine(cx, cy, mx, my, 1.5, COL_TEXT);
+  gfx.drawLine(cx, cy, sx, sy, COL_ACCENT);
+  gfx.fillCircle(cx, cy, 2, COL_TEXT);
+}
+
 function drawStatusPage() {
   drawLimitsCard();
-  gfx.fillRoundRect(150, 4, 150, 92, 8, COL_SURFACE);
-  gfx.drawRoundRect(150, 4, 150, 92, 8, COL_BORDER);
-  gfx.fillRoundRect(150, 100, 150, 56, 8, COL_SURFACE);
-  gfx.drawRoundRect(150, 100, 150, 56, 8, COL_BORDER);
-  gfx.fillRoundRect(150, 160, 150, 56, 8, COL_SURFACE);
-  gfx.drawRoundRect(150, 160, 150, 56, 8, COL_BORDER);
+  gfx.fillRoundRect(150, 4, 150, 162, 8, COL_SURFACE);
+  gfx.drawRoundRect(150, 4, 150, 162, 8, COL_BORDER);
+  gfx.fillRoundRect(150, 170, 60, 46, 8, COL_SURFACE);
+  gfx.drawRoundRect(150, 170, 60, 46, 8, COL_BORDER);
+  gfx.fillRoundRect(214, 170, 86, 46, 8, COL_SURFACE);
+  gfx.drawRoundRect(214, 170, 86, 46, 8, COL_BORDER);
 
-  // ── right cards: Bangkok clock/date, weather, BTC price ──
+  // ── right cards: Bangkok analog + digital clock/date, weather, BTC price ──
   const bkk = bangkokParts();
 
-  drawCardLabel(160, 13, 'BANGKOK');
+  // Tick the session countdown down locally between polls, same as
+  // drawLimitsCard, to find the wall-clock time it resets at.
+  let sessionRem = STATE.sessionResetsInSec;
+  if (sessionRem >= 0) {
+    sessionRem -= Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
+    if (sessionRem < 0) sessionRem = 0;
+  }
+  const haveReset = !!bkk && sessionRem >= 0;
+  let resetHour = 0, resetMinute = 0;
+  if (haveReset) {
+    const totalSec = (parseInt(bkk.hour, 10) * 3600 + parseInt(bkk.minute, 10) * 60 + parseInt(bkk.second, 10) + sessionRem) % 86400;
+    resetHour = Math.floor(totalSec / 3600);
+    resetMinute = Math.floor((totalSec % 3600) / 60);
+  }
 
+  // Row 1: analog clock, centered on the card's full width. Radius grew
+  // 36->44 using the height freed by shrinking the weather/BTC row below.
+  const clockCx = 225, clockCy = 56, clockR = 44;
+  if (bkk) {
+    drawAnalogClock(clockCx, clockCy, clockR, parseInt(bkk.hour, 10), parseInt(bkk.minute, 10), parseInt(bkk.second, 10),
+                     haveReset, resetHour, resetMinute);
+  } else {
+    gfx.drawCircle(clockCx, clockCy, clockR, COL_TEXT);
+  }
+
+  // Row 2: digital time + date, back to their original size4/size2 (the
+  // clock card is tall enough now that they no longer need to share a row).
   gfx.setTextSize(4);
-  gfx.setCursor(160, 28);
+  gfx.setCursor(160, 104);
   if (bkk) {
     gfx.setTextColor(COL_TEXT);
     gfx.print(bkk.hour + '.' + bkk.minute);
@@ -946,7 +1051,7 @@ function drawStatusPage() {
     gfx.setTextSize(1);
     // Bottom-align the small seconds against the big "HH.MM" cell (32px
     // tall at size4 vs. 8px at size1): x is the fixed 5-char size4 advance.
-    gfx.setCursor(160 + 5 * 24, 52);
+    gfx.setCursor(160 + 5 * 24, 128);
     gfx.print('.' + bkk.second);
   } else {
     gfx.setTextColor(COL_TEXT2);
@@ -955,24 +1060,36 @@ function drawStatusPage() {
 
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(2);
-  gfx.setCursor(160, 66);
+  gfx.setCursor(160, 144);
   // Year dropped: "Mon 25 Jul 2026" at size2 would overrun the 132px inner
   // width; weekday+day+month fits at 120px.
   gfx.print(bkk ? (bkk.weekday + ' ' + bkk.day + ' ' + bkk.month) : '--');
 
-  drawCardLabel(160, 109, 'WEATHER');
-
-  drawWeatherIcon(160, 124, STATE.weatherCode);
+  // Weather card: icon and temp stacked (rather than side by side) since
+  // the card is only 60px wide. The smaller icon (see drawWeatherIcon) is
+  // what lets this card fit in the new 46px height with icon-top-then-temp
+  // still snug against both edges.
+  drawWeatherIcon(169, 175, STATE.weatherCode);
   gfx.setTextColor(COL_TEXT);
-  gfx.setTextSize(3);
-  gfx.setCursor(190, 122);
-  gfx.print(STATE.weatherTempC > -900 ? Math.round(STATE.weatherTempC) + 'C' : '--');
+  gfx.setTextSize(2);
+  gfx.setCursor(165, 195);
+  if (STATE.weatherTempC > -900) {
+    gfx.print(Math.round(STATE.weatherTempC));
+    gfx.setTextSize(1);
+    gfx.setTextColor(COL_TEXT2);
+    gfx.print('C');
+  } else {
+    gfx.print('--');
+  }
 
-  drawCardLabel(160, 169, 'BTC/USDT');
+  // BTC card: label+price pushed down to the card's bottom edge (mirroring
+  // where the weather card's temp text sits) instead of leaving a gap below
+  // a top-anchored block — this card's content is shorter than weather's.
+  drawCardLabel(224, 184, 'BTC/USDT');
 
   gfx.setTextColor(COL_TEXT);
-  gfx.setTextSize(3);
-  gfx.setCursor(156, 182);
+  gfx.setTextSize(2);
+  gfx.setCursor(221, 196);
   gfx.print(fmtBtc(STATE.btcPrice));
 }
 
@@ -994,10 +1111,13 @@ function drawLongTrendPage() {
   }
 
   // STATE.longTrend only gets an entry once a day rolls over, so on its own
-  // it stops at yesterday — append today's still-running total as one more
-  // bar so the rightmost bar actually matches the "today" label.
+  // it stops at yesterday — append one more bar so the rightmost bar matches
+  // the "today" label. Uses last24hTokens (a rolling trailing 24h sum), not
+  // trend[6] (midnight-to-now): trend[6] starts near zero at midnight and
+  // only represents a full day right before rollover, which would make every
+  // other, already-complete day's bar look inconsistent with it all day.
   const bars = STATE.longTrend.map(d => d.tokens);
-  bars.push(STATE.trend[6]);
+  bars.push(STATE.last24hTokens);
   if (bars.length > LONG_TREND_DAYS) bars.shift();
 
   let maxTokens = 1;
@@ -1181,7 +1301,11 @@ function drawSettingsList() {
   gfx.setTextColor(COL_ACCENT);
   gfx.setTextSize(2);
   gfx.setCursor(10, 10);
-  gfx.print('< BACK');
+  if (STATE.settingsListPage === 0) {
+    gfx.print('X');
+  } else {
+    gfx.print('< BACK');
+  }
 
   if (STATE.settingsListPage < settingsTotalListPages() - 1) {
     gfx.setCursor(SET_NEXT_X0, 10);
@@ -1401,6 +1525,7 @@ function drawScreenContent() {
 const MOCK = {
   today: { tokens: 2573012, cost: 2.31 },
   last5h: { tokens: 1807153, cost: 1.68 },
+  last24h: { tokens: 41203981, cost: 24.86 },
   week: { tokens: 351668302, cost: 228.27 },
   active_now: true,
   last_activity_sec: 12,
@@ -1488,6 +1613,7 @@ function applyData(doc) {
   const prevToday = STATE.trend[6];
   STATE.projects = (doc.projects || []).slice(0, 5);
   STATE.trend = Array.from({ length: 7 }, (_, i) => doc.trend?.[i] ?? 0);
+  STATE.last24hTokens = doc.last24h?.tokens ?? 0;
   appendDailyLogIfNeeded(bangkokDateStr(), prevToday);
   if (doc.limits) {
     STATE.sessionPercent = doc.limits.session?.percent ?? -1;
@@ -1533,32 +1659,6 @@ function applyData(doc) {
   document.getElementById('raw-json').textContent = JSON.stringify(doc, null, 2);
 }
 
-// BTC/USDT straight from Binance, independent of the usage server —
-// mirrors the firmware's fetchBtcPrice(). Keeps the last price on failure.
-async function fetchBtc() {
-  if (document.getElementById('mock-data').checked) {
-    STATE.btcPrice = 109432;
-    return;
-  }
-  if (document.getElementById('sim-offline').checked) return;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-  try {
-    const res = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
-                            { signal: controller.signal });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const doc = await res.json();
-    const p = parseFloat(doc.price);
-    if (p > 0) STATE.btcPrice = p;
-    log('BTC/USDT ' + fmtBtc(STATE.btcPrice), 'ok');
-  } catch (err) {
-    log('btc fetch failed: ' + err.message, 'err');
-  } finally {
-    clearTimeout(timer);
-  }
-  render();
-}
-
 // The browser has no on-device NTP equivalent to the firmware's
 // configTime()/getLocalTime(), so the clock is derived straight from the
 // system clock, converted to Asia/Bangkok (no DST, fixed UTC+7 — matches the
@@ -1592,30 +1692,6 @@ function bangkokParts() {
     weekday: parts.weekday, month: parts.month, day: parts.day, year: parts.year,
     hour: parts.hour === '24' ? '00' : parts.hour, minute: parts.minute, second: parts.second,
   };
-}
-
-// Bangkok current weather from Open-Meteo (no API key), same pattern as
-// fetchBtc() — independent of the usage server. Keeps the last reading on
-// failure.
-async function fetchWeather() {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-  try {
-    const res = await fetch('https://api.open-meteo.com/v1/forecast?latitude=13.7563&longitude=100.5018&current=temperature_2m,weather_code&timezone=Asia%2FBangkok',
-                            { signal: controller.signal });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const doc = await res.json();
-    if (doc.current) {
-      STATE.weatherTempC = doc.current.temperature_2m ?? -999;
-      STATE.weatherCode = doc.current.weather_code ?? -1;
-      log('weather ' + STATE.weatherTempC + 'C code ' + STATE.weatherCode, 'ok');
-    }
-  } catch (err) {
-    log('weather fetch failed: ' + err.message, 'err');
-  } finally {
-    clearTimeout(timer);
-  }
-  render();
 }
 
 // haveData is otherwise sticky-true once any fetch/cache load succeeds, so
@@ -1841,10 +1917,6 @@ applyBrightnessFilter();
 render();
 fetchUsage();
 restartPollTimer();
-fetchWeather();
-STATE.weatherTimer = setInterval(fetchWeather, 600000);
-fetchBtc();
-STATE.btcTimer = setInterval(fetchBtc, 5000);
 </script>
 </body>
 </html>

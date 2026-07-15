@@ -22,6 +22,14 @@ ACTIVE_WINDOW_SEC = 180
 # events don't carry the model's actual limit, so 200K is hardcoded.
 CONTEXT_WINDOW_TOKENS = 200000
 
+# Raw per-message events are aggregated into fixed-width time buckets rather
+# than kept individually — a bucket's key space is bounded by RETENTION (~2300
+# buckets at 8 days), whereas the old per-event list grew without bound as
+# usage volume grew, and build_report() re-scanned the whole thing on every
+# board poll. 5 minutes is far finer than anything displayed (day/hour
+# granularity), so bucket-boundary rounding is invisible on screen.
+BUCKET_SEC = 300
+
 # Approximate $/M tokens by model family. Not exact billing — cache_creation
 # and cache_read are rough multipliers of the input rate.
 PRICING = {
@@ -34,8 +42,10 @@ DEFAULT_PRICING = PRICING["sonnet"]
 
 STATE = {
     "offsets": {},      # file path -> byte offset already consumed
-    "events": [],       # list of {ts: datetime, project, tokens, cost}
+    "buckets": {},      # bucket_epoch -> {(project, model): {tokens, cost}}
     "seen": {},         # (message_id, request_id) -> ts, dedupes streamed rewrites
+    "last_ts": None,    # exact ts of the newest ingested event (active_now/last_activity_sec)
+    "aggregates": None, # cached output of compute_aggregates(), refreshed once per scan
     "clients": {},      # client ip -> last request ts, shows who is polling us
     "limits": None,     # latest plan-limit snapshot from the OAuth usage endpoint
     "context": None,    # {tokens, ts} — newest assistant event's context size
@@ -44,6 +54,8 @@ STATE = {
     "activity_event": threading.Event(),
     "lock": threading.Lock(),
 }
+
+CLIENT_RETENTION = timedelta(hours=24)
 
 
 def is_client_active():
@@ -54,6 +66,24 @@ def is_client_active():
             if (now - ts).total_seconds() <= 180:
                 return True
     return False
+
+
+def activity_gated_loop(body):
+    # Shared "skip work while no client has polled recently" wrapper for
+    # scan_loop/limits_loop/market_loop: they were each hand-rolling this same
+    # preamble. The first iteration always runs (so state is populated even
+    # before any client connects); after that, an idle stretch parks the
+    # thread on activity_event instead of spinning its own poll loop.
+    first_run = True
+    while True:
+        if not first_run and not is_client_active():
+            with STATE["lock"]:
+                STATE["activity_event"].clear()
+            STATE["activity_event"].wait(timeout=60)
+            continue
+        first_run = False
+        body()
+
 
 LIMITS_INTERVAL_SEC = 120
 # The OAuth endpoint rate-limits aggressive polling; after a 429, back off
@@ -246,15 +276,9 @@ def fetch_limits():
 def limits_loop():
     was_empty = False
     last_fetch = 0.0
-    first_run = True
-    while True:
-        if not first_run and not is_client_active():
-            with STATE["lock"]:
-                STATE["activity_event"].clear()
-            STATE["activity_event"].wait(timeout=60)
-            continue
-        first_run = False
 
+    def body():
+        nonlocal was_empty, last_fetch
         now = time.time()
         sleep_sec = 5
         if now - last_fetch >= LIMITS_INTERVAL_SEC:
@@ -294,6 +318,8 @@ def limits_loop():
 
         time.sleep(sleep_sec)
 
+    activity_gated_loop(body)
+
 
 def fetch_btc():
     req = urllib.request.Request(BTC_URL, headers={"User-Agent": "cydusage"})
@@ -303,65 +329,72 @@ def fetch_btc():
     return {"price": price} if price > 0 else None
 
 
-def fetch_weather():
-    # Load API key from secrets.local.json in the repository root
-    key = None
-    secrets_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "secrets.local.json")
-    if os.path.exists(secrets_path):
-        try:
-            with open(secrets_path, "r") as f:
-                secrets = json.load(f)
-                key = secrets.get("WEATHER_API_KEY")
-        except Exception as e:
-            print(f"Error reading secrets: {e}", file=sys.stderr)
-
-    # Fallback to Open-Meteo if no WeatherAPI key is provided
-    if not key:
-        try:
-            with urllib.request.urlopen(WEATHER_URL, timeout=8) as resp:
-                doc = json.loads(resp.read())
-            cur = doc.get("current") or {}
-            if cur.get("temperature_2m") is None:
-                return None
-            return {"tempC": cur["temperature_2m"], "code": cur.get("weather_code", -1)}
-        except Exception as e:
-            print(f"Open-Meteo fallback failed: {e}", file=sys.stderr)
-            return None
-
-    # Fetch from WeatherAPI
-    url = f"http://api.weatherapi.com/v1/current.json?key={key}&q=Bangkok"
+def load_weather_api_key():
+    # secrets.local.json lives in the repo root (one level up from server/).
+    # Read once at import time rather than on every fetch_weather() call.
+    secrets_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "secrets.local.json")
+    if not os.path.exists(secrets_path):
+        return None
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "cydusage"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        
-        cur = data.get("current", {})
-        temp_c = cur.get("temp_c")
-        if temp_c is None:
-            return None
-            
-        cond = cur.get("condition", {})
-        wa_code = cond.get("code", 1000)
-        
-        # Map WeatherAPI condition codes to WMO weather codes expected by the CYD board
-        # Default WMO code 3 (cloudy)
-        wmo_code = 3
-        if wa_code == 1000:
-            wmo_code = 0  # clear
-        elif wa_code == 1003:
-            wmo_code = 1  # mainly clear / partly cloudy
-        elif wa_code in (1006, 1009, 1030, 1135, 1147):
-            wmo_code = 3  # cloudy / overcast / fog
-        elif wa_code in (1063, 1150, 1153, 1180, 1183, 1186, 1189, 1192, 1195, 1198, 1201, 1240, 1243, 1246):
-            wmo_code = 61  # rain
-        elif wa_code in (1066, 1069, 1072, 1114, 1117, 1204, 1207, 1210, 1213, 1216, 1219, 1222, 1225, 1237, 1249, 1252, 1255, 1258, 1261, 1264):
-            wmo_code = 71  # snow
-        elif wa_code in (1087, 1273, 1276, 1279, 1282):
-            wmo_code = 95  # thunderstorm
-            
-        return {"tempC": temp_c, "code": wmo_code}
+        with open(secrets_path, "r") as f:
+            return (json.load(f) or {}).get("WEATHER_API_KEY")
     except Exception as e:
-        print(f"WeatherAPI fetch failed: {e}", file=sys.stderr)
+        log_err(f"weather: failed reading secrets.local.json: {type(e).__name__}: {e}")
+        return None
+
+
+WEATHER_API_KEY = load_weather_api_key()
+
+# WeatherAPI condition code -> WMO weather_code, the vocabulary the CYD board
+# (and simulator) actually render icons for. Grouped by the same buckets
+# drawWeatherIcon() switches on: clear/partly-cloudy, cloudy/fog, rain, snow,
+# thunderstorm. Unmapped codes fall back to 3 (cloudy) in fetch_weather_weatherapi.
+WEATHERAPI_TO_WMO = {1000: 0, 1003: 1}
+WEATHERAPI_TO_WMO.update({c: 3 for c in (1006, 1009, 1030, 1135, 1147)})
+WEATHERAPI_TO_WMO.update({c: 61 for c in (
+    1063, 1150, 1153, 1180, 1183, 1186, 1189, 1192, 1195, 1198, 1201, 1240, 1243, 1246)})
+WEATHERAPI_TO_WMO.update({c: 71 for c in (
+    1066, 1069, 1072, 1114, 1117, 1204, 1207, 1210, 1213, 1216, 1219, 1222, 1225,
+    1237, 1249, 1252, 1255, 1258, 1261, 1264)})
+WEATHERAPI_TO_WMO.update({c: 95 for c in (1087, 1273, 1276, 1279, 1282)})
+
+
+def fetch_weather_openmeteo():
+    with urllib.request.urlopen(WEATHER_URL, timeout=8) as resp:
+        doc = json.loads(resp.read())
+    cur = doc.get("current") or {}
+    if cur.get("temperature_2m") is None:
+        return None
+    return {"tempC": cur["temperature_2m"], "code": cur.get("weather_code", -1)}
+
+
+def fetch_weather_weatherapi(key):
+    url = f"http://api.weatherapi.com/v1/current.json?key={key}&q=Bangkok"
+    req = urllib.request.Request(url, headers={"User-Agent": "cydusage"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    cur = data.get("current") or {}
+    temp_c = cur.get("temp_c")
+    if temp_c is None:
+        return None
+    wa_code = (cur.get("condition") or {}).get("code", 1000)
+    return {"tempC": temp_c, "code": WEATHERAPI_TO_WMO.get(wa_code, 3)}
+
+
+def fetch_weather():
+    # Prefer WeatherAPI when a key is configured; fall back to the keyless
+    # Open-Meteo endpoint on any failure (including "no key configured").
+    if WEATHER_API_KEY:
+        try:
+            return fetch_weather_weatherapi(WEATHER_API_KEY)
+        except Exception as e:
+            log_err(f"weather: WeatherAPI failed, falling back to Open-Meteo: "
+                    f"{type(e).__name__}: {e}")
+    try:
+        return fetch_weather_openmeteo()
+    except Exception as e:
+        log_err(f"weather: Open-Meteo failed: {type(e).__name__}: {e}")
         return None
 
 
@@ -369,20 +402,15 @@ def market_loop():
     # BTC on a ~10s cadence, weather every 10 min. Each keeps its last good value
     # on failure so a transient outage doesn't blank the board's tiles.
     last_weather = 0.0
-    first_run = True
-    while True:
-        if not first_run and not is_client_active():
-            with STATE["lock"]:
-                STATE["activity_event"].clear()
-            STATE["activity_event"].wait(timeout=60)
-            continue
-        first_run = False
+
+    def body():
+        nonlocal last_weather
         try:
             btc = fetch_btc()
             if btc:
                 STATE["btc"] = btc
         except Exception as e:
-            print(f"market_loop btc: {type(e).__name__}: {e}", file=sys.stderr)
+            log_err(f"market_loop btc: {type(e).__name__}: {e}")
         now = time.time()
         if now - last_weather >= WEATHER_INTERVAL_SEC:
             last_weather = now
@@ -391,8 +419,10 @@ def market_loop():
                 if weather:
                     STATE["weather"] = weather
             except Exception as e:
-                print(f"market_loop weather: {type(e).__name__}: {e}", file=sys.stderr)
+                log_err(f"market_loop weather: {type(e).__name__}: {e}")
         time.sleep(BTC_INTERVAL_SEC)
+
+    activity_gated_loop(body)
 
 
 def pricing_for_model(model):
@@ -443,9 +473,19 @@ def project_name(cwd):
     return os.path.basename(cwd.rstrip("/")) or cwd
 
 
+def bucket_epoch_for(ts):
+    return int(ts.timestamp() // BUCKET_SEC) * BUCKET_SEC
+
+
 def scan_once():
-    new_events = []
+    # new_buckets: bucket_epoch -> {(project, model): {tokens, cost}}. Bucketed
+    # at ingest time (rather than keeping a growing list of raw events) so
+    # memory and the per-request aggregation work below are bounded by
+    # RETENTION, not by how much has been used.
+    new_buckets = {}
     newest_ctx = None  # {tokens, ts} of the newest event in this batch
+    newest_ts = None   # exact ts of the newest event in this batch (bucketing
+                        # would blur active_now's 180s window otherwise)
     for path in glob.glob(LOG_GLOB):
         offset = STATE["offsets"].get(path)
         if offset is None:
@@ -509,13 +549,17 @@ def scan_once():
                 if key in STATE["seen"]:
                     continue
                 STATE["seen"][key] = ts
-            new_events.append({
-                "ts": ts,
-                "project": project_name(entry.get("cwd")),
-                "model": model_family(message.get("model")),
-                "tokens": total_tokens(usage),
-                "cost": estimate_cost(usage, message.get("model")),
-            })
+
+            project = project_name(entry.get("cwd"))
+            model = model_family(message.get("model"))
+            tokens = total_tokens(usage)
+            cost = estimate_cost(usage, message.get("model"))
+
+            dims = new_buckets.setdefault(bucket_epoch_for(ts), {})
+            d = dims.setdefault((project, model), {"tokens": 0, "cost": 0.0})
+            d["tokens"] += tokens
+            d["cost"] += cost
+
             # Context window of the latest session = the newest assistant
             # event's prompt size (input + both cache tiers, no output).
             ctx_tokens = (
@@ -524,77 +568,101 @@ def scan_once():
                 + (usage.get("cache_creation_input_tokens") or 0))
             if newest_ctx is None or ts > newest_ctx["ts"]:
                 newest_ctx = {"tokens": ctx_tokens, "ts": ts}
+            if newest_ts is None or ts > newest_ts:
+                newest_ts = ts
         STATE["offsets"][path] = offset + len(consumable)
 
-    if new_events:
+    if new_buckets:
         with STATE["lock"]:
-            STATE["events"].extend(new_events)
+            for bucket_epoch, dims in new_buckets.items():
+                target = STATE["buckets"].setdefault(bucket_epoch, {})
+                for key, v in dims.items():
+                    d = target.setdefault(key, {"tokens": 0, "cost": 0.0})
+                    d["tokens"] += v["tokens"]
+                    d["cost"] += v["cost"]
             cutoff = datetime.now(timezone.utc) - RETENTION
-            STATE["events"] = [e for e in STATE["events"] if e["ts"] >= cutoff]
+            cutoff_epoch = bucket_epoch_for(cutoff)
+            STATE["buckets"] = {b: v for b, v in STATE["buckets"].items() if b >= cutoff_epoch}
             STATE["seen"] = {k: ts for k, ts in STATE["seen"].items() if ts >= cutoff}
             prev = STATE["context"]
             if newest_ctx and (prev is None or newest_ctx["ts"] > prev["ts"]):
                 STATE["context"] = newest_ctx
+            if newest_ts and (STATE["last_ts"] is None or newest_ts > STATE["last_ts"]):
+                STATE["last_ts"] = newest_ts
 
 
-def scan_loop():
-    first_run = True
-    while True:
-        if not first_run and not is_client_active():
-            with STATE["lock"]:
-                STATE["activity_event"].clear()
-            STATE["activity_event"].wait(timeout=60)
-            continue
-        first_run = False
-        try:
-            scan_once()
-        except Exception as e:
-            # never let a transient error (e.g. during sleep/wake) kill the thread
-            print(f"scan_loop: {type(e).__name__}: {e}", file=sys.stderr)
-        time.sleep(SCAN_INTERVAL_SEC)
+# Logged hourly from scan_loop: a lightweight heartbeat of the bucketed
+# state's size, so a runaway (e.g. buckets not pruning correctly) shows up in
+# /tmp/cydusage.err rather than silently growing the process's RSS.
+STATS_LOG_INTERVAL_SEC = 3600
+_last_stats_log = 0.0
 
 
-def build_report():
+def maybe_log_stats():
+    global _last_stats_log
+    now = time.time()
+    if now - _last_stats_log < STATS_LOG_INTERVAL_SEC:
+        return
+    _last_stats_log = now
+    with STATE["lock"]:
+        n_buckets = len(STATE["buckets"])
+        n_seen = len(STATE["seen"])
+        n_clients = len(STATE["clients"])
+    log_err(f"stats: buckets={n_buckets} seen={n_seen} clients={n_clients}")
+
+
+def compute_aggregates():
+    # Rolls the bucketed state up into everything build_report() needs that
+    # doesn't have to be fresh on every single request (today/last5h/last24h/
+    # week totals, top projects, per-model cost split, 7-day trend). Called
+    # once per scan cycle (~15s) instead of once per HTTP request, so it's
+    # decoupled from how many clients are polling.
     now = datetime.now(timezone.utc)
     local_today = datetime.now().astimezone().date()
 
     with STATE["lock"]:
-        events = list(STATE["events"])
-        ctx = STATE["context"]
+        buckets = list(STATE["buckets"].items())
 
     today_tokens = today_cost = 0
     last5h_tokens = last5h_cost = 0
+    last24h_tokens = last24h_cost = 0
     week_tokens = week_cost = 0
     project_totals = {}
     model_totals = {}
     day_totals = {}
-    last_ts = None
 
     five_h_ago = now - timedelta(hours=5)
+    twenty_four_h_ago = now - timedelta(hours=24)
     seven_d_ago = now - timedelta(days=7)
 
-    for e in events:
-        ts = e["ts"]
-        if last_ts is None or ts > last_ts:
-            last_ts = ts
+    for bucket_epoch, dims in buckets:
+        bucket_dt = datetime.fromtimestamp(bucket_epoch, tz=timezone.utc)
+        bucket_tokens = sum(v["tokens"] for v in dims.values())
+        bucket_cost = sum(v["cost"] for v in dims.values())
+        local_date = bucket_dt.astimezone().date()
 
-        local_date = ts.astimezone().date()
         if local_date == local_today:
-            today_tokens += e["tokens"]
-            today_cost += e["cost"]
-            mt = model_totals.setdefault(e.get("model", "other"), {"tokens": 0, "cost": 0.0})
-            mt["tokens"] += e["tokens"]
-            mt["cost"] += e["cost"]
+            today_tokens += bucket_tokens
+            today_cost += bucket_cost
+            for (_project, model), v in dims.items():
+                mt = model_totals.setdefault(model, {"tokens": 0, "cost": 0.0})
+                mt["tokens"] += v["tokens"]
+                mt["cost"] += v["cost"]
 
-        if ts >= five_h_ago:
-            last5h_tokens += e["tokens"]
-            last5h_cost += e["cost"]
+        if bucket_dt >= five_h_ago:
+            last5h_tokens += bucket_tokens
+            last5h_cost += bucket_cost
 
-        if ts >= seven_d_ago:
-            week_tokens += e["tokens"]
-            week_cost += e["cost"]
-            project_totals[e["project"]] = project_totals.get(e["project"], 0) + e["tokens"]
-            day_totals[local_date] = day_totals.get(local_date, 0) + e["tokens"]
+        if bucket_dt >= twenty_four_h_ago:
+            last24h_tokens += bucket_tokens
+            last24h_cost += bucket_cost
+
+        if bucket_dt >= seven_d_ago:
+            week_tokens += bucket_tokens
+            week_cost += bucket_cost
+            for (project, _model), v in dims.items():
+                project_totals[project] = project_totals.get(project, 0) + v["tokens"]
+            day_totals[local_date] = day_totals.get(local_date, 0) + bucket_tokens
 
     top_projects = sorted(project_totals.items(), key=lambda kv: kv[1], reverse=True)[:5]
 
@@ -616,11 +684,54 @@ def build_report():
         d = local_today - timedelta(days=i)
         trend.append(day_totals.get(d, 0))
 
+    aggregates = {
+        "today": {"tokens": today_tokens, "cost": round(today_cost, 4)},
+        "last5h": {"tokens": last5h_tokens, "cost": round(last5h_cost, 4)},
+        "last24h": {"tokens": last24h_tokens, "cost": round(last24h_cost, 4)},
+        "week": {"tokens": week_tokens, "cost": round(week_cost, 4)},
+        "projects": [{"name": name, "tokens": tokens} for name, tokens in top_projects],
+        "models": models,
+        "trend": trend,
+    }
+    with STATE["lock"]:
+        STATE["aggregates"] = aggregates
+
+
+def scan_loop():
+    def body():
+        try:
+            scan_once()
+            compute_aggregates()
+            maybe_log_stats()
+        except Exception as e:
+            # never let a transient error (e.g. during sleep/wake) kill the thread
+            log_err(f"scan_loop: {type(e).__name__}: {e}")
+        time.sleep(SCAN_INTERVAL_SEC)
+
+    activity_gated_loop(body)
+
+
+def build_report():
+    now = datetime.now(timezone.utc)
+
+    with STATE["lock"]:
+        agg = STATE["aggregates"] or {
+            "today": {"tokens": 0, "cost": 0.0}, "last5h": {"tokens": 0, "cost": 0.0},
+            "last24h": {"tokens": 0, "cost": 0.0}, "week": {"tokens": 0, "cost": 0.0},
+            "projects": [], "models": [], "trend": [0] * 7,
+        }
+        ctx = STATE["context"]
+        last_ts = STATE["last_ts"]
+        limits = STATE["limits"]
+        # Prune clients that haven't polled in 24h so this dict (and the
+        # `clients` array in every response) doesn't grow forever.
+        cutoff_client = now - CLIENT_RETENTION
+        STATE["clients"] = {ip: ts for ip, ts in STATE["clients"].items() if ts >= cutoff_client}
+        client_snapshot = list(STATE["clients"].items())
+
     active_now = last_ts is not None and (now - last_ts).total_seconds() <= ACTIVE_WINDOW_SEC
     last_activity_sec = int((now - last_ts).total_seconds()) if last_ts else None
 
-    with STATE["lock"]:
-        client_snapshot = list(STATE["clients"].items())
     clients = [
         {"ip": ip, "last_seen_sec": int((now - ts).total_seconds())}
         for ip, ts in sorted(client_snapshot, key=lambda kv: kv[1], reverse=True)
@@ -630,7 +741,6 @@ def build_report():
     # time (not when the limits snapshot was fetched) so they stay accurate
     # between OAuth refreshes. Mutate per-request copies only — the snapshot
     # in STATE["limits"] must stay pristine.
-    limits = STATE["limits"]
     if limits:
         limits = dict(limits)
         if limits.get("fetched_at_epoch"):
@@ -655,14 +765,15 @@ def build_report():
 
     return {
         "generated_at": now.isoformat(),
-        "today": {"tokens": today_tokens, "cost": round(today_cost, 4)},
-        "last5h": {"tokens": last5h_tokens, "cost": round(last5h_cost, 4)},
-        "week": {"tokens": week_tokens, "cost": round(week_cost, 4)},
+        "today": agg["today"],
+        "last5h": agg["last5h"],
+        "last24h": agg["last24h"],
+        "week": agg["week"],
         "active_now": active_now,
         "last_activity_sec": last_activity_sec,
-        "projects": [{"name": name, "tokens": tokens} for name, tokens in top_projects],
-        "models": models,
-        "trend": trend,
+        "projects": agg["projects"],
+        "models": agg["models"],
+        "trend": agg["trend"],
         "limits": limits,
         "context": ({"tokens": ctx["tokens"],
                      "percent": round(ctx["tokens"] / CONTEXT_WINDOW_TOKENS * 100)}
@@ -743,6 +854,7 @@ def battery_guard_loop():
 
 def main():
     scan_once()
+    compute_aggregates()
     threading.Thread(target=scan_loop, daemon=True).start()
     threading.Thread(target=limits_loop, daemon=True).start()
     threading.Thread(target=market_loop, daemon=True).start()
