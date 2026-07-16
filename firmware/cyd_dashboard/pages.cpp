@@ -277,6 +277,9 @@ static void drawHomePage() {
     sessionRem -= (long)((millis() - STATE.lastFetchOkMs) / 1000);
     if (sessionRem < 0) sessionRem = 0;
   }
+  // Week has no countdown suffix here: its "Resets <date>" string is already
+  // close to the line's pixel budget (see drawLimitsCard's size1 note below),
+  // so appending " (HHh:MMm)" would overflow the 320px screen.
   drawLimitBlock(10, "Current session", STATE.sessionPercent, STATE.sessionResets, sessionRem);
   drawLimitBlock(104, "Current week (all models)", STATE.weekPercent, STATE.weekResets, -1);
 
@@ -362,8 +365,8 @@ static void drawProjectsPage() {
 }
 
 // Simple vector weather icon (the built-in font has no bitmap glyphs) drawn
-// from circles/rects, mapped from Open-Meteo's WMO weather_code. cx,cy is
-// the center of a ~24x20px cloud/sun anchored at (x,y).
+// from circles/rects/lines, mapped from Open-Meteo's WMO weather_code. cx,cy
+// is the center of a ~24x20px icon anchored at (x,y).
 // Scaled down (~0.65x) from the original so the weather card can shrink to
 // match the BTC card's minimum content height (see drawStatusPage).
 static void drawWeatherIcon(int x, int y, int code) {
@@ -376,33 +379,56 @@ static void drawWeatherIcon(int x, int y, int code) {
   }
   int cx = x + 8, cy = y + 7;
   if (code == 0 || code == 1) {
-    // clear: sun with 4 rays
-    g->fillCircle(cx, cy, 4, COL_ACCENT);
-    g->fillRect(cx - 1, y - 1, 2, 3, COL_ACCENT);
-    g->fillRect(cx - 1, y + 12, 2, 3, COL_ACCENT);
-    g->fillRect(x - 2, cy - 1, 3, 2, COL_ACCENT);
-    g->fillRect(x + 13, cy - 1, 3, 2, COL_ACCENT);
+    // clear: sun disc + 8 short rounded rays (cardinals then diagonals),
+    // with a 2-3px gap between disc and rays so they read as separate.
+    g->fillCircle(cx, cy, 4, COL_YELLOW);
+    g->drawWideLine(cx, cy - 9, cx, cy - 7, 1.0f, COL_YELLOW);
+    g->drawWideLine(cx, cy + 7, cx, cy + 9, 1.0f, COL_YELLOW);
+    g->drawWideLine(cx - 9, cy, cx - 7, cy, 1.0f, COL_YELLOW);
+    g->drawWideLine(cx + 7, cy, cx + 9, cy, 1.0f, COL_YELLOW);
+    g->drawWideLine(cx - 7, cy - 7, cx - 5, cy - 5, 1.0f, COL_YELLOW);
+    g->drawWideLine(cx + 5, cy + 5, cx + 7, cy + 7, 1.0f, COL_YELLOW);
+    g->drawWideLine(cx - 7, cy + 7, cx - 5, cy + 5, 1.0f, COL_YELLOW);
+    g->drawWideLine(cx + 5, cy - 5, cx + 7, cy - 7, 1.0f, COL_YELLOW);
     return;
   }
-  // Everything else shares a cloud base (2/3/45/48 = plain cloudy/fog).
-  g->fillCircle(cx - 3, cy - 1, 3, COL_TEXT2);
-  g->fillCircle(cx + 1, cy - 2, 4, COL_TEXT2);
-  g->fillCircle(cx + 5, cy - 1, 3, COL_TEXT2);
-  g->fillRoundRect(cx - 6, cy - 1, 16, 5, 2, COL_TEXT2);
+  // Rain/snow/lightning are drawn standalone (no cloud underneath) so the
+  // condition itself reads clearly at this icon's small size — a cloud
+  // sharing the space with a tiny overlay was too cluttered to tell apart.
   if (code >= 95) {
-    // thunderstorm: bolt
-    g->fillRect(cx, cy + 5, 2, 4, COL_ACCENT);
-  } else if ((code >= 71 && code <= 77) || code == 85 || code == 86) {
-    // snow: dots
-    g->fillCircle(cx - 3, cy + 7, 1, COL_TEXT);
-    g->fillCircle(cx + 1, cy + 7, 1, COL_TEXT);
-    g->fillCircle(cx + 5, cy + 7, 1, COL_TEXT);
-  } else if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
-    // rain: streaks
-    g->fillRect(cx - 3, cy + 5, 1, 4, COL_BLUE);
-    g->fillRect(cx + 1, cy + 5, 1, 4, COL_BLUE);
-    g->fillRect(cx + 5, cy + 5, 1, 4, COL_BLUE);
+    // thunderstorm: zigzag bolt — a Material-style hexagon polygon
+    // (bottom tip, notch, top prong) split into 4 fillTriangle calls
+    // since the GFX API has no filled-polygon primitive. Vertices:
+    // A(-1,+8) B(-1,+2) C(-5,+2) D(+1,-8) E(+1,-2) F(+5,-2).
+    g->fillTriangle(cx - 5, cy + 2, cx + 1, cy - 8, cx + 1, cy - 2, COL_YELLOW);
+    g->fillTriangle(cx - 5, cy + 2, cx + 1, cy - 2, cx - 1, cy + 2, COL_YELLOW);
+    g->fillTriangle(cx - 1, cy + 2, cx + 1, cy - 2, cx + 5, cy - 2, COL_YELLOW);
+    g->fillTriangle(cx - 1, cy + 2, cx + 5, cy - 2, cx - 1, cy + 8, COL_YELLOW);
+    return;
   }
+  if ((code >= 71 && code <= 77) || code == 85 || code == 86) {
+    // snow: six-armed snowflake = three rounded lines crossing at 60deg
+    g->drawWideLine(cx, cy - 7, cx, cy + 7, 1.0f, COL_TEXT);
+    g->drawWideLine(cx - 6, cy - 4, cx + 6, cy + 4, 1.0f, COL_TEXT);
+    g->drawWideLine(cx - 6, cy + 4, cx + 6, cy - 4, 1.0f, COL_TEXT);
+    return;
+  }
+  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
+    // rain: three staggered teardrops (triangle cap fused onto a circle),
+    // two small on top, one large below — classic rain glyph.
+    g->fillTriangle(cx - 6, cy - 8, cx - 8, cy - 3, cx - 4, cy - 3, COL_BLUE);
+    g->fillCircle(cx - 6, cy - 3, 2, COL_BLUE);
+    g->fillTriangle(cx + 5, cy - 6, cx + 3, cy - 1, cx + 7, cy - 1, COL_BLUE);
+    g->fillCircle(cx + 5, cy - 1, 2, COL_BLUE);
+    g->fillTriangle(cx - 1, cy + 1, cx - 4, cy + 6, cx + 2, cy + 6, COL_BLUE);
+    g->fillCircle(cx - 1, cy + 6, 3, COL_BLUE);
+    return;
+  }
+  // Everything else shares a plain cloud (2/3/45/48 = cloudy/fog, or any
+  // unmapped code): two overlapping puffs on a fully-rounded pill base.
+  g->fillCircle(cx - 4, cy - 2, 4, COL_TEXT2);
+  g->fillCircle(cx + 3, cy - 3, 5, COL_TEXT2);
+  g->fillRoundRect(cx - 9, cy - 2, 19, 9, 4, COL_TEXT2);
 }
 
 // Thin inset progress bar: near-black track recessed into a surface card.

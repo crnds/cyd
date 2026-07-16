@@ -163,6 +163,8 @@ const uint16_t COL_WARN = 0xF8C6;    // rose
 const uint16_t COL_TRACK = 0x5ACB;   // neutral grey bar track
 const uint16_t COL_TRACK_BLACK = 0x0000; // pure-black bar track (reset-countdown bars)
 const uint16_t COL_BLUE = 0x3C1E;    // device-stats bar chart accent
+const uint16_t COL_YELLOW = 0xFFE0;  // yellow for sun/lightning icons
+
 
 // ── STATE ──────────────────────────────────────────────────
 // projectNames/sessionResets/weekResets/weekModelName/weekModelResets are
@@ -223,7 +225,7 @@ extern int currentPage;
 extern int cfgBootPage;
 enum SettingsScreen { SET_OFF, SET_LIST, SET_LEAF };
 extern SettingsScreen settingsScreen;
-extern int settingsListPage;
+extern int settingsScrollOffset;  // vertical scroll position (px) of the SET_LIST list
 extern int settingsLeafIndex;
 const uint32_t CONFIRM_ARM_MS = 4000;
 extern uint32_t confirmArmedMs;
@@ -371,13 +373,20 @@ void gifPlayerResetForPageChange(); // force a fresh random GIF on the next tick
 
 // ── SETTINGS (settings.cpp) ────────────────────────────────
 void renderSettings();
-int settingsTotalListPages();
 const extern int SETTINGS_COUNT;
 void queueConfigSave(uint8_t keyId, int32_t value);
-// Handles a tap while settingsScreen != SET_OFF; returns true if it consumed
-// the tap (so loop() shouldn't also treat it as page-navigation). Keeps the
-// SettingDef/button-layout internals out of cyd_dashboard.ino entirely.
+// Handles a tap while settingsScreen == SET_LEAF; returns true if it consumed
+// the tap. Keeps the SettingDef/button-layout internals out of
+// cyd_dashboard.ino entirely.
 bool handleSettingsTouch(int32_t tx, int32_t ty, uint32_t now, bool catMode);
+// SET_LIST is drag-to-scroll rather than tap-driven, so it needs the full
+// down/move/up gesture instead of one tap callback: Begin records the touch
+// start, Move live-updates settingsScrollOffset while the finger is down, End
+// decides whether the gesture was a tap (opens a leaf / exits) or a scroll
+// (total movement over DRAG_TAP_PX in settings.cpp) and does nothing further.
+void settingsListDragBegin(int32_t tx, int32_t ty);
+void settingsListDragMove(int32_t tx, int32_t ty);
+void settingsListDragEnd(bool catMode);
 
 // ── AP SETUP (ap_setup.cpp) ────────────────────────────────
 void runApSetup();  // blocks until configured, then ESP.restart()s — never returns

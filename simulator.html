@@ -255,17 +255,22 @@ const STALE_AFTER_SEC = 60;
 const PULSE_HIT_X0 = 0, PULSE_HIT_X1 = 40, PULSE_HIT_Y0 = 214, PULSE_HIT_Y1 = 240;
 
 // Settings (generic LIST + leaf GRID) geometry -- mirrors the firmware's
-// SET_BACK_*/SET_NEXT_*/SET_BTN_*/SET_ROW_* exactly.
+// SET_BACK_*/SET_BTN_*/SET_ROW_* exactly.
 const SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
-const SET_NEXT_X0 = 214, SET_NEXT_X1 = 304, SET_NEXT_Y0 = 0, SET_NEXT_Y1 = 34;
 const SET_BTN_X0 = 11, SET_BTN_Y = 100, SET_BTN_W = 54, SET_BTN_H = 56;
 const SET_BTN_STEP = 58, SET_BTN_STEP_Y = 62;  // STEP_Y only matters for rows>1
-const SET_ROW_X0 = 10, SET_ROW_Y0 = 76, SET_ROW_W = 284, SET_ROW_H = 46, SET_ROW_STEP = 52;
+const SET_ROW_X0 = 10, SET_ROW_Y0 = 34, SET_ROW_W = 284, SET_ROW_H = 46, SET_ROW_STEP = 52;
 // A lone action button (count==1, e.g. Restart/Forget WiFi) gets the full
 // row width instead of one narrow preset-grid cell -- mirrors the firmware's
 // SET_WIDE_BTN_X0/W.
 const SET_WIDE_BTN_X0 = SET_ROW_X0, SET_WIDE_BTN_W = SET_ROW_W;
-const SETTINGS_ROWS_PER_PAGE = 3;
+// The list scrolls rather than paginates -- mirrors the firmware's
+// SETTINGS_VISIBLE_ROWS/SETTINGS_VIEWPORT_*/SETTINGS_CONTENT_H/
+// SETTINGS_SCROLL_MAX exactly (see settings.cpp).
+const SETTINGS_VISIBLE_ROWS = 4;
+const SETTINGS_VIEWPORT_Y0 = SET_ROW_Y0;
+const SETTINGS_VIEWPORT_H = SETTINGS_VISIBLE_ROWS * SET_ROW_STEP - (SET_ROW_STEP - SET_ROW_H);
+const SETTINGS_SCROLLBAR_X = 298, SETTINGS_SCROLLBAR_W = 4;
 const BRIGHTNESS_KEY = 'cyddashboard_v1_brightness';
 const BOOT_PAGE_KEY = 'cyddashboard_v1_bootpage';
 const CAT_SHUFFLE_KEY = 'cyddashboard_v1_catshuffle';
@@ -431,9 +436,9 @@ const SETTINGS = [
     getCurrent: getCurrentRotation, apply: applyRotation },
 ];
 const SETTINGS_COUNT = 9;
-function settingsTotalListPages() {
-  return Math.ceil(SETTINGS_COUNT / SETTINGS_ROWS_PER_PAGE);
-}
+const SETTINGS_CONTENT_H = SETTINGS_COUNT * SET_ROW_STEP - (SET_ROW_STEP - SET_ROW_H);
+const SETTINGS_SCROLL_MAX = (SETTINGS_CONTENT_H > SETTINGS_VIEWPORT_H)
+    ? (SETTINGS_CONTENT_H - SETTINGS_VIEWPORT_H) : 0;
 const CONFIRM_ARM_MS = 4000;
 
 // Flash/RAM are on-device figures with no browser equivalent, so these
@@ -457,6 +462,7 @@ const COL_TEXT    = 'rgb(255,255,255)'; // 0xFFFF
 const COL_TEXT2   = 'rgb(156,154,156)'; // 0x9CD3
 const COL_ACCENT  = 'rgb(255,97,66)';   // 0xFB08
 const COL_BLUE    = 'rgb(58,130,247)';  // 0x3C1E device-stats bar chart accent
+const COL_YELLOW  = 'rgb(255,255,0)';   // 0xFFE0 yellow for sun/lightning icons
 const COL_GOOD    = 'rgb(33,206,66)';   // 0x2668
 const COL_WARN    = 'rgb(255,24,49)';   // 0xF8C6
 const COL_TRACK   = 'rgb(90,89,90)';    // 0x5ACB neutral grey track
@@ -502,7 +508,7 @@ const STATE = {
   lastShiftMs: 0,       // last orbit step, mirrors the firmware's lastShiftMs
   // 'off' | 'list' | 'leaf' -- mirrors the firmware's SettingsScreen enum
   settingsScreen: 'off',
-  settingsListPage: 0,
+  settingsScrollOffset: 0,  // vertical scroll position (px) of the SET_LIST list
   settingsLeafIndex: -1,
   confirmArmedMs: 0,    // mirrors the firmware's confirm-arm mechanic for destructive rows
   confirmArmedRow: -1,
@@ -585,6 +591,15 @@ const gfx = {
     ctx.arc(x + 0.5, y + 0.5, r, 0, Math.PI * 2);
     ctx.stroke();
   },
+  fillTriangle(x0, y0, x1, y1, x2, y2, c) {
+    ctx.fillStyle = c;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.closePath();
+    ctx.fill();
+  },
   drawLine(x0, y0, x1, y1, c) {
     ctx.strokeStyle = c;
     ctx.lineWidth = 1;
@@ -604,6 +619,22 @@ const gfx = {
     ctx.lineTo(x1 + 0.5, y1 + 0.5);
     ctx.stroke();
     ctx.lineCap = 'butt';
+  },
+  // Mirrors LovyanGFX's setClipRect/clearClipRect — used by the Settings
+  // list's drag-scroll to keep partially-scrolled rows from drawing over the
+  // header. save()/restore() bracket the canvas clip so it doesn't leak into
+  // unrelated draw calls; clearClipRect() must be called before the next
+  // fillScreen() or the clip region would stick around.
+  setClipRect(x, y, w, h) {
+    if (this._clipped) ctx.restore();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+    this._clipped = true;
+  },
+  clearClipRect() {
+    if (this._clipped) { ctx.restore(); this._clipped = false; }
   },
 };
 
@@ -764,6 +795,9 @@ function drawHomePage() {
     sessionRem -= Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
     if (sessionRem < 0) sessionRem = 0;
   }
+  // Week has no countdown suffix here: its "Resets <date>" string is already
+  // close to the line's pixel budget (see drawLimitsCard's size1 note below),
+  // so appending " (HHh:MMm)" would overflow the 320px screen.
   drawLimitBlock(10, 'Current session', STATE.sessionPercent, STATE.sessionResets, sessionRem);
   drawLimitBlock(104, 'Current week (all models)', STATE.weekPercent, STATE.weekResets, -1);
 
@@ -859,28 +893,56 @@ function drawWeatherIcon(x, y, code) {
   }
   const cx = x + 8, cy = y + 7;
   if (code === 0 || code === 1) {
-    gfx.fillCircle(cx, cy, 4, COL_ACCENT);
-    gfx.fillRect(cx - 1, y - 1, 2, 3, COL_ACCENT);
-    gfx.fillRect(cx - 1, y + 12, 2, 3, COL_ACCENT);
-    gfx.fillRect(x - 2, cy - 1, 3, 2, COL_ACCENT);
-    gfx.fillRect(x + 13, cy - 1, 3, 2, COL_ACCENT);
+    // clear: sun disc + 8 short rounded rays (cardinals then diagonals),
+    // with a 2-3px gap between disc and rays so they read as separate.
+    gfx.fillCircle(cx, cy, 4, COL_YELLOW);
+    gfx.drawWideLine(cx, cy - 9, cx, cy - 7, 1, COL_YELLOW);
+    gfx.drawWideLine(cx, cy + 7, cx, cy + 9, 1, COL_YELLOW);
+    gfx.drawWideLine(cx - 9, cy, cx - 7, cy, 1, COL_YELLOW);
+    gfx.drawWideLine(cx + 7, cy, cx + 9, cy, 1, COL_YELLOW);
+    gfx.drawWideLine(cx - 7, cy - 7, cx - 5, cy - 5, 1, COL_YELLOW);
+    gfx.drawWideLine(cx + 5, cy + 5, cx + 7, cy + 7, 1, COL_YELLOW);
+    gfx.drawWideLine(cx - 7, cy + 7, cx - 5, cy + 5, 1, COL_YELLOW);
+    gfx.drawWideLine(cx + 5, cy - 5, cx + 7, cy - 7, 1, COL_YELLOW);
     return;
   }
-  gfx.fillCircle(cx - 3, cy - 1, 3, COL_TEXT2);
-  gfx.fillCircle(cx + 1, cy - 2, 4, COL_TEXT2);
-  gfx.fillCircle(cx + 5, cy - 1, 3, COL_TEXT2);
-  gfx.fillRoundRect(cx - 6, cy - 1, 16, 5, 2, COL_TEXT2);
+  // Rain/snow/lightning are drawn standalone (no cloud underneath) so the
+  // condition itself reads clearly at this icon's small size — a cloud
+  // sharing the space with a tiny overlay was too cluttered to tell apart.
   if (code >= 95) {
-    gfx.fillRect(cx, cy + 5, 2, 4, COL_ACCENT);
-  } else if ((code >= 71 && code <= 77) || code === 85 || code === 86) {
-    gfx.fillCircle(cx - 3, cy + 7, 1, COL_TEXT);
-    gfx.fillCircle(cx + 1, cy + 7, 1, COL_TEXT);
-    gfx.fillCircle(cx + 5, cy + 7, 1, COL_TEXT);
-  } else if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
-    gfx.fillRect(cx - 3, cy + 5, 1, 4, COL_BLUE);
-    gfx.fillRect(cx + 1, cy + 5, 1, 4, COL_BLUE);
-    gfx.fillRect(cx + 5, cy + 5, 1, 4, COL_BLUE);
+    // thunderstorm: zigzag bolt — a Material-style hexagon polygon
+    // (bottom tip, notch, top prong) split into 4 fillTriangle calls
+    // since the GFX API has no filled-polygon primitive. Vertices:
+    // A(-1,+8) B(-1,+2) C(-5,+2) D(+1,-8) E(+1,-2) F(+5,-2).
+    gfx.fillTriangle(cx - 5, cy + 2, cx + 1, cy - 8, cx + 1, cy - 2, COL_YELLOW);
+    gfx.fillTriangle(cx - 5, cy + 2, cx + 1, cy - 2, cx - 1, cy + 2, COL_YELLOW);
+    gfx.fillTriangle(cx - 1, cy + 2, cx + 1, cy - 2, cx + 5, cy - 2, COL_YELLOW);
+    gfx.fillTriangle(cx - 1, cy + 2, cx + 5, cy - 2, cx - 1, cy + 8, COL_YELLOW);
+    return;
   }
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) {
+    // snow: six-armed snowflake = three rounded lines crossing at 60deg
+    gfx.drawWideLine(cx, cy - 7, cx, cy + 7, 1, COL_TEXT);
+    gfx.drawWideLine(cx - 6, cy - 4, cx + 6, cy + 4, 1, COL_TEXT);
+    gfx.drawWideLine(cx - 6, cy + 4, cx + 6, cy - 4, 1, COL_TEXT);
+    return;
+  }
+  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
+    // rain: three staggered teardrops (triangle cap fused onto a circle),
+    // two small on top, one large below — classic rain glyph.
+    gfx.fillTriangle(cx - 6, cy - 8, cx - 8, cy - 3, cx - 4, cy - 3, COL_BLUE);
+    gfx.fillCircle(cx - 6, cy - 3, 2, COL_BLUE);
+    gfx.fillTriangle(cx + 5, cy - 6, cx + 3, cy - 1, cx + 7, cy - 1, COL_BLUE);
+    gfx.fillCircle(cx + 5, cy - 1, 2, COL_BLUE);
+    gfx.fillTriangle(cx - 1, cy + 1, cx - 4, cy + 6, cx + 2, cy + 6, COL_BLUE);
+    gfx.fillCircle(cx - 1, cy + 6, 3, COL_BLUE);
+    return;
+  }
+  // Everything else shares a plain cloud (2/3/45/48 = cloudy/fog, or any
+  // unmapped code): two overlapping puffs on a fully-rounded pill base.
+  gfx.fillCircle(cx - 4, cy - 2, 4, COL_TEXT2);
+  gfx.fillCircle(cx + 3, cy - 3, 5, COL_TEXT2);
+  gfx.fillRoundRect(cx - 9, cy - 2, 19, 9, 4, COL_TEXT2);
 }
 
 // Thin inset progress bar: near-black track recessed into a surface card.
@@ -1322,27 +1384,21 @@ function drawSettingsList() {
   gfx.setTextColor(COL_ACCENT);
   gfx.setTextSize(2);
   gfx.setCursor(10, 10);
-  if (STATE.settingsListPage === 0) {
-    gfx.print('X');
-  } else {
-    gfx.print('< BACK');
-  }
+  gfx.print('X');
 
-  if (STATE.settingsListPage < settingsTotalListPages() - 1) {
-    gfx.setCursor(SET_NEXT_X0, 10);
-    gfx.print('NEXT >');
-  }
-
+  // Shares the header line with "X" now (was its own textSize(3) line above
+  // the rows) -- freed-up height goes to the row viewport below instead.
+  // "SETTINGS" is 8 chars * 6px/char at size 1 = 48px wide; right-aligned
+  // against the 304px usable width (16px black margin reserved past that).
   gfx.setTextColor(COL_ACCENT);
-  gfx.setTextSize(3);
-  gfx.setCursor(10, 40);
+  gfx.setTextSize(1);
+  gfx.setCursor(304 - 48, 14);
   gfx.print('SETTINGS');
 
-  const startIdx = STATE.settingsListPage * SETTINGS_ROWS_PER_PAGE;
-  for (let i = 0; i < SETTINGS_ROWS_PER_PAGE; i++) {
-    const idx = startIdx + i;
-    if (idx >= SETTINGS_COUNT) break;
-    const y = SET_ROW_Y0 + i * SET_ROW_STEP;
+  gfx.setClipRect(0, SETTINGS_VIEWPORT_Y0, 320, SETTINGS_VIEWPORT_H);
+  for (let idx = 0; idx < SETTINGS_COUNT; idx++) {
+    const y = SETTINGS_VIEWPORT_Y0 + idx * SET_ROW_STEP - STATE.settingsScrollOffset;
+    if (y + SET_ROW_H < SETTINGS_VIEWPORT_Y0 || y > SETTINGS_VIEWPORT_Y0 + SETTINGS_VIEWPORT_H) continue;
     gfx.fillRoundRect(SET_ROW_X0, y, SET_ROW_W, SET_ROW_H, 6, COL_SURFACE);
     gfx.drawRoundRect(SET_ROW_X0, y, SET_ROW_W, SET_ROW_H, 6, COL_BORDER);
     gfx.setTextColor(COL_TEXT);
@@ -1352,6 +1408,16 @@ function drawSettingsList() {
     gfx.setTextColor(COL_ACCENT);
     gfx.setCursor(SET_ROW_X0 + SET_ROW_W - 24, y + (SET_ROW_H - 16) / 2);
     gfx.print('>');
+  }
+  gfx.clearClipRect();
+
+  if (SETTINGS_SCROLL_MAX > 0) {
+    gfx.fillRoundRect(SETTINGS_SCROLLBAR_X, SETTINGS_VIEWPORT_Y0, SETTINGS_SCROLLBAR_W, SETTINGS_VIEWPORT_H, 2, COL_BORDER);
+    let thumbH = SETTINGS_VIEWPORT_H * SETTINGS_VIEWPORT_H / SETTINGS_CONTENT_H;
+    if (thumbH < 16) thumbH = 16;
+    const thumbY = SETTINGS_VIEWPORT_Y0 +
+        (SETTINGS_VIEWPORT_H - thumbH) * STATE.settingsScrollOffset / SETTINGS_SCROLL_MAX;
+    gfx.fillRoundRect(SETTINGS_SCROLLBAR_X, thumbY, SETTINGS_SCROLLBAR_W, thumbH, 2, COL_ACCENT);
   }
 
   gfx.fillRect(304, 0, 16, 240, '#000000');
@@ -1804,6 +1870,83 @@ function restartPollTimer() {
   STATE.pollTimer = setInterval(fetchUsage, ms);
 }
 
+// ── SET_LIST drag-to-scroll ────────────────────────────────
+// Mirrors the firmware's settingsListDragBegin/Move/End (settings.cpp): a
+// mousedown/mousemove/mouseup gesture is a tap until it's moved more than
+// SETTINGS_DRAG_TAP_PX total, at which point it's treated as a scroll instead
+// (see the mousedown/mousemove/mouseup listeners below the click listener).
+let settingsDragLastX = 0, settingsDragLastY = 0, settingsDragTotalMoveY = 0;
+const SETTINGS_DRAG_TAP_PX = 8;
+
+function settingsListDragBegin(tx, ty) {
+  settingsDragLastX = tx;
+  settingsDragLastY = ty;
+  settingsDragTotalMoveY = 0;
+}
+
+function settingsListDragMove(tx, ty) {
+  const dy = ty - settingsDragLastY;
+  settingsDragLastX = tx;
+  if (dy === 0) return;
+  settingsDragLastY = ty;
+  settingsDragTotalMoveY += Math.abs(dy);
+
+  let newOffset = STATE.settingsScrollOffset - dy;  // drag up -> scroll list down (reveal later rows)
+  if (newOffset < 0) newOffset = 0;
+  if (newOffset > SETTINGS_SCROLL_MAX) newOffset = SETTINGS_SCROLL_MAX;
+  if (newOffset !== STATE.settingsScrollOffset) {
+    STATE.settingsScrollOffset = newOffset;
+    render();
+  }
+}
+
+function settingsListDragEnd() {
+  if (settingsDragTotalMoveY >= SETTINGS_DRAG_TAP_PX) return;  // was a scroll, not a tap
+  const tx = settingsDragLastX, ty = settingsDragLastY;
+
+  if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
+    STATE.settingsScreen = 'off';
+    render();
+    return;
+  }
+  for (let idx = 0; idx < SETTINGS_COUNT; idx++) {
+    const y = SETTINGS_VIEWPORT_Y0 + idx * SET_ROW_STEP - STATE.settingsScrollOffset;
+    if (y + SET_ROW_H < SETTINGS_VIEWPORT_Y0 || y > SETTINGS_VIEWPORT_Y0 + SETTINGS_VIEWPORT_H) continue;
+    if (tx >= SET_ROW_X0 && tx < SET_ROW_X0 + SET_ROW_W && ty >= y && ty < y + SET_ROW_H) {
+      STATE.settingsLeafIndex = idx;
+      STATE.confirmArmedRow = -1;
+      STATE.settingsScreen = 'leaf';
+      render();
+      break;
+    }
+  }
+}
+
+let settingsDragActive = false;  // a press is down and started while settingsScreen === 'list'
+// The browser fires a synthetic 'click' after every mousedown+mouseup, which
+// would otherwise re-process the same coordinates a second time (e.g.
+// re-hit-testing them against whatever screen the drag just switched to,
+// or falling through to page-nav) — this flag makes the click listener
+// swallow exactly the one click that follows a SET_LIST press.
+let suppressNextClick = false;
+canvas.addEventListener('mousedown', (event) => {
+  if (STATE.settingsScreen !== 'list') return;
+  settingsDragActive = true;
+  settingsListDragBegin(event.offsetX, event.offsetY);
+});
+canvas.addEventListener('mousemove', (event) => {
+  if (!settingsDragActive) return;
+  settingsListDragMove(event.offsetX, event.offsetY);
+});
+// On window, not canvas: a drag that releases outside the canvas bounds must
+// still end the gesture, or settingsDragActive would stay stuck true.
+window.addEventListener('mouseup', () => {
+  if (!settingsDragActive) return;
+  settingsDragActive = false;
+  settingsListDragEnd();
+  suppressNextClick = true;
+});
+
 // Touch feedback: flash a 5px white border on the left or right part of the screen
 // for one frame, then re-render to clear it. Mirrors flashTouchBorder() in the firmware.
 function flashTouchBorder(isRight) {
@@ -1821,6 +1964,7 @@ function flashTouchBorder(isRight) {
 }
 
 canvas.addEventListener('click', (event) => {
+  if (suppressNextClick) { suppressNextClick = false; return; }
   const tx = event.offsetX, ty = event.offsetY;
   const catMode = (STATE.currentPage === GIF_PAGE) || (STATE.currentPage === MIXED_PAGE) || !STATE.haveData;
 
@@ -1860,39 +2004,12 @@ canvas.addEventListener('click', (event) => {
   }
 
   if (STATE.settingsScreen === 'list') {
-    if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
-      if (STATE.settingsListPage > 0) {
-        STATE.settingsListPage--;
-        render();
-      } else {
-        STATE.settingsScreen = 'off';
-        render();
-      }
-    } else if (STATE.settingsListPage < settingsTotalListPages() - 1 &&
-               tx >= SET_NEXT_X0 && tx < SET_NEXT_X1 && ty >= SET_NEXT_Y0 && ty < SET_NEXT_Y1) {
-      STATE.settingsListPage++;
-      render();
-    } else {
-      const startIdx = STATE.settingsListPage * SETTINGS_ROWS_PER_PAGE;
-      for (let i = 0; i < SETTINGS_ROWS_PER_PAGE; i++) {
-        const idx = startIdx + i;
-        if (idx >= SETTINGS_COUNT) break;
-        const y = SET_ROW_Y0 + i * SET_ROW_STEP;
-        if (tx >= SET_ROW_X0 && tx < SET_ROW_X0 + SET_ROW_W && ty >= y && ty < y + SET_ROW_H) {
-          STATE.settingsLeafIndex = idx;
-          STATE.confirmArmedRow = -1;
-          STATE.settingsScreen = 'leaf';
-          render();
-          break;
-        }
-      }
-    }
-    return;
+    return;  // fully handled by the mousedown/mousemove/mouseup drag-scroll listeners below
   }
 
   if (!catMode && tx >= PULSE_HIT_X0 && tx < PULSE_HIT_X1 && ty >= PULSE_HIT_Y0 && ty < PULSE_HIT_Y1) {
     STATE.settingsScreen = 'list';
-    STATE.settingsListPage = 0;
+    STATE.settingsScrollOffset = 0;
     render();
     return;
   }

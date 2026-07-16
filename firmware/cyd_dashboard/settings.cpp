@@ -174,20 +174,28 @@ static const SettingDef SETTINGS[] = {
 const int SETTINGS_COUNT = 9;
 
 static const int SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
-static const int SET_NEXT_X0 = 214, SET_NEXT_X1 = 304, SET_NEXT_Y0 = 0, SET_NEXT_Y1 = 34;
 static const int SET_BTN_X0 = 11, SET_BTN_Y = 100, SET_BTN_W = 54, SET_BTN_H = 56;
 static const int SET_BTN_STEP = 58, SET_BTN_STEP_Y = 62;  // STEP_Y only matters for rows>1
-static const int SET_ROW_X0 = 10, SET_ROW_Y0 = 76, SET_ROW_W = 284, SET_ROW_H = 46, SET_ROW_STEP = 52;
+static const int SET_ROW_X0 = 10, SET_ROW_Y0 = 34, SET_ROW_W = 284, SET_ROW_H = 46, SET_ROW_STEP = 52;
 // A lone action button (count==1, e.g. Restart/Forget WiFi) gets the full
 // row width instead of one narrow preset-grid cell -- "TAP AGAIN" doesn't
 // fit in a 54px-wide button, and a wide button reads better for an action
 // anyway. Shares its x/width with the list rows for visual consistency.
 static const int SET_WIDE_BTN_X0 = SET_ROW_X0, SET_WIDE_BTN_W = SET_ROW_W;
-static const int SETTINGS_ROWS_PER_PAGE = 3;
 
-int settingsTotalListPages() {
-  return (SETTINGS_COUNT + SETTINGS_ROWS_PER_PAGE - 1) / SETTINGS_ROWS_PER_PAGE;
-}
+// The list scrolls rather than paginates: SETTINGS_VISIBLE_ROWS worth of rows
+// show in a fixed viewport below the header, and settingsScrollOffset (px)
+// slides the full SETTINGS_COUNT-row list through it. Row i's unscrolled y is
+// SETTINGS_VIEWPORT_Y0 + i*SET_ROW_STEP; SETTINGS_CONTENT_H/SETTINGS_SCROLL_MAX
+// are the compile-time totals used to clamp the drag and size the scrollbar
+// thumb below.
+static const int SETTINGS_VISIBLE_ROWS = 4;
+static const int SETTINGS_VIEWPORT_Y0 = SET_ROW_Y0;
+static const int SETTINGS_VIEWPORT_H = SETTINGS_VISIBLE_ROWS * SET_ROW_STEP - (SET_ROW_STEP - SET_ROW_H);
+static const int SETTINGS_CONTENT_H = SETTINGS_COUNT * SET_ROW_STEP - (SET_ROW_STEP - SET_ROW_H);
+static const int SETTINGS_SCROLL_MAX = (SETTINGS_CONTENT_H > SETTINGS_VIEWPORT_H)
+    ? (SETTINGS_CONTENT_H - SETTINGS_VIEWPORT_H) : 0;
+static const int SETTINGS_SCROLLBAR_X = 298, SETTINGS_SCROLLBAR_W = 4;
 
 static void drawSettingsList() {
   g->fillScreen(COL_BG);
@@ -195,27 +203,21 @@ static void drawSettingsList() {
   g->setTextColor(COL_ACCENT);
   g->setTextSize(2);
   g->setCursor(10, 10);
-  if (settingsListPage == 0) {
-    g->print("X");
-  } else {
-    g->print("< BACK");
-  }
+  g->print("X");
 
-  if (settingsListPage < settingsTotalListPages() - 1) {
-    g->setCursor(SET_NEXT_X0, 10);
-    g->print("NEXT >");
-  }
-
+  // Shares the header line with "X" now (was its own textSize(3) line above
+  // the rows) -- freed-up height goes to the row viewport below instead.
+  // "SETTINGS" is 8 chars * 6px/char at size 1 = 48px wide; right-aligned
+  // against the 304px usable width (16px black margin reserved past that).
   g->setTextColor(COL_ACCENT);
-  g->setTextSize(3);
-  g->setCursor(10, 40);
+  g->setTextSize(1);
+  g->setCursor(304 - 48, 14);
   g->print("SETTINGS");
 
-  int startIdx = settingsListPage * SETTINGS_ROWS_PER_PAGE;
-  for (int i = 0; i < SETTINGS_ROWS_PER_PAGE; i++) {
-    int idx = startIdx + i;
-    if (idx >= SETTINGS_COUNT) break;
-    int y = SET_ROW_Y0 + i * SET_ROW_STEP;
+  g->setClipRect(0, SETTINGS_VIEWPORT_Y0, 320, SETTINGS_VIEWPORT_H);
+  for (int idx = 0; idx < SETTINGS_COUNT; idx++) {
+    int y = SETTINGS_VIEWPORT_Y0 + idx * SET_ROW_STEP - settingsScrollOffset;
+    if (y + SET_ROW_H < SETTINGS_VIEWPORT_Y0 || y > SETTINGS_VIEWPORT_Y0 + SETTINGS_VIEWPORT_H) continue;
     g->fillRoundRect(SET_ROW_X0, y, SET_ROW_W, SET_ROW_H, 6, COL_SURFACE);
     g->drawRoundRect(SET_ROW_X0, y, SET_ROW_W, SET_ROW_H, 6, COL_BORDER);
     g->setTextColor(COL_TEXT);
@@ -225,6 +227,16 @@ static void drawSettingsList() {
     g->setTextColor(COL_ACCENT);
     g->setCursor(SET_ROW_X0 + SET_ROW_W - 24, y + (SET_ROW_H - 16) / 2);
     g->print(">");
+  }
+  g->clearClipRect();
+
+  if (SETTINGS_SCROLL_MAX > 0) {
+    g->fillRoundRect(SETTINGS_SCROLLBAR_X, SETTINGS_VIEWPORT_Y0, SETTINGS_SCROLLBAR_W, SETTINGS_VIEWPORT_H, 2, COL_BORDER);
+    int thumbH = SETTINGS_VIEWPORT_H * SETTINGS_VIEWPORT_H / SETTINGS_CONTENT_H;
+    if (thumbH < 16) thumbH = 16;
+    int thumbY = SETTINGS_VIEWPORT_Y0 +
+        (SETTINGS_VIEWPORT_H - thumbH) * settingsScrollOffset / SETTINGS_SCROLL_MAX;
+    g->fillRoundRect(SETTINGS_SCROLLBAR_X, thumbY, SETTINGS_SCROLLBAR_W, thumbH, 2, COL_ACCENT);
   }
 }
 
@@ -291,76 +303,98 @@ void renderSettings() {
   presentFrame();
 }
 
-// Touch routing for the Settings area (SET_LIST/SET_LEAF), called from
-// loop()'s touch handler in cyd_dashboard.ino when settingsScreen != SET_OFF.
-// Returns true if the tap was handled here (loop() shouldn't also treat it as
-// page navigation).
+// Touch handling for SET_LEAF (called from loop() on a fresh debounced tap,
+// same as before). SET_LIST no longer routes through here at all -- see the
+// drag-gesture trio below.
 bool handleSettingsTouch(int32_t tx, int32_t ty, uint32_t now, bool catMode) {
-  if (settingsScreen == SET_LEAF) {
-    const SettingDef& def = SETTINGS[settingsLeafIndex];
-    if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
-      confirmArmedRow = -1;
-      settingsScreen = SET_LIST;
-      renderSettings();
-      return true;
-    }
-    int btnW = (def.count == 1) ? SET_WIDE_BTN_W : SET_BTN_W;
-    for (int i = 0; i < def.count; i++) {
-      int col = i % def.cols;
-      int row = i / def.cols;
-      int x = (def.count == 1) ? SET_WIDE_BTN_X0 : SET_BTN_X0 + col * SET_BTN_STEP;
-      int y = SET_BTN_Y + row * SET_BTN_STEP_Y;
-      if (tx >= x && tx < x + btnW && ty >= y && ty < y + SET_BTN_H) {
-        if (def.destructive) {
-          bool armed = (confirmArmedRow == settingsLeafIndex &&
-                        now - confirmArmedMs < CONFIRM_ARM_MS);
-          if (armed) {
-            confirmArmedRow = -1;
-            def.apply(def.values[i]);  // may never return (e.g. ESP.restart())
-          } else {
-            confirmArmedRow = settingsLeafIndex;
-            confirmArmedMs = now;
-          }
-        } else {
-          def.apply(def.values[i]);
-        }
-        renderSettings();
-        break;
-      }
-    }
+  const SettingDef& def = SETTINGS[settingsLeafIndex];
+  if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
+    confirmArmedRow = -1;
+    settingsScreen = SET_LIST;
+    renderSettings();
     return true;
   }
-
-  if (settingsScreen == SET_LIST) {
-    if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
-      if (settingsListPage > 0) {
-        settingsListPage--;
-        renderSettings();
-      } else {
-        settingsScreen = SET_OFF;
-        if (!catMode) render();  // catMode: gifTick() resumes drawing next pass
-      }
-    } else if (settingsListPage < settingsTotalListPages() - 1 &&
-               tx >= SET_NEXT_X0 && tx < SET_NEXT_X1 && ty >= SET_NEXT_Y0 && ty < SET_NEXT_Y1) {
-      settingsListPage++;
-      renderSettings();
-    } else {
-      int startIdx = settingsListPage * SETTINGS_ROWS_PER_PAGE;
-      for (int i = 0; i < SETTINGS_ROWS_PER_PAGE; i++) {
-        int idx = startIdx + i;
-        if (idx >= SETTINGS_COUNT) break;
-        int y = SET_ROW_Y0 + i * SET_ROW_STEP;
-        if (tx >= SET_ROW_X0 && tx < SET_ROW_X0 + SET_ROW_W && ty >= y && ty < y + SET_ROW_H) {
-          settingsLeafIndex = idx;
+  int btnW = (def.count == 1) ? SET_WIDE_BTN_W : SET_BTN_W;
+  for (int i = 0; i < def.count; i++) {
+    int col = i % def.cols;
+    int row = i / def.cols;
+    int x = (def.count == 1) ? SET_WIDE_BTN_X0 : SET_BTN_X0 + col * SET_BTN_STEP;
+    int y = SET_BTN_Y + row * SET_BTN_STEP_Y;
+    if (tx >= x && tx < x + btnW && ty >= y && ty < y + SET_BTN_H) {
+      if (def.destructive) {
+        bool armed = (confirmArmedRow == settingsLeafIndex &&
+                      now - confirmArmedMs < CONFIRM_ARM_MS);
+        if (armed) {
           confirmArmedRow = -1;
-          settingsScreen = SET_LEAF;
-          renderSettings();
-          break;
+          def.apply(def.values[i]);  // may never return (e.g. ESP.restart())
+        } else {
+          confirmArmedRow = settingsLeafIndex;
+          confirmArmedMs = now;
         }
+      } else {
+        def.apply(def.values[i]);
       }
+      renderSettings();
+      break;
     }
-    return true;
   }
+  return true;
+}
 
-  return false;
+// ── SET_LIST drag-to-scroll ────────────────────────────────
+// The touch controller only reports position while pressed (no velocity/
+// gesture primitives), so a tap and a scroll look identical until the finger
+// has actually moved: Begin just remembers where the touch started, Move
+// live-shifts settingsScrollOffset by the frame-to-frame delta, and End
+// checks the accumulated movement to decide whether this was a scroll (do
+// nothing more) or a tap (hit-test against the row rects at their current
+// scrolled position). Using the last position seen by Move/Begin -- rather
+// than re-reading the touch controller at release -- avoids relying on
+// whatever getTouch() returns the instant the finger lifts.
+static int32_t dragLastX = 0, dragLastY = 0;
+static int32_t dragTotalMoveY = 0;  // cumulative |dy| this gesture, px
+static const int32_t DRAG_TAP_PX = 8;  // below this total movement, treat release as a tap
+
+void settingsListDragBegin(int32_t tx, int32_t ty) {
+  dragLastX = tx;
+  dragLastY = ty;
+  dragTotalMoveY = 0;
+}
+
+void settingsListDragMove(int32_t tx, int32_t ty) {
+  int32_t dy = ty - dragLastY;
+  dragLastX = tx;
+  if (dy == 0) return;
+  dragLastY = ty;
+  dragTotalMoveY += (dy < 0) ? -dy : dy;
+
+  int newOffset = settingsScrollOffset - dy;  // drag finger up -> scroll list down (reveal later rows)
+  if (newOffset < 0) newOffset = 0;
+  if (newOffset > SETTINGS_SCROLL_MAX) newOffset = SETTINGS_SCROLL_MAX;
+  if (newOffset != settingsScrollOffset) {
+    settingsScrollOffset = newOffset;
+    renderSettings();
+  }
+}
+
+void settingsListDragEnd(bool catMode) {
+  if (dragTotalMoveY >= DRAG_TAP_PX) return;  // was a scroll, not a tap -- nothing else to do
+  int32_t tx = dragLastX, ty = dragLastY;
+
+  if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
+    settingsScreen = SET_OFF;
+    if (!catMode) render();  // catMode: gifTick() resumes drawing next pass
+    return;
+  }
+  for (int idx = 0; idx < SETTINGS_COUNT; idx++) {
+    int y = SETTINGS_VIEWPORT_Y0 + idx * SET_ROW_STEP - settingsScrollOffset;
+    if (y + SET_ROW_H < SETTINGS_VIEWPORT_Y0 || y > SETTINGS_VIEWPORT_Y0 + SETTINGS_VIEWPORT_H) continue;
+    if (tx >= SET_ROW_X0 && tx < SET_ROW_X0 + SET_ROW_W && ty >= y && ty < y + SET_ROW_H) {
+      settingsLeafIndex = idx;
+      confirmArmedRow = -1;
+      settingsScreen = SET_LEAF;
+      renderSettings();
+      break;
+    }
+  }
 }

@@ -109,9 +109,9 @@ So you never have to think about it again — it will start when the Mac
 starts, and restart itself if it ever crashes:
 
 ```
-cp ~/cyd/server/com.eunite.cydusage.plist ~/cyd/server/com.eunite.cydcontrol.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.eunite.cydusage.plist
-launchctl load ~/Library/LaunchAgents/com.eunite.cydcontrol.plist
+cp ~/cyd/server/com.corner.cydusage.plist ~/cyd/server/com.corner.cydcontrol.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.corner.cydusage.plist
+launchctl load ~/Library/LaunchAgents/com.corner.cydcontrol.plist
 ```
 
 (The second one is the browser control panel — see "The control panel"
@@ -275,7 +275,7 @@ live status page that answers "is everything working?" at a glance:
 
 This page is served by a second tiny helper (`server/control_server.py`)
 that was installed the same way as the main one
-(`server/com.eunite.cydcontrol.plist` in `~/Library/LaunchAgents/`). It
+(`server/com.corner.cydcontrol.plist` in `~/Library/LaunchAgents/`). It
 only listens on your Mac itself (127.0.0.1) — other devices on your WiFi
 cannot reach it, because it has the power to stop and start the server.
 
@@ -421,8 +421,8 @@ cyd/
 ├── server/
 │   ├── usage_server.py             the helper program (Python, no dependencies)
 │   ├── control_server.py           serves the control panel on 127.0.0.1:8788
-│   ├── com.eunite.cydusage.plist   auto-start recipe for macOS
-│   └── com.eunite.cydcontrol.plist auto-start recipe for the control panel
+│   ├── com.corner.cydusage.plist   auto-start recipe for macOS
+│   └── com.corner.cydcontrol.plist auto-start recipe for the control panel
 └── firmware/cyd_dashboard/
     ├── cyd_dashboard.ino           the display software (open this in Arduino IDE)
     ├── pins.h                      which wires go where on this exact board

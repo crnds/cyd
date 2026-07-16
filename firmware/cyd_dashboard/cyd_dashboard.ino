@@ -48,7 +48,7 @@ int longTrendCount = 0;  // valid entries, oldest at [0]; may be < LONG_TREND_DA
 int currentPage = 0;
 int cfgBootPage = 0;  // which page currentPage starts on; overridable via /config.json "boot_page"
 SettingsScreen settingsScreen = SET_OFF;
-int settingsListPage = 0;    // which page of the SET_LIST list is shown
+int settingsScrollOffset = 0;  // vertical scroll position (px) of the SET_LIST list
 int settingsLeafIndex = -1;  // index into SETTINGS[] currently open in SET_LEAF
 uint32_t confirmArmedMs = 0;
 int confirmArmedRow = -1;
@@ -399,12 +399,14 @@ void loop() {
   if (touchDown && !touchWasDown && now - lastTouchMs > TOUCH_DEBOUNCE_MS) {
     lastTouchMs = now;
 
-    if (settingsScreen != SET_OFF) {
+    if (settingsScreen == SET_LEAF) {
       handleSettingsTouch(tx, ty, now, catMode);
+    } else if (settingsScreen == SET_LIST) {
+      settingsListDragBegin(tx, ty);  // resolved as a tap or a scroll on release, below
     } else if (!catMode && tx >= PULSE_HIT_X0 && tx < PULSE_HIT_X1 &&
                ty >= PULSE_HIT_Y0 && ty < PULSE_HIT_Y1) {
       settingsScreen = SET_LIST;
-      settingsListPage = 0;
+      settingsScrollOffset = 0;
       renderSettings();
     } else {
       bool isRight = (tx >= 152);
@@ -429,6 +431,10 @@ void loop() {
       if (!catMode) render();  // catMode: gifTick() already redraws every pass
       flashTouchBorder(isRight);  // one-frame white edge flash on the new page: touch registered
     }
+  } else if (touchDown && touchWasDown && settingsScreen == SET_LIST) {
+    settingsListDragMove(tx, ty);  // live-scroll while the finger stays down, no debounce gate
+  } else if (!touchDown && touchWasDown && settingsScreen == SET_LIST) {
+    settingsListDragEnd(catMode);  // tap (open a leaf / exit) vs scroll, decided from total movement
   }
   touchWasDown = touchDown;
 

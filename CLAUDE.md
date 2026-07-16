@@ -106,7 +106,7 @@ flash storage for the scheme change to orphan.
 ## Server internals (`usage_server.py`)
 
 - **Stdlib only** (`http.server`, `subprocess`, `urllib`) so it can run under
-  launchd. The launchd job (`com.eunite.cydusage.plist`) invokes
+  launchd. The launchd job (`com.corner.cydusage.plist`) invokes
   **`/usr/bin/python3`, which is 3.9.6** — keep the code 3.9-compatible
   (notably: `datetime.fromisoformat` can't parse a trailing `Z`, hence the
   `.replace("Z","+00:00")`). Test with `/usr/bin/python3`, not just Homebrew.
@@ -164,10 +164,10 @@ flash storage for the scheme change to orphan.
 
 ## Control panel (`server/control_server.py` + `server.html`)
 
-- A second launchd job (`com.eunite.cydcontrol.plist`) serving
+- A second launchd job (`com.corner.cydcontrol.plist`) serving
   `http://127.0.0.1:8788/` — a status page (`server.html`) plus
   `GET /api/status` and `POST /api/enable|/api/disable`, which shell out to
-  `launchctl bootstrap`/`bootout` on the `com.eunite.cydusage` job.
+  `launchctl bootstrap`/`bootout` on the `com.corner.cydusage` job.
 - **Localhost-bound on purpose** (it can execute launchctl) — never bind it
   to `0.0.0.0`.
 - It's deliberately a separate process/port so the page stays up while the

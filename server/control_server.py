@@ -14,7 +14,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 8788
-JOB_LABEL = "com.eunite.cydusage"
+JOB_LABEL = "com.corner.cydusage"
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % JOB_LABEL)
 HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server.html")
 USAGE_URL = "http://127.0.0.1:8787/api/usage"
