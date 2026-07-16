@@ -125,6 +125,7 @@ bool applyUsageJson(const String& payload) {
     STATE.weekPercent = doc["limits"]["week"]["percent"] | -1;
     snprintf(STATE.weekResets, sizeof(STATE.weekResets), "%s",
              doc["limits"]["week"]["resets"] | "");
+    STATE.weekResetsInSec = doc["limits"]["week"]["resets_in_sec"] | -1L;
     STATE.weekModelPercent = doc["limits"]["week_model"]["percent"] | -1;
     snprintf(STATE.weekModelName, sizeof(STATE.weekModelName), "%s",
              doc["limits"]["week_model"]["name"] | "");
@@ -139,6 +140,7 @@ bool applyUsageJson(const String& payload) {
     STATE.sessionResetsInSec = -1L;
     STATE.weekPercent = -1;
     STATE.weekResets[0] = '\0';
+    STATE.weekResetsInSec = -1L;
     STATE.weekModelPercent = -1;
     STATE.weekModelName[0] = '\0';
     STATE.weekModelResets[0] = '\0';

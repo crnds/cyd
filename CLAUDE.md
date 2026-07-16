@@ -145,7 +145,7 @@ flash storage for the scheme change to orphan.
   `active_now`, `last_activity_sec`, `projects[{name,tokens}]`,
   `models[{name,tokens,cost,percent}]` (today's cost split by model family,
   top 4 by cost, percent = share of today's estimated cost), `trend[7]`,
-  `limits{tz,fetched_at_epoch,age_sec,session{percent,resets,resets_at_epoch,resets_in_sec},week{percent,resets},week_model,credits}`
+  `limits{tz,fetched_at_epoch,age_sec,session{percent,resets,resets_at_epoch,resets_in_sec},week{percent,resets,resets_at_epoch,resets_in_sec},week_model,credits}`
   (null if the keychain read hasn't succeeded; `resets_in_sec` and `age_sec`
   are computed at request time so they stay fresh between OAuth refreshes —
   a large `age_sec` means the snapshot is stale, e.g. the loop is in a 429

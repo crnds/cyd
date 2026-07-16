@@ -161,6 +161,7 @@ const uint16_t COL_ACCENT = 0xFB08;  // orange
 const uint16_t COL_GOOD = 0x2668;    // green
 const uint16_t COL_WARN = 0xF8C6;    // rose
 const uint16_t COL_TRACK = 0x5ACB;   // neutral grey bar track
+const uint16_t COL_TRACK_BLACK = 0x0000; // pure-black bar track (reset-countdown bars)
 const uint16_t COL_BLUE = 0x3C1E;    // device-stats bar chart accent
 
 // ── STATE ──────────────────────────────────────────────────
@@ -185,6 +186,7 @@ struct UsageState {
   long sessionResetsInSec = -1;  // countdown to session reset; -1 = unknown
   int weekPercent = -1;
   char weekResets[24] = "";
+  long weekResetsInSec = -1;     // countdown to week reset; -1 = unknown
   long ctxTokens = -1;       // context window of the latest session; -1 = unknown
   int ctxPercent = -1;
   int weekModelPercent = -1; // per-model weekly limit; -1 = absent (row hidden)

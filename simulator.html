@@ -460,6 +460,7 @@ const COL_BLUE    = 'rgb(58,130,247)';  // 0x3C1E device-stats bar chart accent
 const COL_GOOD    = 'rgb(33,206,66)';   // 0x2668
 const COL_WARN    = 'rgb(255,24,49)';   // 0xF8C6
 const COL_TRACK   = 'rgb(90,89,90)';    // 0x5ACB neutral grey track
+const COL_TRACK_BLACK = 'rgb(0,0,0)';   // 0x0000 pure-black track (reset-countdown bars)
 
 // ── STATE (mirroring the firmware UsageState struct) ──────
 const STATE = {
@@ -475,6 +476,7 @@ const STATE = {
   sessionResetsInSec: -1, // countdown to session reset; -1 = unknown
   weekPercent: -1,
   weekResets: '',
+  weekResetsInSec: -1,    // countdown to week reset; -1 = unknown
   ctxTokens: -1,          // context window of the latest session; -1 = unknown
   ctxPercent: -1,
   weekModelPercent: -1,   // per-model weekly limit; -1 = absent (row hidden)
@@ -882,11 +884,11 @@ function drawWeatherIcon(x, y, code) {
 }
 
 // Thin inset progress bar: near-black track recessed into a surface card.
-function drawMiniBar(x, y, w, percent, color) {
-  gfx.fillRoundRect(x, y, w, 6, 3, COL_TRACK);
+function drawMiniBar(x, y, w, percent, color, trackColor = COL_TRACK, h = 6) {
+  gfx.fillRoundRect(x, y, w, h, h / 2, trackColor);
   if (percent >= 0) {
     const fillW = Math.round(Math.min(percent, 100) / 100 * w);
-    gfx.fillRoundRect(x, y, Math.max(fillW, 6), 6, 3, color);
+    gfx.fillRoundRect(x, y, Math.max(fillW, h), h, h / 2, color);
   }
 }
 
@@ -898,6 +900,18 @@ function drawCardLabel(x, y, label) {
   gfx.print(label);
 }
 
+const SESSION_WINDOW_SEC = 5 * 3600;        // 5h
+const WEEK_WINDOW_SEC = 7 * 24 * 3600;      // 168h
+
+// Reset-countdown fill: 0% right after a reset, 100% right before the next
+// one. `remainingSec` is the live countdown (already ticked down locally
+// between polls); `windowSec` is the fixed window length (5h or 168h).
+function elapsedPercentOfWindow(remainingSec, windowSec) {
+  if (remainingSec < 0) return -1;
+  const elapsed = Math.max(0, windowSec - remainingSec);
+  return Math.min(100, Math.max(0, Math.round(elapsed * 100 / windowSec)));
+}
+
 // Card layout: one tall left card = session/week limits (always accent
 // orange); the right column is two stacked cards = Bangkok clock/date+weather
 // merged (y=4 h=152), BTC (y=160 h=56), 4px gap. All cards are 152px wide
@@ -906,50 +920,57 @@ function drawLimitsCard() {
   gfx.fillRoundRect(2, 4, 142, 216, 8, COL_SURFACE);
   gfx.drawRoundRect(2, 4, 142, 216, 8, COL_BORDER);
 
-  // ── left card: limits ──
-  drawCardLabel(12, 13, 'SESSION (5H)');
-
-  // Tick the session countdown down locally between polls.
+  // Tick both countdowns down locally between polls.
   let sessionRem = STATE.sessionResetsInSec;
   if (sessionRem >= 0) {
     sessionRem -= Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
     if (sessionRem < 0) sessionRem = 0;
   }
+  let weekRem = STATE.weekResetsInSec;
+  if (weekRem >= 0) {
+    weekRem -= Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
+    if (weekRem < 0) weekRem = 0;
+  }
 
+  // ── left card: limits ──
+  const sessionPctStr = STATE.sessionPercent >= 0 ? STATE.sessionPercent + '%' : '--';
   gfx.setTextColor(COL_ACCENT);
   gfx.setTextSize(4);
-  gfx.setCursor(12, 28);
-  gfx.print(STATE.sessionPercent >= 0 ? STATE.sessionPercent + '%' : '--');
+  gfx.setCursor(12, 13);
+  gfx.print(sessionPctStr);
+  drawCardLabel(12 + sessionPctStr.length * 24 + 6, 37, '5H');
 
-  drawMiniBar(12, 64, 122, STATE.sessionPercent, COL_ACCENT);
+  drawMiniBar(12, 51, 122, STATE.sessionPercent, COL_ACCENT);
+  drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
 
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(2);
-  gfx.setCursor(12, 76);
+  gfx.setCursor(12, 75);
   gfx.print('resets:');
-  gfx.setCursor(12, 94);
+  gfx.setCursor(12, 93);
   gfx.print(STATE.sessionResets || '--');
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(2);
-  gfx.setCursor(12, 112);
+  gfx.setCursor(12, 111);
   if (sessionRem >= 0) gfx.print('in ' + fmtCountdown(sessionRem));
 
-  gfx.fillRect(12, 136, 122, 1, COL_BORDER);
+  gfx.fillRect(12, 133, 122, 1, COL_BORDER);
 
-  drawCardLabel(12, 147, 'WEEK (ALL MODELS)');
-
+  const weekPctStr = STATE.weekPercent >= 0 ? STATE.weekPercent + '%' : '--';
   gfx.setTextColor(COL_ACCENT);
   gfx.setTextSize(3);
-  gfx.setCursor(12, 162);
-  gfx.print(STATE.weekPercent >= 0 ? STATE.weekPercent + '%' : '--');
+  gfx.setCursor(12, 142);
+  gfx.print(weekPctStr);
+  drawCardLabel(12 + weekPctStr.length * 18 + 6, 158, 'WEEK');
 
-  drawMiniBar(12, 192, 122, STATE.weekPercent, COL_ACCENT);
+  drawMiniBar(12, 172, 122, STATE.weekPercent, COL_ACCENT);
+  drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
 
   // "resets Jul 9 at 4:59am" is 22 chars = 132px at size1 — exactly the
   // card's inner width, so this line must stay size1.
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(1);
-  gfx.setCursor(12, 206);
+  gfx.setCursor(12, 196);
   gfx.print(STATE.weekResets ? 'resets ' + STATE.weekResets : 'resets --');
 }
 
@@ -1540,7 +1561,7 @@ const MOCK = {
   limits: {
     tz: 'Asia/Bangkok',
     session: { percent: 27, resets: '03:19', resets_in_sec: 5400 },
-    week: { percent: 86, resets: 'Jul 9 at 04:59' },
+    week: { percent: 86, resets: 'Jul 9 at 04:59', resets_in_sec: 302400 },
     week_model: { name: 'Fable', percent: 58, resets: 'Jul 16 at 04:59' },  // set null to test the hidden row
     credits: { used: 0.41, limit: 10.0, percent: 4 },
   },
@@ -1621,6 +1642,7 @@ function applyData(doc) {
     STATE.sessionResetsInSec = doc.limits.session?.resets_in_sec ?? -1;
     STATE.weekPercent = doc.limits.week?.percent ?? -1;
     STATE.weekResets = doc.limits.week?.resets ?? '';
+    STATE.weekResetsInSec = doc.limits.week?.resets_in_sec ?? -1;
     STATE.weekModelPercent = doc.limits.week_model?.percent ?? -1;
     STATE.weekModelName = doc.limits.week_model?.name ?? '';
     STATE.weekModelResets = doc.limits.week_model?.resets ?? '';
@@ -1633,6 +1655,7 @@ function applyData(doc) {
     STATE.sessionResetsInSec = -1;
     STATE.weekPercent = -1;
     STATE.weekResets = '';
+    STATE.weekResetsInSec = -1;
     STATE.weekModelPercent = -1;
     STATE.weekModelName = '';
     STATE.weekModelResets = '';

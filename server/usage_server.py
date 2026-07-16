@@ -759,7 +759,7 @@ def build_report():
                 win["percent"] = 0
                 win["resets"] = ""
                 remaining = 0
-            if key == "session":
+            if key in ("session", "week"):
                 win["resets_in_sec"] = remaining
             limits[key] = win
 

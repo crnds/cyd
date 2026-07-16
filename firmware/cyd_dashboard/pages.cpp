@@ -406,11 +406,11 @@ static void drawWeatherIcon(int x, int y, int code) {
 }
 
 // Thin inset progress bar: near-black track recessed into a surface card.
-static void drawMiniBar(int x, int y, int w, int percent, uint16_t color) {
-  g->fillRoundRect(x, y, w, 6, 3, COL_TRACK);
+static void drawMiniBar(int x, int y, int w, int percent, uint16_t color, uint16_t trackColor = COL_TRACK, int h = 6) {
+  g->fillRoundRect(x, y, w, h, h / 2, trackColor);
   if (percent >= 0) {
     int fillW = (int)((float)min(percent, 100) / 100 * w);
-    g->fillRoundRect(x, y, max(fillW, 6), 6, 3, color);
+    g->fillRoundRect(x, y, max(fillW, h), h, h / 2, color);
   }
 }
 
@@ -422,54 +422,75 @@ static void drawCardLabel(int x, int y, const char* label) {
   g->print(label);
 }
 
+static const long SESSION_WINDOW_SEC = 5L * 3600;       // 5h
+static const long WEEK_WINDOW_SEC = 7L * 24 * 3600;     // 168h
+
+// Reset-countdown fill: 0% right after a reset, 100% right before the next
+// one. `remainingSec` is the live countdown (already ticked down locally
+// between polls); `windowSec` is the fixed window length (5h or 168h).
+static int elapsedPercentOfWindow(long remainingSec, long windowSec) {
+  if (remainingSec < 0) return -1;
+  long elapsed = windowSec - remainingSec;
+  if (elapsed < 0) elapsed = 0;
+  int pct = (int)(elapsed * 100 / windowSec);
+  return constrain(pct, 0, 100);
+}
+
 static void drawLimitsCard() {
   g->fillRoundRect(2, 4, 142, 216, 8, COL_SURFACE);
   g->drawRoundRect(2, 4, 142, 216, 8, COL_BORDER);
 
-  // ── left card: limits ──
-  drawCardLabel(12, 13, "SESSION (5H)");
-
-  // Tick the session countdown down locally between polls.
+  // Tick both countdowns down locally between polls.
   long sessionRem = STATE.sessionResetsInSec;
   if (sessionRem >= 0) {
     sessionRem -= (long)((millis() - STATE.lastFetchOkMs) / 1000);
     if (sessionRem < 0) sessionRem = 0;
   }
+  long weekRem = STATE.weekResetsInSec;
+  if (weekRem >= 0) {
+    weekRem -= (long)((millis() - STATE.lastFetchOkMs) / 1000);
+    if (weekRem < 0) weekRem = 0;
+  }
 
+  // ── left card: limits ──
+  String sessionPctStr = STATE.sessionPercent >= 0 ? String(STATE.sessionPercent) + "%" : "--";
   g->setTextColor(COL_ACCENT);
   g->setTextSize(4);
-  g->setCursor(12, 28);
-  g->print(STATE.sessionPercent >= 0 ? String(STATE.sessionPercent) + "%" : "--");
+  g->setCursor(12, 13);
+  g->print(sessionPctStr);
+  drawCardLabel(12 + sessionPctStr.length() * 24 + 6, 37, "5H");
 
-  drawMiniBar(12, 64, 122, STATE.sessionPercent, COL_ACCENT);
+  drawMiniBar(12, 51, 122, STATE.sessionPercent, COL_ACCENT);
+  drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
 
   g->setTextColor(COL_TEXT2);
   g->setTextSize(2);
-  g->setCursor(12, 76);
+  g->setCursor(12, 75);
   g->print("resets:");
-  g->setCursor(12, 94);
+  g->setCursor(12, 93);
   g->print(STATE.sessionResets[0] != '\0' ? STATE.sessionResets : "--");
   g->setTextColor(COL_TEXT);
   g->setTextSize(2);
-  g->setCursor(12, 112);
+  g->setCursor(12, 111);
   if (sessionRem >= 0) g->print("in " + fmtCountdown(sessionRem));
 
-  g->fillRect(12, 136, 122, 1, COL_BORDER);
+  g->fillRect(12, 133, 122, 1, COL_BORDER);
 
-  drawCardLabel(12, 147, "WEEK (ALL MODELS)");
-
+  String weekPctStr = STATE.weekPercent >= 0 ? String(STATE.weekPercent) + "%" : "--";
   g->setTextColor(COL_ACCENT);
   g->setTextSize(3);
-  g->setCursor(12, 162);
-  g->print(STATE.weekPercent >= 0 ? String(STATE.weekPercent) + "%" : "--");
+  g->setCursor(12, 142);
+  g->print(weekPctStr);
+  drawCardLabel(12 + weekPctStr.length() * 18 + 6, 158, "WEEK");
 
-  drawMiniBar(12, 192, 122, STATE.weekPercent, COL_ACCENT);
+  drawMiniBar(12, 172, 122, STATE.weekPercent, COL_ACCENT);
+  drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
 
   // "resets Jul 9 at 4:59am" is 22 chars = 132px at size1 — exactly the
   // card's inner width, so this line must stay size1.
   g->setTextColor(COL_TEXT2);
   g->setTextSize(1);
-  g->setCursor(12, 206);
+  g->setCursor(12, 196);
   g->print(STATE.weekResets[0] != '\0' ? String("resets ") + STATE.weekResets : String("resets --"));
 }
 
