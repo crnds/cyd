@@ -245,9 +245,9 @@ Tap anywhere on the screen to flip between five pages:
 
 | Page | Shows |
 |---|---|
-| **1. Limits & Weather** (default) | Session % + reset time, week % + reset time — same numbers as `/usage` in Claude Code — plus a Bangkok clock, current weather, and the BTC/USDT price |
+| **1. Limits & Weather** (default) | Session % + reset time, week % + reset time — same numbers as `/usage` in Claude Code — plus a Bangkok clock, current weather, and the BTC/USDT price. The reset-countdown bars have a looping light sweep across them (a subtle 2.6s animation). |
 | **2. Top Projects** | Your 5 most token-hungry projects over the last 7 days |
-| **3. Home** | A compact view of the same session/week limit bars, plus the BTC/USDT price |
+| **3. Home** | A compact view of the same session/week limit bars with the same light sweep, plus the BTC/USDT price |
 | **4. 7-Day Trend** | Bar chart of daily token usage this week |
 | **5. Device Stats** | CPU duty cycle, flash usage, and static RAM usage on the board itself |
 
@@ -355,6 +355,10 @@ other).
 - **Dollar figures are estimates.** They're computed from your local logs
   with an approximate price table by model family
   (in `usage_server.py`) — useful for comparing days, not for billing.
+- **The light sweep on the countdown bars** — that looping shine gradient
+  across the green bars on pages 1 and 3 — is pure polish. It's a subtle
+  visual indicator that the board is alive and animating smoothly, running
+  in parallel with the 20-second data updates.
 - **Privacy:** the helper serves data to any device on your home network
   (port 8787). It exposes usage statistics only — token counts,
   percentages, project folder names — never conversation content or
@@ -387,19 +391,19 @@ Part 2, Step 2.4.
 **Compile only (no board needed) — verifies the code builds:**
 
 ```
-arduino-cli compile --fqbn esp32:esp32:esp32 ~/cyd/firmware/cyd_dashboard
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app ~/cyd/firmware/cyd_dashboard
 ```
 
-A healthy build ends with a line like `Sketch uses 1152167 bytes (87%) of
-program storage space.` (The sketch is expected to use ~87% of the default
-1.3 MB app partition — that's fine, it fits.)
+A healthy build ends with a line like `Sketch uses 1322355 bytes (42%) of
+program storage space.` (The sketch uses 42% of the 3 MB app partition under
+the `huge_app` scheme — comfortable headroom for now.)
 
 **Compile and flash to the board in one step:**
 
 ```
 arduino-cli board list                        # find the port, e.g. /dev/cu.usbserial-10
-arduino-cli compile --fqbn esp32:esp32:esp32 --upload \
-  -p /dev/cu.usbserial-10 ~/cyd/firmware/cyd_dashboard
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app,UploadSpeed=115200 \
+  --upload -p /dev/cu.usbserial-10 ~/cyd/firmware/cyd_dashboard
 ```
 
 Replace the port with the one `board list` shows for your board (looks
