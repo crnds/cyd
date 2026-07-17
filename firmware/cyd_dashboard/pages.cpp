@@ -546,16 +546,6 @@ static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int s
     g->drawLine(x0, y0, x1, y1, COL_TEXT);
   }
 
-  // Session (5h) reset time: a thin green radius from center to rim, static
-  // (unlike the hands) at whatever hour/minute the session next resets.
-  if (haveReset) {
-    float resetAngle = ((resetHour24 % 12) + resetMinute / 60.0f) * 30.0f - 90.0f;
-    float resetRad = resetAngle * PI / 180.0f;
-    int rx = cx + (int)(cosf(resetRad) * (r - 2));
-    int ry = cy + (int)(sinf(resetRad) * (r - 2));
-    g->drawLine(cx, cy, rx, ry, COL_GOOD);
-  }
-
   float hourAngle = ((hour24 % 12) + minute / 60.0f) * 30.0f - 90.0f;
   float minAngle = (minute + second / 60.0f) * 6.0f - 90.0f;
   float secAngle = second * 6.0f - 90.0f;
@@ -576,6 +566,17 @@ static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int s
   g->drawWideLine(cx, cy, mx, my, 1.5f, COL_TEXT);
   g->drawLine(cx, cy, sx, sy, COL_ACCENT);
   g->fillCircle(cx, cy, 2, COL_TEXT);
+
+  // Session (5h) reset time: a thin green radius from center to rim, static
+  // (unlike the hands) at whatever hour/minute the session next resets.
+  // Floating on top of other hands.
+  if (haveReset) {
+    float resetAngle = ((resetHour24 % 12) + resetMinute / 60.0f) * 30.0f - 90.0f;
+    float resetRad = resetAngle * PI / 180.0f;
+    int rx = cx + (int)(cosf(resetRad) * (r - 2));
+    int ry = cy + (int)(sinf(resetRad) * (r - 2));
+    g->drawLine(cx, cy, rx, ry, COL_GOOD);
+  }
 }
 
 // Card layout: one tall left card = session/week limits (always accent

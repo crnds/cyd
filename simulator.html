@@ -1054,16 +1054,6 @@ function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour
     gfx.drawLine(x0, y0, x1, y1, COL_TEXT);
   }
 
-  // Session (5h) reset time: a thin green radius from center to rim, static
-  // (unlike the hands) at whatever hour/minute the session next resets.
-  if (haveReset) {
-    const resetAngle = ((resetHour24 % 12) + resetMinute / 60) * 30 - 90;
-    const resetRad = resetAngle * Math.PI / 180;
-    const rx = cx + Math.cos(resetRad) * (r - 2);
-    const ry = cy + Math.sin(resetRad) * (r - 2);
-    gfx.drawLine(cx, cy, rx, ry, COL_GOOD);
-  }
-
   const hourAngle = ((hour24 % 12) + minute / 60) * 30 - 90;
   const minAngle = (minute + second / 60) * 6 - 90;
   const secAngle = second * 6 - 90;
@@ -1084,6 +1074,17 @@ function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour
   gfx.drawWideLine(cx, cy, mx, my, 1.5, COL_TEXT);
   gfx.drawLine(cx, cy, sx, sy, COL_ACCENT);
   gfx.fillCircle(cx, cy, 2, COL_TEXT);
+
+  // Session (5h) reset time: a thin green radius from center to rim, static
+  // (unlike the hands) at whatever hour/minute the session next resets.
+  // Floating on top of other hands.
+  if (haveReset) {
+    const resetAngle = ((resetHour24 % 12) + resetMinute / 60) * 30 - 90;
+    const resetRad = resetAngle * Math.PI / 180;
+    const rx = cx + Math.cos(resetRad) * (r - 2);
+    const ry = cy + Math.sin(resetRad) * (r - 2);
+    gfx.drawLine(cx, cy, rx, ry, COL_GOOD);
+  }
 }
 
 function drawStatusPage() {
