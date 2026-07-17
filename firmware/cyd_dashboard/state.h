@@ -122,6 +122,7 @@ void flashTouchBorder(bool isRight);
 bool pixelShiftTick(uint32_t now);
 void clearShiftMargins();
 bool checkHourlyFlash(bool& isEvenSecond);
+void shineTick(uint32_t nowMs);
 
 // Non-const: overridable from /config.json (see sd_store.cpp's
 // loadRuntimeConfig). Originally set once at boot before the two tasks
@@ -159,6 +160,9 @@ const uint16_t COL_TEXT = 0xFFFF;
 const uint16_t COL_TEXT2 = 0x9CD3;
 const uint16_t COL_ACCENT = 0xFB08;  // orange
 const uint16_t COL_GOOD = 0x2668;    // green
+const uint16_t COL_SHINE_LO = 0x5ECE;  // COL_GOOD lerped ~25% to white (shine band edge)
+const uint16_t COL_SHINE_MID = 0x9734; // ~50% to white (shine band mid)
+const uint16_t COL_SHINE_HI = 0xD7BA;  // ~80% to white (shine band center)
 const uint16_t COL_WARN = 0xF8C6;    // rose
 const uint16_t COL_TRACK = 0x5ACB;   // neutral grey bar track
 const uint16_t COL_TRACK_BLACK = 0x0000; // pure-black bar track (reset-countdown bars)

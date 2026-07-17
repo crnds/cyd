@@ -432,11 +432,58 @@ static void drawWeatherIcon(int x, int y, int code) {
 }
 
 // Thin inset progress bar: near-black track recessed into a surface card.
-static void drawMiniBar(int x, int y, int w, int percent, uint16_t color, uint16_t trackColor = COL_TRACK, int h = 6) {
+// Returns the fill width in px (-1 when percent is unknown) so callers can
+// overlay effects on the filled region (the green bars' shine sweep below).
+static int drawMiniBar(int x, int y, int w, int percent, uint16_t color, uint16_t trackColor = COL_TRACK, int h = 6) {
   g->fillRoundRect(x, y, w, h, h / 2, trackColor);
-  if (percent >= 0) {
-    int fillW = (int)((float)min(percent, 100) / 100 * w);
-    g->fillRoundRect(x, y, max(fillW, h), h, h / 2, color);
+  if (percent < 0) return -1;
+  int fillW = max((int)((float)min(percent, 100) / 100 * w), h);
+  g->fillRoundRect(x, y, fillW, h, h / 2, color);
+  return fillW;
+}
+
+// ── SHINE SWEEP ────────────────────────────────────────────
+// Looping light band swept across the green reset-countdown bars' fill in
+// drawLimitsCard (pages 1 and 8). The band crosses the full 122px track at
+// constant speed but is only painted over the filled interior, so short
+// fills just see it pass through. Twin of simulator.html's drawShineStrip.
+static const uint32_t SHINE_PERIOD_MS = 2600;
+static const int SHINE_BAND_R = 7;
+static const int SHINE_BAR_X = 12, SHINE_BAR_W = 122, SHINE_BAR_H = 4;
+static const int SHINE_BAR_Y[2] = {61, 182};  // 5h, weekly (drawLimitsCard)
+// Fill widths cached by drawLimitsCard (under stateMutex) so shineTick can
+// repaint between renders without touching STATE — same lock-free-volatile
+// pattern as loop()'s poll-progress line.
+static volatile int shineFillPx[2] = {-1, -1};
+
+// Paint the shine band over one bar's filled interior on `dst` — the sprite
+// during drawLimitsCard (so pushed frames already carry the band), or the
+// panel directly from shineTick (caller adds the pixel-shift offset).
+// Interior columns only (2..fillW-3, full height) so the radius-2 rounded
+// ends stay untouched; repainting non-band columns COL_GOOD erases the trail.
+static void drawShineStrip(lgfx::LovyanGFX* dst, int x, int y, int fillW, uint32_t nowMs) {
+  if (fillW < 12) return;
+  float phase = (float)(nowMs % SHINE_PERIOD_MS) / SHINE_PERIOD_MS;
+  int center = -SHINE_BAND_R + (int)(phase * (SHINE_BAR_W + 2 * SHINE_BAND_R));
+  dst->startWrite();
+  for (int i = 2; i <= fillW - 3; i++) {
+    int d = abs(i - center);
+    uint16_t c = d <= 1 ? COL_SHINE_HI : d <= 4 ? COL_SHINE_MID : d <= SHINE_BAND_R ? COL_SHINE_LO : COL_GOOD;
+    dst->fillRect(x + i, y, 1, SHINE_BAR_H, c);
+  }
+  dst->endWrite();
+}
+
+// ~30ms between-render top-up of the shine band, straight to the panel —
+// same pattern as loop()'s poll-progress line: no lock (only the volatile
+// cached fill widths), pixel-shift offset applied here, and the inverted
+// hourly-flash frames skipped.
+void shineTick(uint32_t nowMs) {
+  if (currentPage != 0 && currentPage != MIXED_PAGE) return;
+  bool isEvenSecond = false;
+  if (checkHourlyFlash(isEvenSecond) && isEvenSecond) return;
+  for (int i = 0; i < 2; i++) {
+    drawShineStrip(&gfx, SHINE_BAR_X + shiftX, SHINE_BAR_Y[i] + shiftY, shineFillPx[i], nowMs);
   }
 }
 
@@ -487,7 +534,8 @@ static void drawLimitsCard() {
   drawCardLabel(12 + sessionPctStr.length() * 24 + 6, 37, "5H");
 
   drawMiniBar(12, 51, 122, STATE.sessionPercent, COL_ACCENT);
-  drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+  shineFillPx[0] = drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+  drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[0], shineFillPx[0], millis());
 
   g->setTextColor(COL_TEXT2);
   g->setTextSize(2);
@@ -510,7 +558,8 @@ static void drawLimitsCard() {
   drawCardLabel(12 + weekPctStr.length() * 18 + 6, 158, "WEEK");
 
   drawMiniBar(12, 172, 122, STATE.weekPercent, COL_ACCENT);
-  drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+  shineFillPx[1] = drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+  drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[1], shineFillPx[1], millis());
 
   // "resets Jul 9 at 4:59am" is 22 chars = 132px at size1 — exactly the
   // card's inner width, so this line must stay size1.

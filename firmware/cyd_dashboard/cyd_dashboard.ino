@@ -355,6 +355,10 @@ void loop() {
         unlockState();
         mixedPageDirty = true;
       }
+      // Shine sweep on the limits card's green bars: direct panel writes in
+      // the left half (x <= 134), which the GIF's partial pushes (x >= 160)
+      // never touch.
+      shineTick(now);
     }
   } else {
     // Repaint once a second for the pulsing status dot, the local session
@@ -389,6 +393,10 @@ void loop() {
     } else {
       lineW = 0;
     }
+
+    // Same treatment for the shine sweep on page 1's green countdown bars:
+    // top up the band every pass so it glides instead of stepping at 1Hz.
+    shineTick(now);
   }
 
   int32_t tx, ty;

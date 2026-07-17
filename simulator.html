@@ -464,6 +464,9 @@ const COL_ACCENT  = 'rgb(255,97,66)';   // 0xFB08
 const COL_BLUE    = 'rgb(58,130,247)';  // 0x3C1E device-stats bar chart accent
 const COL_YELLOW  = 'rgb(255,255,0)';   // 0xFFE0 yellow for sun/lightning icons
 const COL_GOOD    = 'rgb(33,206,66)';   // 0x2668
+const COL_SHINE_LO  = 'rgb(90,219,115)';  // 0x5ECE COL_GOOD lerped ~25% to white (shine band edge)
+const COL_SHINE_MID = 'rgb(148,231,165)'; // 0x9734 ~50% to white (shine band mid)
+const COL_SHINE_HI  = 'rgb(214,247,214)'; // 0xD7BA ~80% to white (shine band center)
 const COL_WARN    = 'rgb(255,24,49)';   // 0xF8C6
 const COL_TRACK   = 'rgb(90,89,90)';    // 0x5ACB neutral grey track
 const COL_TRACK_BLACK = 'rgb(0,0,0)';   // 0x0000 pure-black track (reset-countdown bars)
@@ -946,11 +949,37 @@ function drawWeatherIcon(x, y, code) {
 }
 
 // Thin inset progress bar: near-black track recessed into a surface card.
+// Returns the fill width in px (-1 when percent is unknown) so callers can
+// overlay effects on the filled region (the green bars' shine sweep below).
 function drawMiniBar(x, y, w, percent, color, trackColor = COL_TRACK, h = 6) {
   gfx.fillRoundRect(x, y, w, h, h / 2, trackColor);
-  if (percent >= 0) {
-    const fillW = Math.round(Math.min(percent, 100) / 100 * w);
-    gfx.fillRoundRect(x, y, Math.max(fillW, h), h, h / 2, color);
+  if (percent < 0) return -1;
+  const fillW = Math.max(Math.round(Math.min(percent, 100) / 100 * w), h);
+  gfx.fillRoundRect(x, y, fillW, h, h / 2, color);
+  return fillW;
+}
+
+// ── SHINE SWEEP ────────────────────────────────────────────
+// Looping light band swept across the green reset-countdown bars' fill in
+// drawLimitsCard (pages 1 and 8). The band crosses the full 122px track at
+// constant speed but is only painted over the filled interior, so short
+// fills just see it pass through. Twin of pages.cpp's drawShineStrip; the
+// 20fps tick() makes it glide with no extra timer (the firmware instead
+// tops it up between 1Hz renders via shineTick()).
+const SHINE_PERIOD_MS = 2600;
+const SHINE_BAND_R = 7;
+const SHINE_BAR_W = 122, SHINE_BAR_H = 4;
+
+// Interior columns only (2..fillW-3, full height) so the radius-2 rounded
+// ends stay untouched; repainting non-band columns COL_GOOD erases the trail.
+function drawShineStrip(x, y, fillW, nowMs) {
+  if (fillW < 12) return;
+  const phase = (nowMs % SHINE_PERIOD_MS) / SHINE_PERIOD_MS;
+  const center = -SHINE_BAND_R + Math.floor(phase * (SHINE_BAR_W + 2 * SHINE_BAND_R));
+  for (let i = 2; i <= fillW - 3; i++) {
+    const d = Math.abs(i - center);
+    const c = d <= 1 ? COL_SHINE_HI : d <= 4 ? COL_SHINE_MID : d <= SHINE_BAND_R ? COL_SHINE_LO : COL_GOOD;
+    gfx.fillRect(x + i, y, 1, SHINE_BAR_H, c);
   }
 }
 
@@ -1003,7 +1032,8 @@ function drawLimitsCard() {
   drawCardLabel(12 + sessionPctStr.length * 24 + 6, 37, '5H');
 
   drawMiniBar(12, 51, 122, STATE.sessionPercent, COL_ACCENT);
-  drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+  const sessionFillW = drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+  drawShineStrip(12, 61, sessionFillW, performance.now());
 
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(2);
@@ -1026,7 +1056,8 @@ function drawLimitsCard() {
   drawCardLabel(12 + weekPctStr.length * 18 + 6, 158, 'WEEK');
 
   drawMiniBar(12, 172, 122, STATE.weekPercent, COL_ACCENT);
-  drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+  const weekFillW = drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+  drawShineStrip(12, 182, weekFillW, performance.now());
 
   // "resets Jul 9 at 4:59am" is 22 chars = 132px at size1 — exactly the
   // card's inner width, so this line must stay size1.
