@@ -135,9 +135,10 @@ extern volatile uint32_t POLL_INTERVAL_MS;
 // Internal linkage per TU (C++ global `const` default) — safe to define
 // identically in every file that includes this header; no ODR issue.
 const uint32_t TOUCH_DEBOUNCE_MS = 350;
-const int PAGE_COUNT = 8;
+const int PAGE_COUNT = 9;
 const int GIF_PAGE = 6;    // 7th page (0-indexed): random cat GIFs from /cats/ on SD
 const int MIXED_PAGE = 7;  // 8th page: status + cats split
+const int BTC_TICKER_PAGE = 8; // 9th page: Binance BTC candlestick ticker
 
 const int DOT_SPACING = 12;
 const int DOT_START_X = 300 - (PAGE_COUNT - 1) * DOT_SPACING;
@@ -179,6 +180,13 @@ const uint16_t COL_YELLOW = 0xFFE0;  // yellow for sun/lightning icons
 // fragments a small heap. Local, short-lived String concatenation elsewhere
 // in the draw code (building one line of text, then discarding it before the
 // next statement) doesn't have this problem and is left alone.
+struct CandleRec {
+  uint32_t openEpoch;
+  float o, h, l, c;
+};
+
+const int CANDLE_COUNT = 288;
+
 struct UsageState {
   char projectNames[5][32];
   int64_t projectTokens[5];
@@ -203,6 +211,9 @@ struct UsageState {
   int creditsPercent = -1;
   uint32_t lastFetchOkMs = 0;
   double btcPrice = -1;      // BTC/USDT (from the Mac via /api/usage); -1 = unknown
+  float btcChangePct = NAN;
+  CandleRec btcCandles[288];
+  int btcCandleCount = 0;
   float weatherTempC = -999; // Bangkok temp (from the Mac via /api/usage); -999 = unknown
   int weatherCode = -1;      // WMO weather_code (from the Mac); -1 = unknown
   bool sdOk = false;

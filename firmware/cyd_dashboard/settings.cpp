@@ -89,9 +89,9 @@ static void applyPixelShift(int v) {
 // (including the cat/mixed pages) are valid -- render()'s switch and loop()'s
 // catMode check already handle those generically regardless of how
 // currentPage got set, no special-casing needed.
-static const int PAGE_VALUES[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-static const char* const PAGE_LABELS[8] = {
-  "STATUS", "PROJECTS", "HOME", "DEVICE", "TRENDS", "LIMITS", "CATS", "MIXED"
+static const int PAGE_VALUES[9] = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+static const char* const PAGE_LABELS[9] = {
+  "STATUS", "PROJECTS", "HOME", "DEVICE", "TRENDS", "LIMITS", "CATS", "MIXED", "BTC"
 };
 static int getCurrentBootPage() { return cfgBootPage; }
 static void applyBootPage(int v) {
@@ -153,7 +153,7 @@ static const SettingDef SETTINGS[] = {
     4, 1, 4, PIXEL_SHIFT_VALUES, PIXEL_SHIFT_LABELS, 2, false,
     getCurrentPixelShift, applyPixelShift },
   { "BOOT PAGE", "BOOT PAGE", "PAGE SHOWN AFTER POWER-ON", "TAP A PAGE TO APPLY",
-    4, 2, 8, PAGE_VALUES, PAGE_LABELS, 1, false,
+    3, 3, 9, PAGE_VALUES, PAGE_LABELS, 1, false,
     getCurrentBootPage, applyBootPage },
   { "RESTART", "RESTART", "", "TAP TWICE TO RESTART THE BOARD",
     1, 1, 1, ACTION_VALUES, RESTART_LABELS, 2, true,

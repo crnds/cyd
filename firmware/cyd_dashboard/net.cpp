@@ -86,6 +86,7 @@ static JsonDocument usageFilter() {
   f["limits"]["credits"] = true;
   f["context"] = true;
   f["btc"] = true;
+  f["btc_candles"] = true;
   f["weather"] = true;
   f["today"] = true;  // needed by appendArchiveRow's caller (fetchUsage)
   f["active_now"] = true;
@@ -165,6 +166,21 @@ bool applyUsageJson(const String& payload) {
   if (!doc["btc"].isNull()) {
     double p = doc["btc"]["price"] | -1.0;
     if (p > 0) STATE.btcPrice = p;
+    STATE.btcChangePct = doc["btc"]["changePct"] | STATE.btcChangePct;
+  }
+  if (!doc["btc_candles"].isNull()) {
+    JsonArray arr = doc["btc_candles"].as<JsonArray>();
+    STATE.btcCandleCount = 0;
+    for (JsonArray candle : arr) {
+      if (STATE.btcCandleCount >= CANDLE_COUNT) break;
+      CandleRec& rec = STATE.btcCandles[STATE.btcCandleCount];
+      rec.openEpoch = candle[0].as<uint32_t>();
+      rec.o = candle[1].as<float>();
+      rec.h = candle[2].as<float>();
+      rec.l = candle[3].as<float>();
+      rec.c = candle[4].as<float>();
+      STATE.btcCandleCount++;
+    }
   }
   if (!doc["weather"].isNull()) {
     STATE.weatherTempC = doc["weather"]["tempC"] | STATE.weatherTempC;
@@ -200,13 +216,14 @@ static void saveEnvCache() {
   if (!STATE.sdOk) return;
   lockState();
   double btc = STATE.btcPrice;
+  float changePct = STATE.btcChangePct;
   float tempC = STATE.weatherTempC;
   int code = STATE.weatherCode;
   unlockState();
   SD.remove(ENV_CACHE_PATH);  // FILE_WRITE appends here; remove for a clean overwrite
   File f = SD.open(ENV_CACHE_PATH, FILE_WRITE);
   if (f) {
-    f.printf("{\"btc\":%.2f,\"tempC\":%.1f,\"code\":%d}", btc, tempC, code);
+    f.printf("{\"btc\":%.2f,\"changePct\":%.2f,\"tempC\":%.1f,\"code\":%d}", btc, changePct, tempC, code);
     f.close();
   }
 }
@@ -220,6 +237,7 @@ void loadEnvCache() {
   if (deserializeJson(doc, payload)) return;
   lockState();
   STATE.btcPrice = doc["btc"] | STATE.btcPrice;
+  STATE.btcChangePct = doc["changePct"] | STATE.btcChangePct;
   STATE.weatherTempC = doc["tempC"] | STATE.weatherTempC;
   STATE.weatherCode = doc["code"] | STATE.weatherCode;
   unlockState();

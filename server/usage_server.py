@@ -49,7 +49,8 @@ STATE = {
     "clients": {},      # client ip -> last request ts, shows who is polling us
     "limits": None,     # latest plan-limit snapshot from the OAuth usage endpoint
     "context": None,    # {tokens, ts} — newest assistant event's context size
-    "btc": None,        # {price} from Binance — fetched here so the board needs no TLS
+    "btc": None,        # {price, changePct} from Binance — fetched here so the board needs no TLS
+    "btc_candles": None, # [ [t, o, h, l, c], ... ] 288 5-minute candles
     "weather": None,    # {tempC, code} for Bangkok from Open-Meteo, same reason
     "activity_event": threading.Event(),
     "lock": threading.Lock(),
@@ -100,7 +101,7 @@ OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # 154KB framebuffer leaves too little contiguous heap for an on-device mbedTLS
 # handshake — proxying these through the plain-HTTP endpoint it already polls
 # avoids TLS on the board entirely.
-BTC_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+BTC_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
 WEATHER_URL = ("https://api.open-meteo.com/v1/forecast?latitude=13.7563"
                "&longitude=100.5018&current=temperature_2m,weather_code"
                "&timezone=Asia%2FBangkok")
@@ -325,8 +326,26 @@ def fetch_btc():
     req = urllib.request.Request(BTC_URL, headers={"User-Agent": "cydusage"})
     with urllib.request.urlopen(req, timeout=8) as resp:
         doc = json.loads(resp.read())
-    price = float(doc.get("price") or 0)
-    return {"price": price} if price > 0 else None
+    price = float(doc.get("lastPrice") or 0)
+    change_pct = float(doc.get("priceChangePercent") or 0)
+    return {"price": price, "changePct": change_pct} if price > 0 else None
+
+
+def fetch_btc_klines():
+    url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=288"
+    req = urllib.request.Request(url, headers={"User-Agent": "cydusage"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        data = json.loads(resp.read())
+    candles = []
+    for item in data:
+        candles.append([
+            int(item[0]) // 1000,
+            float(item[1]),
+            float(item[2]),
+            float(item[3]),
+            float(item[4])
+        ])
+    return candles
 
 
 def load_weather_api_key():
@@ -402,9 +421,10 @@ def market_loop():
     # BTC on a ~10s cadence, weather every 10 min. Each keeps its last good value
     # on failure so a transient outage doesn't blank the board's tiles.
     last_weather = 0.0
+    last_candles = 0.0
 
     def body():
-        nonlocal last_weather
+        nonlocal last_weather, last_candles
         try:
             btc = fetch_btc()
             if btc:
@@ -412,6 +432,14 @@ def market_loop():
         except Exception as e:
             log_err(f"market_loop btc: {type(e).__name__}: {e}")
         now = time.time()
+        if now - last_candles >= 30:
+            last_candles = now
+            try:
+                candles = fetch_btc_klines()
+                if candles:
+                    STATE["btc_candles"] = candles
+            except Exception as e:
+                log_err(f"market_loop candles: {type(e).__name__}: {e}")
         if now - last_weather >= WEATHER_INTERVAL_SEC:
             last_weather = now
             try:
@@ -779,6 +807,7 @@ def build_report():
                      "percent": round(ctx["tokens"] / CONTEXT_WINDOW_TOKENS * 100)}
                     if ctx else None),
         "btc": STATE["btc"],
+        "btc_candles": STATE["btc_candles"],
         "weather": STATE["weather"],
         "clients": clients,
     }

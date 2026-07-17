@@ -853,6 +853,149 @@ static void drawDevicePage() {
                      sdColor);
 }
 
+static void drawBtcChart() {
+  const int SCREEN_W      = 320;
+  const int PAD_RIGHT     = 20;
+  const int CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
+  const int CHART_X0 = CONTENT_RIGHT - CANDLE_COUNT - 2;  // right edge lands on CONTENT_RIGHT (10)
+  const int CHART_Y0 = 84;
+  const int CHART_H  = 128;  // y 84..212
+  const uint16_t COL_GOOD_DIM = 0x1462;  // dim green (wick)
+  const uint16_t COL_BAD_DIM  = 0x9124;  // dim red (wick)
+
+  g->drawRect(CHART_X0 - 2, CHART_Y0 - 2, CANDLE_COUNT + 4, CHART_H + 4, COL_BORDER);
+
+  int n = STATE.btcCandleCount;
+  if (n == 0) return;
+
+  float rangeMin = 1e18f, rangeMax = -1e18f;
+  bool haveRange = false;
+  for (int i = 0; i < n; i++) {
+    const CandleRec& r = STATE.btcCandles[i];
+    if (r.openEpoch == 0) continue;
+    if (r.l < rangeMin) rangeMin = r.l;
+    if (r.h > rangeMax) rangeMax = r.h;
+    haveRange = true;
+  }
+  if (!haveRange) return;
+  float span = rangeMax - rangeMin;
+  if (span < 1.0f) span = 1.0f;  // avoid div-by-zero on a dead-flat market
+
+  for (int i = 0; i < n; i++) {
+    const CandleRec& r = STATE.btcCandles[i];
+    if (r.openEpoch == 0) continue;
+    int x = CHART_X0 + i;
+    bool bull = r.c >= r.o;
+
+    auto priceToY = [&](float p) -> int {
+      float f = (p - rangeMin) / span;
+      int y = CHART_Y0 + CHART_H - 1 - (int)(f * (CHART_H - 1));
+      if (y < CHART_Y0) y = CHART_Y0;
+      if (y > CHART_Y0 + CHART_H - 1) y = CHART_Y0 + CHART_H - 1;
+      return y;
+    };
+
+    int yH = priceToY(r.h);
+    int yL = priceToY(r.l);
+    if (yL < yH) { int tmp = yH; yH = yL; yL = tmp; }
+    g->drawFastVLine(x, yH, yL - yH + 1, bull ? COL_GOOD_DIM : COL_BAD_DIM);
+
+    int yO = priceToY(r.o);
+    int yC = priceToY(r.c);
+    int yTop = min(yO, yC);
+    int bodyLen = max(yO, yC) - yTop + 1;
+    g->drawFastVLine(x, yTop, bodyLen, bull ? COL_GOOD : COL_WARN);
+  }
+
+  g->setTextColor(COL_TEXT2);
+  g->setTextSize(1);
+  g->setCursor(CHART_X0 + 2, CHART_Y0 + 1);
+  g->print(fmtBtc(rangeMax));
+  g->setCursor(CHART_X0 + 2, CHART_Y0 + CHART_H - 9);
+  g->print(fmtBtc(rangeMin));
+}
+
+static void drawBtcPriceRow() {
+  const int SCREEN_W      = 320;
+  const int PAD_RIGHT     = 20;
+  const int CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
+
+  g->setTextSize(4);
+  if (STATE.btcPrice <= 0) {
+    g->setTextColor(COL_TEXT2);
+    g->setCursor(4, 34);
+    g->print("$--");
+  } else {
+    String priceStr = "$" + fmtBtc(STATE.btcPrice);
+    int x = CONTENT_RIGHT - g->textWidth(priceStr);
+    if (x < 4) x = 4;
+    g->setTextColor(COL_TEXT);
+    g->setCursor(x, 34);
+    g->print(priceStr);
+  }
+
+  g->setTextSize(2);
+  if (isnan(STATE.btcChangePct)) {
+    g->setTextColor(COL_TEXT2);
+    g->setCursor(4, 62);
+    g->print("--");
+  } else {
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%+.2f%%", STATE.btcChangePct);
+    String s(buf);
+    int x = CONTENT_RIGHT - g->textWidth(s);
+    if (x < 4) x = 4;
+    g->setTextColor(STATE.btcChangePct >= 0 ? COL_GOOD : COL_WARN);
+    g->setCursor(x, 62);
+    g->print(s);
+  }
+}
+
+static void drawBtcTickerPage() {
+  const int SCREEN_W      = 320;
+  const int PAD_RIGHT     = 20;
+  const int CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
+
+  struct tm t;
+  bool haveTime = getLocalTime(&t, 0);
+
+  g->setTextSize(2);
+  g->setCursor(4, 4);
+  if (haveTime) {
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
+    g->setTextColor(COL_TEXT);
+    g->print(buf);
+
+    static const char* wdays[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    static const char* mons[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    char dbuf[20];
+    snprintf(dbuf, sizeof(dbuf), "%s %d %s", wdays[t.tm_wday], t.tm_mday, mons[t.tm_mon]);
+    g->setTextColor(COL_TEXT2);
+    g->setTextSize(1);
+    g->setCursor(100, 10);
+    g->print(dbuf);
+  } else {
+    g->setTextColor(COL_TEXT2);
+    g->print("--:--:--");
+  }
+
+  // status dots, right-aligned
+  g->fillCircle(CONTENT_RIGHT - 4, 12, 4, WiFi.status() == WL_CONNECTED ? COL_GOOD : COL_WARN);
+
+  uint16_t freshColor = COL_WARN;
+  if (STATE.lastFetchOkMs != 0) {
+    uint32_t age = millis() - STATE.lastFetchOkMs;
+    if (age <= 25000) freshColor = COL_GOOD;
+    else if (age <= 60000) freshColor = COL_ACCENT;
+  }
+  g->fillCircle(CONTENT_RIGHT - 20, 12, 4, freshColor);
+
+  drawBtcPriceRow();
+  drawBtcChart();
+}
+
 // "OFFLINE" banner overlaid on top of whatever the cat player is already showing (a
 // playing cat GIF, or the no-cats placeholder) — a solid bar behind the text
 // keeps it legible over a busy GIF frame. Drawn last, right before presentFrame().
@@ -883,6 +1026,7 @@ void render() {
     case 3: drawDevicePage(); break;
     case 4: drawLongTrendPage(); break;
     case 5: drawLimitsPage(); break;    // /usage-style limits panel
+    case 8: drawBtcTickerPage(); break;
   }
   drawFooter();
   unlockState();
