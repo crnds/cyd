@@ -116,6 +116,15 @@ int cfgTouchYMin = 3800;   // inverted on user's board (drives left/right at rot
 int cfgTouchYMax = 200;
 int cfgTouchOffsetRotation = 0;
 
+// BTC ticker page (page 9) settings -- see state.h's comment on the
+// range/candleIv<=288 constraint. Defaults: 5-min candles, 24h visible range,
+// candlestick style, range bar + price hero both shown.
+int cfgBtcCandleIvSec = 300;
+int cfgBtcRangeSec = 86400;
+int cfgBtcChartStyle = 0;
+bool cfgBtcRangeBar = true;
+bool cfgBtcPriceHero = true;
+
 // Server discovery: when SERVER_HOST ends in ".local" net.cpp's
 // resolveServer() looks it up via mDNS. mdnsStarted is reset here (core 0)
 // whenever WiFi drops, so ensureMdns() (net.cpp) re-initializes once it's
@@ -256,8 +265,9 @@ void setup() {
     currentPage = cfgBootPage;  // honor the /config.json "boot_page" override
     gfx.setBrightness(cfgBrightness);  // honor the /config.json override
     loadLongTrendFromSD();
-    loadEnvCache();     // show last-known BTC/weather immediately, before any live fetch
-    loadWeatherCache(); // full Weather-page snapshot (hourly/daily) if present
+    loadEnvCache();       // show last-known BTC/weather immediately, before any live fetch
+    loadWeatherCache();   // full Weather-page snapshot (hourly/daily) if present
+    loadBtcCandleCache(); // page 9's candle chart, before any live fetch
     showBootSplash();   // optional /splash.bmp, briefly, before the WiFi spinner
     scanCats();         // index /cats/*.gif for the page-6 player
   } else {

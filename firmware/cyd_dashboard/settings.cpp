@@ -31,7 +31,8 @@ static const char* const BRIGHTNESS_LABELS[6] = {"0%", "5%", "25%", "50%", "75%"
 // from each setting's apply().
 const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT] = {
   "brightness", "poll_interval_sec", "pixel_shift_min", "boot_page", "cat_shuffle_sec",
-  "night_mode_preset", "screen_rotation", "show_countdown"
+  "night_mode_preset", "screen_rotation", "show_countdown",
+  "btc_candle_iv_sec", "btc_range_sec", "btc_chart_style", "btc_range_bar", "btc_price_hero"
 };
 
 void queueConfigSave(uint8_t keyId, int32_t value) {
@@ -155,6 +156,67 @@ static void applyShowCountdown(int v) {
   queueConfigSave(CFGKEY_SHOW_COUNTDOWN, v);
 }
 
+static const int CHART_STYLE_VALUES[3] = {0, 1, 2};
+static const char* const CHART_STYLE_LABELS[3] = {"CANDLES", "LINE", "B/W"};
+static int getCurrentBtcChartStyle() { return cfgBtcChartStyle; }
+static void applyBtcChartStyle(int v) {
+  cfgBtcChartStyle = v;
+  queueConfigSave(CFGKEY_BTC_CHART_STYLE, v);
+}
+
+// Candle size (seconds/candle) and visible range (seconds) are jointly
+// constrained to range/candleIv <= CANDLE_COUNT (288 pixel-columns) -- each
+// one's apply() below snaps the OTHER to the nearest still-valid preset
+// in RAM immediately (so the live fetch/chart stay correct this session),
+// but only queues its OWN key's SD save -- the single-slot pending-config
+// queue (see queueConfigSave) can't carry two saves from one apply(). Any
+// resulting mismatch in the persisted file self-heals on the next boot via
+// the same clamp in sd_store.cpp's loadRuntimeConfig().
+static const int CANDLE_IV_VALUES[4] = {300, 900, 3600, 14400};
+static const char* const CANDLE_IV_LABELS[4] = {"5m", "15m", "1h", "4h"};
+static const int BTC_RANGE_VALUES[3] = {43200, 86400, 604800};
+static const char* const BTC_RANGE_LABELS[3] = {"12H", "24H", "7D"};
+
+static int getCurrentBtcCandleIv() { return cfgBtcCandleIvSec; }
+static void applyBtcCandleIv(int v) {
+  cfgBtcCandleIvSec = v;
+  if (cfgBtcRangeSec / v > CANDLE_COUNT) {
+    // Snap to the largest range preset that still fits at this candle size.
+    for (int i = 2; i >= 0; i--) {
+      if (BTC_RANGE_VALUES[i] / v <= CANDLE_COUNT) { cfgBtcRangeSec = BTC_RANGE_VALUES[i]; break; }
+    }
+  }
+  queueConfigSave(CFGKEY_BTC_CANDLE_IV, v);
+}
+
+static int getCurrentBtcRange() { return cfgBtcRangeSec; }
+static void applyBtcRange(int v) {
+  cfgBtcRangeSec = v;
+  if (v / cfgBtcCandleIvSec > CANDLE_COUNT) {
+    // Snap to the smallest candle size that still fits at this range.
+    for (int i = 0; i < 4; i++) {
+      if (v / CANDLE_IV_VALUES[i] <= CANDLE_COUNT) { cfgBtcCandleIvSec = CANDLE_IV_VALUES[i]; break; }
+    }
+  }
+  queueConfigSave(CFGKEY_BTC_RANGE, v);
+}
+
+static const int BTC_RANGE_BAR_VALUES[2] = {0, 1};
+static const char* const BTC_RANGE_BAR_LABELS[2] = {"OFF", "ON"};
+static int getCurrentBtcRangeBar() { return cfgBtcRangeBar ? 1 : 0; }
+static void applyBtcRangeBar(int v) {
+  cfgBtcRangeBar = (v != 0);
+  queueConfigSave(CFGKEY_BTC_RANGE_BAR, v);
+}
+
+static const int BTC_PRICE_HERO_VALUES[2] = {0, 1};
+static const char* const BTC_PRICE_HERO_LABELS[2] = {"OFF", "ON"};
+static int getCurrentBtcPriceHero() { return cfgBtcPriceHero ? 1 : 0; }
+static void applyBtcPriceHero(int v) {
+  cfgBtcPriceHero = (v != 0);
+  queueConfigSave(CFGKEY_BTC_PRICE_HERO, v);
+}
+
 static const SettingDef SETTINGS[] = {
   { "BRIGHTNESS", "BRIGHTNESS", "BACKLIGHT BRIGHTNESS", "TAP A LEVEL TO APPLY",
     3, 2, 6, BRIGHTNESS_VALUES, BRIGHTNESS_LABELS, 2, false,
@@ -186,8 +248,23 @@ static const SettingDef SETTINGS[] = {
   { "SHOW COUNTDOWN", "SHOW COUNTDOWN", "GREEN BARS + CLOCK WEDGE", "TAP TO TOGGLE",
     2, 1, 2, SHOW_COUNTDOWN_VALUES, SHOW_COUNTDOWN_LABELS, 2, false,
     getCurrentShowCountdown, applyShowCountdown },
+  { "BTC CHART STYLE", "BTC CHART STYLE", "PAGE 9 CANDLESTICK APPEARANCE", "TAP A STYLE TO APPLY",
+    3, 1, 3, CHART_STYLE_VALUES, CHART_STYLE_LABELS, 2, false,
+    getCurrentBtcChartStyle, applyBtcChartStyle },
+  { "BTC CANDLE SIZE", "BTC CANDLE SIZE", "TIME PER CANDLE ON PAGE 9", "TAP A SIZE TO APPLY",
+    4, 1, 4, CANDLE_IV_VALUES, CANDLE_IV_LABELS, 2, false,
+    getCurrentBtcCandleIv, applyBtcCandleIv },
+  { "BTC RANGE", "BTC RANGE", "VISIBLE TIMESPAN ON PAGE 9", "TAP A RANGE TO APPLY",
+    3, 1, 3, BTC_RANGE_VALUES, BTC_RANGE_LABELS, 2, false,
+    getCurrentBtcRange, applyBtcRange },
+  { "BTC RANGE BAR", "BTC RANGE BAR", "24H HIGH/LOW BAR ON PAGE 9", "TAP TO TOGGLE",
+    2, 1, 2, BTC_RANGE_BAR_VALUES, BTC_RANGE_BAR_LABELS, 2, false,
+    getCurrentBtcRangeBar, applyBtcRangeBar },
+  { "BTC PRICE HERO", "BTC PRICE HERO", "BIG PRICE LINE ON PAGE 9", "TAP TO TOGGLE",
+    2, 1, 2, BTC_PRICE_HERO_VALUES, BTC_PRICE_HERO_LABELS, 2, false,
+    getCurrentBtcPriceHero, applyBtcPriceHero },
 };
-const int SETTINGS_COUNT = 10;
+const int SETTINGS_COUNT = 15;
 
 static const int SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
 static const int SET_BTN_X0 = 11, SET_BTN_Y = 100, SET_BTN_W = 54, SET_BTN_H = 56;

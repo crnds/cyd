@@ -144,6 +144,7 @@ static JsonDocument usageFilter() {
   f["context"] = true;
   f["btc"] = true;
   f["btc_candles"] = true;
+  f["btc_candles_meta"] = true;
   f["weather"] = true;
   f["today"] = true;  // needed by appendArchiveRow's caller (fetchUsage)
   f["active_now"] = true;
@@ -224,6 +225,11 @@ bool applyUsageJson(const String& payload) {
     double p = doc["btc"]["price"] | -1.0;
     if (p > 0) STATE.btcPrice = p;
     STATE.btcChangePct = doc["btc"]["changePct"] | STATE.btcChangePct;
+    STATE.btcHigh24h = doc["btc"]["high"] | STATE.btcHigh24h;
+    STATE.btcLow24h = doc["btc"]["low"] | STATE.btcLow24h;
+  }
+  if (!doc["btc_candles_meta"].isNull()) {
+    STATE.btcCandleIntervalSec = doc["btc_candles_meta"]["intervalSec"] | STATE.btcCandleIntervalSec;
   }
   if (!doc["btc_candles"].isNull()) {
     JsonArray arr = doc["btc_candles"].as<JsonArray>();
@@ -358,6 +364,87 @@ void loadWeatherCache() {
   unlockState();
 }
 
+// BTC candle "mini database" -- page 9's local backing store, so a reboot
+// with no network shows the last-known chart instead of an empty one until
+// the next successful poll. Binary (not JSON) since it's 288 fixed-shape
+// records: {magic, intervalSec, count} header + up to CANDLE_COUNT raw
+// CandleRec structs, one write per poll (paced like saveEnvCache/
+// saveWeatherCache above -- fetchUsage() only calls this from inside its
+// existing lockSD() block).
+static const char* BTC_CANDLE_CACHE_PATH = "/btc_candles.bin";
+static const uint32_t BTC_CANDLE_MAGIC = 0x31444E43;  // "CND1"
+
+struct BtcCandleCacheHeader {
+  uint32_t magic;
+  uint32_t intervalSec;
+  uint32_t count;
+};
+
+static void saveBtcCandleCache() {
+  if (!STATE.sdOk) return;
+  lockState();
+  int count = STATE.btcCandleCount;
+  if (count > CANDLE_COUNT) count = CANDLE_COUNT;
+  BtcCandleCacheHeader hdr{BTC_CANDLE_MAGIC, STATE.btcCandleIntervalSec, (uint32_t)count};
+  // static, not stack-local: 288*20 bytes is too large a frame to add safely
+  // on top of networkTask's 8KB stack (see xTaskCreatePinnedToCore in
+  // cyd_dashboard.ino) -- fine since this function is never re-entered
+  // concurrently with itself.
+  static CandleRec buf[CANDLE_COUNT];
+  memcpy(buf, STATE.btcCandles, sizeof(CandleRec) * count);
+  unlockState();
+  if (count == 0) return;  // nothing useful to persist yet
+
+  SD.remove(BTC_CANDLE_CACHE_PATH);
+  File f = SD.open(BTC_CANDLE_CACHE_PATH, FILE_WRITE);
+  if (f) {
+    f.write((const uint8_t*)&hdr, sizeof(hdr));
+    f.write((const uint8_t*)buf, sizeof(CandleRec) * count);
+    f.close();
+  }
+}
+
+// Loose sanity check, not a wall-clock recency check: getLocalTime()'s epoch
+// is shifted by GMT_OFFSET_SEC (configTime() applies it directly, ESP32-Arduino
+// style) while a candle's openEpoch is true UTC from Binance, so comparing
+// them exactly would need timezone bookkeeping for a check that's only ever
+// meant to catch obviously-corrupt data anyway -- stale-but-well-formed data
+// self-heals on the very next successful poll regardless.
+static bool validCandleRecord(const CandleRec& r) {
+  if (r.openEpoch == 0) return false;
+  if (r.o <= 0 || r.h <= 0 || r.l <= 0 || r.c <= 0) return false;
+  if (r.o > 10000000 || r.h > 10000000 || r.l > 10000000 || r.c > 10000000) return false;
+  if (r.l > r.o || r.l > r.c) return false;
+  if (r.h < r.o || r.h < r.c) return false;
+  return true;
+}
+
+void loadBtcCandleCache() {
+  File f = SD.open(BTC_CANDLE_CACHE_PATH, FILE_READ);
+  if (!f) return;
+  BtcCandleCacheHeader hdr;
+  if (f.read((uint8_t*)&hdr, sizeof(hdr)) != sizeof(hdr) || hdr.magic != BTC_CANDLE_MAGIC ||
+      (int)hdr.intervalSec != cfgBtcCandleIvSec || hdr.count > (uint32_t)CANDLE_COUNT) {
+    f.close();
+    return;  // absent, corrupt, or shaped for a different candle-size setting
+  }
+  static CandleRec buf[CANDLE_COUNT];  // same stack-safety reason as saveBtcCandleCache()
+  size_t wantBytes = sizeof(CandleRec) * hdr.count;
+  if (f.read((uint8_t*)buf, wantBytes) != wantBytes) {
+    f.close();
+    return;
+  }
+  f.close();
+
+  lockState();
+  STATE.btcCandleCount = hdr.count;
+  STATE.btcCandleIntervalSec = hdr.intervalSec;
+  for (uint32_t i = 0; i < hdr.count; i++) {
+    STATE.btcCandles[i] = validCandleRecord(buf[i]) ? buf[i] : CandleRec{0, 0, 0, 0, 0};
+  }
+  unlockState();
+}
+
 // Fine-grained, append-only history — one row per successful poll (~20s),
 // unbounded (that's the point of the roomy card; ~1GB/year). Meant for
 // off-device analysis, not shown on screen — distinct from /daily_log.csv,
@@ -408,7 +495,8 @@ bool fetchUsage() {
   }
 
   HTTPClient http;
-  String url = String("http://") + serverIp.toString() + ":" + String(cfgServerPort) + "/api/usage";
+  String url = String("http://") + serverIp.toString() + ":" + String(cfgServerPort) + "/api/usage"
+               + "?civ=" + String(cfgBtcCandleIvSec) + "&rng=" + String(cfgBtcRangeSec);
   http.setConnectTimeout(3000);  // cap the TCP connect, not just the read
   http.setTimeout(5000);
   http.begin(url);
@@ -446,6 +534,7 @@ bool fetchUsage() {
     appendArchiveRow(doc);      // fine-grained per-poll history for later analysis
     saveEnvCache();             // refresh the BTC/weather cold-boot cache
     saveWeatherCache();         // full Weather-page snapshot (paced by poll interval)
+    saveBtcCandleCache();       // page 9's local candle "mini database"
     unlockSD();
   }
 

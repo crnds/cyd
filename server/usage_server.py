@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,8 +50,13 @@ STATE = {
     "clients": {},      # client ip -> last request ts, shows who is polling us
     "limits": None,     # latest plan-limit snapshot from the OAuth usage endpoint
     "context": None,    # {tokens, ts} — newest assistant event's context size
-    "btc": None,        # {price, changePct} from Binance — fetched here so the board needs no TLS
-    "btc_candles": None, # [ [t, o, h, l, c], ... ] 288 5-minute candles
+    "btc": None,        # {price, changePct, high, low} from Binance — fetched here so the board needs no TLS
+    "btc_candles": None, # [ [t, o, h, l, c], ... ] up to 288 candles at btc_req's interval
+    "btc_candles_meta": None,  # {intervalSec, count} describing the array above
+    # Candle interval/range the board last asked for (via /api/usage?civ=&rng=),
+    # read by market_loop to know what to (re)fetch from Binance.
+    "btc_req": {"interval_sec": 300, "range_sec": 86400},
+    "btc_fetched_req": None,  # the (interval_sec, range_sec) actually last fetched
     # Bangkok weather for the status card + Weather page: current + next-6h
     # hourly + next-5d daily, fetched here so the board needs no TLS.
     "weather": None,
@@ -104,6 +110,11 @@ OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # handshake — proxying these through the plain-HTTP endpoint it already polls
 # avoids TLS on the board entirely.
 BTC_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
+# Board-selectable candle size (seconds -> Binance interval string) and visible
+# range (seconds), mirrored in firmware's settings.cpp CANDLE_IV_VALUES/RANGE_VALUES.
+BTC_CANDLE_INTERVALS = {300: "5m", 900: "15m", 3600: "1h", 14400: "4h"}
+BTC_RANGES_SEC = (43200, 86400, 604800)
+BTC_MAX_CANDLES = 288
 # Open-Meteo: current + hourly + daily so the board can render the Weather
 # page (next 6h + next 5 days) without a second HTTPS call.
 WEATHER_URL = (
@@ -338,11 +349,18 @@ def fetch_btc():
         doc = json.loads(resp.read())
     price = float(doc.get("lastPrice") or 0)
     change_pct = float(doc.get("priceChangePercent") or 0)
-    return {"price": price, "changePct": change_pct} if price > 0 else None
+    high = float(doc.get("highPrice") or 0)
+    low = float(doc.get("lowPrice") or 0)
+    return {"price": price, "changePct": change_pct, "high": high, "low": low} if price > 0 else None
 
 
-def fetch_btc_klines():
-    url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=288"
+def fetch_btc_klines(interval_sec, limit):
+    interval_str = BTC_CANDLE_INTERVALS.get(interval_sec, "5m")
+    limit = max(1, min(BTC_MAX_CANDLES, limit))
+    url = (
+        f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT"
+        f"&interval={interval_str}&limit={limit}"
+    )
     req = urllib.request.Request(url, headers={"User-Agent": "cydusage"})
     with urllib.request.urlopen(req, timeout=8) as resp:
         data = json.loads(resp.read())
@@ -604,12 +622,21 @@ def market_loop():
         except Exception as e:
             log_err(f"market_loop btc: {type(e).__name__}: {e}")
         now = time.time()
-        if now - last_candles >= 30:
+        with STATE["lock"]:
+            req = dict(STATE["btc_req"])
+        combo_changed = STATE["btc_fetched_req"] != (req["interval_sec"], req["range_sec"])
+        if combo_changed or now - last_candles >= 30:
             last_candles = now
             try:
-                candles = fetch_btc_klines()
+                limit = req["range_sec"] // req["interval_sec"]
+                candles = fetch_btc_klines(req["interval_sec"], limit)
                 if candles:
                     STATE["btc_candles"] = candles
+                    STATE["btc_candles_meta"] = {
+                        "intervalSec": req["interval_sec"],
+                        "count": len(candles),
+                    }
+                    STATE["btc_fetched_req"] = (req["interval_sec"], req["range_sec"])
             except Exception as e:
                 log_err(f"market_loop candles: {type(e).__name__}: {e}")
         if now - last_weather >= WEATHER_INTERVAL_SEC:
@@ -980,6 +1007,7 @@ def build_report():
                     if ctx else None),
         "btc": STATE["btc"],
         "btc_candles": STATE["btc_candles"],
+        "btc_candles_meta": STATE["btc_candles_meta"],
         "weather": STATE["weather"],
         "clients": clients,
     }
@@ -990,14 +1018,23 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path != "/api/usage":
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path != "/api/usage":
             self.send_response(404)
             self.end_headers()
             return
+        qs = urllib.parse.parse_qs(parsed.query)
+        civ = int(qs.get("civ", [""])[0] or 0)
+        rng = int(qs.get("rng", [""])[0] or 0)
+        if civ not in BTC_CANDLE_INTERVALS:
+            civ = 300
+        if rng not in BTC_RANGES_SEC:
+            rng = 86400
         ip = self.client_address[0]
         with STATE["lock"]:
             STATE["clients"][ip] = datetime.now(timezone.utc)
             STATE["activity_event"].set()
+            STATE["btc_req"] = {"interval_sec": civ, "range_sec": rng}
         if ip not in ("127.0.0.1", "::1"):
             # One heartbeat line per board poll; local probes stay quiet.
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {ip} GET /api/usage", flush=True)

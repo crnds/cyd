@@ -291,6 +291,11 @@ const CAT_SHUFFLE_KEY = 'cyddashboard_v1_catshuffle';
 const NIGHT_MODE_KEY = 'cyddashboard_v1_nightmode';
 const ROTATION_KEY = 'cyddashboard_v1_rotation';
 const SHOW_COUNTDOWN_KEY = 'cyddashboard_v1_showcountdown';
+const BTC_CANDLE_IV_KEY = 'cyddashboard_v1_btccandleiv';
+const BTC_RANGE_KEY = 'cyddashboard_v1_btcrange';
+const BTC_CHART_STYLE_KEY = 'cyddashboard_v1_btcchartstyle';
+const BTC_RANGE_BAR_KEY = 'cyddashboard_v1_btcrangebar';
+const BTC_PRICE_HERO_KEY = 'cyddashboard_v1_btcpricehero';
 
 // SettingDef table -- mirrors the firmware's SettingDef struct/SETTINGS[]
 // array field-for-field (label/leafTitle/subtitle/hint/cols/rows/count/
@@ -391,6 +396,58 @@ function applyShowCountdown(v) {
   localStorage.setItem(SHOW_COUNTDOWN_KEY, String(v));
 }
 
+// BTC ticker page (page 9) settings -- mirror settings.cpp's chart-style/
+// candle-size/range/range-bar/price-hero rows exactly, including the
+// range/candleIv<=288 auto-clamp (BTC_CANDLE_COUNT below == firmware's
+// CANDLE_COUNT).
+const BTC_CANDLE_COUNT = 288;
+const BTC_CANDLE_IV_VALUES = [300, 900, 3600, 14400];
+const BTC_RANGE_VALUES = [43200, 86400, 604800];
+
+function getCurrentBtcChartStyle() { return STATE.cfgBtcChartStyle; }
+function applyBtcChartStyle(v) {
+  STATE.cfgBtcChartStyle = v;
+  localStorage.setItem(BTC_CHART_STYLE_KEY, String(v));
+}
+
+function getCurrentBtcCandleIv() { return STATE.cfgBtcCandleIvSec; }
+function applyBtcCandleIv(v) {
+  STATE.cfgBtcCandleIvSec = v;
+  if (STATE.cfgBtcRangeSec / v > BTC_CANDLE_COUNT) {
+    for (let i = 2; i >= 0; i--) {
+      if (BTC_RANGE_VALUES[i] / v <= BTC_CANDLE_COUNT) { STATE.cfgBtcRangeSec = BTC_RANGE_VALUES[i]; break; }
+    }
+  }
+  localStorage.setItem(BTC_CANDLE_IV_KEY, String(v));
+  localStorage.setItem(BTC_RANGE_KEY, String(STATE.cfgBtcRangeSec));
+  regenerateMockCandlesIfMocked();
+}
+
+function getCurrentBtcRange() { return STATE.cfgBtcRangeSec; }
+function applyBtcRange(v) {
+  STATE.cfgBtcRangeSec = v;
+  if (v / STATE.cfgBtcCandleIvSec > BTC_CANDLE_COUNT) {
+    for (let i = 0; i < 4; i++) {
+      if (v / BTC_CANDLE_IV_VALUES[i] <= BTC_CANDLE_COUNT) { STATE.cfgBtcCandleIvSec = BTC_CANDLE_IV_VALUES[i]; break; }
+    }
+  }
+  localStorage.setItem(BTC_RANGE_KEY, String(v));
+  localStorage.setItem(BTC_CANDLE_IV_KEY, String(STATE.cfgBtcCandleIvSec));
+  regenerateMockCandlesIfMocked();
+}
+
+function getCurrentBtcRangeBar() { return STATE.cfgBtcRangeBar ? 1 : 0; }
+function applyBtcRangeBar(v) {
+  STATE.cfgBtcRangeBar = v !== 0;
+  localStorage.setItem(BTC_RANGE_BAR_KEY, String(v));
+}
+
+function getCurrentBtcPriceHero() { return STATE.cfgBtcPriceHero ? 1 : 0; }
+function applyBtcPriceHero(v) {
+  STATE.cfgBtcPriceHero = v !== 0;
+  localStorage.setItem(BTC_PRICE_HERO_KEY, String(v));
+}
+
 // Poll interval: wired to the sidebar's real "#poll-interval" select + its
 // restartPollTimer(), so picking a preset here actually changes the
 // simulated fetch cadence -- a genuine effect, not just a cosmetic stand-in.
@@ -434,9 +491,9 @@ const SETTINGS = [
     btnTextSize: 2, destructive: false,
     getCurrent: getCurrentPixelShift, apply: applyPixelShift },
   { label: 'BOOT PAGE', leafTitle: 'BOOT PAGE', subtitle: 'PAGE SHOWN AFTER POWER-ON',
-    hint: 'TAP A PAGE TO APPLY', cols: 4, rows: 2, count: 8,
-    values: [0, 1, 2, 3, 4, 5, 6, 7],
-    valueLabels: ['STATUS', 'PROJECTS', 'HOME', 'DEVICE', 'TRENDS', 'LIMITS', 'CATS', 'MIXED'],
+    hint: 'TAP A PAGE TO APPLY', cols: 3, rows: 3, count: 9,
+    values: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    valueLabels: ['STATUS', 'PROJECTS', 'HOME', 'DEVICE', 'TRENDS', 'LIMITS', 'CATS', 'MIXED', 'BTC'],
     btnTextSize: 1, destructive: false,
     getCurrent: getCurrentBootPage, apply: applyBootPage },
   { label: 'RESTART', leafTitle: 'RESTART', subtitle: '',
@@ -469,8 +526,33 @@ const SETTINGS = [
     values: [0, 1], valueLabels: ['OFF', 'ON'],
     btnTextSize: 2, destructive: false,
     getCurrent: getCurrentShowCountdown, apply: applyShowCountdown },
+  { label: 'BTC CHART STYLE', leafTitle: 'BTC CHART STYLE', subtitle: 'PAGE 9 CANDLESTICK APPEARANCE',
+    hint: 'TAP A STYLE TO APPLY', cols: 3, rows: 1, count: 3,
+    values: [0, 1, 2], valueLabels: ['CANDLES', 'LINE', 'B/W'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentBtcChartStyle, apply: applyBtcChartStyle },
+  { label: 'BTC CANDLE SIZE', leafTitle: 'BTC CANDLE SIZE', subtitle: 'TIME PER CANDLE ON PAGE 9',
+    hint: 'TAP A SIZE TO APPLY', cols: 4, rows: 1, count: 4,
+    values: BTC_CANDLE_IV_VALUES, valueLabels: ['5m', '15m', '1h', '4h'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentBtcCandleIv, apply: applyBtcCandleIv },
+  { label: 'BTC RANGE', leafTitle: 'BTC RANGE', subtitle: 'VISIBLE TIMESPAN ON PAGE 9',
+    hint: 'TAP A RANGE TO APPLY', cols: 3, rows: 1, count: 3,
+    values: BTC_RANGE_VALUES, valueLabels: ['12H', '24H', '7D'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentBtcRange, apply: applyBtcRange },
+  { label: 'BTC RANGE BAR', leafTitle: 'BTC RANGE BAR', subtitle: '24H HIGH/LOW BAR ON PAGE 9',
+    hint: 'TAP TO TOGGLE', cols: 2, rows: 1, count: 2,
+    values: [0, 1], valueLabels: ['OFF', 'ON'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentBtcRangeBar, apply: applyBtcRangeBar },
+  { label: 'BTC PRICE HERO', leafTitle: 'BTC PRICE HERO', subtitle: 'BIG PRICE LINE ON PAGE 9',
+    hint: 'TAP TO TOGGLE', cols: 2, rows: 1, count: 2,
+    values: [0, 1], valueLabels: ['OFF', 'ON'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentBtcPriceHero, apply: applyBtcPriceHero },
 ];
-const SETTINGS_COUNT = 10;
+const SETTINGS_COUNT = 15;
 const SETTINGS_CONTENT_H = SETTINGS_COUNT * SET_ROW_STEP - (SET_ROW_STEP - SET_ROW_H);
 const SETTINGS_SCROLL_MAX = (SETTINGS_CONTENT_H > SETTINGS_VIEWPORT_H)
     ? (SETTINGS_CONTENT_H - SETTINGS_VIEWPORT_H) : 0;
@@ -611,6 +693,9 @@ const STATE = {
   btcChangePct: NaN,
   btcCandles: [],
   btcCandleCount: 0,
+  btcHigh24h: -1,         // 24h high/low, arrives inside /api/usage's "btc" object
+  btcLow24h: -1,
+  btcCandleIntervalSec: 300,  // width of one btcCandles[] slot, from btc_candles_meta
   weatherTempC: -999,     // Bangkok current temp; -999 = not received yet (see above)
   weatherCode: -1,        // WMO weather_code; -1 = not received yet (see above)
   weatherHigh: -999,
@@ -642,6 +727,14 @@ const STATE = {
   cfgNightModeOn: false, // mirrors the firmware's cfgNightModeOn
   cfgShowCountdown: true, // mirrors the firmware's cfgShowCountdown (default on)
   cfgScreenRotation: 1,  // mirrors the firmware's cfgScreenRotation (1=normal, 3=flipped)
+  // BTC ticker page (page 9) settings -- mirror the firmware's cfgBtc* globals.
+  // Candle size/range are jointly constrained to range/candleIv<=288, same as
+  // firmware's settings.cpp applyBtcCandleIv/applyBtcRange.
+  cfgBtcCandleIvSec: 300,
+  cfgBtcRangeSec: 86400,
+  cfgBtcChartStyle: 0,   // 0=candles, 1=line, 2=b/w
+  cfgBtcRangeBar: true,
+  cfgBtcPriceHero: true,
 };
 
 // ── SIMULATED GFX (LovyanGFX-ish API on canvas) ───────────
@@ -965,7 +1058,7 @@ function drawHomePage() {
   gfx.fillRect(16, 195, 2, 3, COL_TEXT);
   gfx.fillRect(12, 212, 2, 3, COL_TEXT);
   gfx.fillRect(16, 212, 2, 3, COL_TEXT);
-  gfx.print(' $' + fmtBtc(STATE.btcPrice));
+  gfx.print(' $' + fmtBtc(latestBtcPrice()));
 }
 
 // Combined page: top 4 projects (7d) in the upper half, the 7-day token trend
@@ -1398,7 +1491,7 @@ function drawStatusPage() {
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(2);
   gfx.setCursor(221, 196);
-  gfx.print(fmtBtc(STATE.btcPrice));
+  gfx.print(fmtBtc(latestBtcPrice()));
 }
 
 // Weather detail overlay — twin of pages.cpp drawWeatherPage; lockstep.
@@ -1684,13 +1777,35 @@ function drawDevicePage() {
                      sdColor);
 }
 
+// Mirrors state.h's latestBtcPrice() -- page 9's candle store is the single
+// source of truth for "the current BTC price", so the Status card and Home
+// page glyph read the latest candle close instead of a separately-populated
+// field. Falls back to STATE.btcPrice only before the first candle batch lands.
+function latestBtcPrice() {
+  return STATE.btcCandleCount > 0
+    ? STATE.btcCandles[STATE.btcCandleCount - 1][4]
+    : STATE.btcPrice;
+}
+
+// Chart's vertical slot shifts to reclaim whichever of price-hero/range-bar
+// is hidden, so the candle box always ends at the same fixed bottom edge --
+// mirrors pages.cpp's btcChartY0()/btcRangeBarY0()/BTC_CHART_BOTTOM.
+const BTC_CHART_BOTTOM = 212;
+function btcChartY0() {
+  if (STATE.cfgBtcPriceHero) return STATE.cfgBtcRangeBar ? 96 : 84;
+  return STATE.cfgBtcRangeBar ? 38 : 24;
+}
+function btcRangeBarY0() {
+  return STATE.cfgBtcPriceHero ? 82 : 24;
+}
+
 function drawBtcChart() {
   const SCREEN_W      = 320;
   const CONTENT_RIGHT = SCREEN_W - 4;  // 4px min margin (matches the left-side clamp below) so glyphs/border don't clip flush against the edge
   const CANDLE_COUNT  = 288;
   const CHART_X0 = CONTENT_RIGHT - CANDLE_COUNT - 2;
-  const CHART_Y0 = 84;
-  const CHART_H  = 128;
+  const CHART_Y0 = btcChartY0();
+  const CHART_H  = BTC_CHART_BOTTOM - CHART_Y0;
 
   gfx.drawRect(CHART_X0 - 2, CHART_Y0 - 2, CANDLE_COUNT + 4, CHART_H + 4, COL_BORDER);
 
@@ -1712,34 +1827,52 @@ function drawBtcChart() {
   let span = rangeMax - rangeMin;
   if (span < 1.0) span = 1.0;
 
-  for (let i = 0; i < n; i++) {
-    const r = STATE.btcCandles[i];
-    if (!r || r[0] === 0) continue;
-    const x = CHART_X0 + i;
-    const o = r[1];
-    const h = r[2];
-    const l = r[3];
-    const c = r[4];
-    const bull = c >= o;
+  const priceToY = (p) => {
+    const f = (p - rangeMin) / span;
+    let y = CHART_Y0 + CHART_H - 1 - Math.floor(f * (CHART_H - 1));
+    if (y < CHART_Y0) y = CHART_Y0;
+    if (y > CHART_Y0 + CHART_H - 1) y = CHART_Y0 + CHART_H - 1;
+    return y;
+  };
 
-    const priceToY = (p) => {
-      const f = (p - rangeMin) / span;
-      let y = CHART_Y0 + CHART_H - 1 - Math.floor(f * (CHART_H - 1));
-      if (y < CHART_Y0) y = CHART_Y0;
-      if (y > CHART_Y0 + CHART_H - 1) y = CHART_Y0 + CHART_H - 1;
-      return y;
-    };
+  if (STATE.cfgBtcChartStyle === 1) {
+    // LINE: a dim under-fill (one vertical line per candle, up to its close)
+    // topped with a bright line connecting consecutive closes -- gaps
+    // (r[0]===0) break the connecting line rather than jumping across them.
+    let prevX = -1, prevY = 0;
+    for (let i = 0; i < n; i++) {
+      const r = STATE.btcCandles[i];
+      const x = CHART_X0 + i;
+      if (!r || r[0] === 0) { prevX = -1; continue; }
+      const yC = priceToY(r[4]);
+      gfx.drawFastVLine(x, yC, CHART_Y0 + CHART_H - yC, COL_TRACK);
+      if (prevX >= 0) gfx.drawLine(prevX, prevY, x, yC, COL_ACCENT);
+      prevX = x;
+      prevY = yC;
+    }
+  } else {
+    // CANDLES (0) and B/W (2) share the same wick+body geometry; only the
+    // colors differ -- B/W drops the bull/bear distinction entirely.
+    for (let i = 0; i < n; i++) {
+      const r = STATE.btcCandles[i];
+      if (!r || r[0] === 0) continue;
+      const x = CHART_X0 + i;
+      const o = r[1], h = r[2], l = r[3], c = r[4];
+      const bull = c >= o;
+      const wickCol = (STATE.cfgBtcChartStyle === 2) ? COL_TEXT2 : (bull ? COL_GOOD_DIM : COL_BAD_DIM);
+      const bodyCol = (STATE.cfgBtcChartStyle === 2) ? COL_TEXT  : (bull ? COL_GOOD : COL_WARN);
 
-    let yH = priceToY(h);
-    let yL = priceToY(l);
-    if (yL < yH) { const tmp = yH; yH = yL; yL = tmp; }
-    gfx.drawFastVLine(x, yH, yL - yH + 1, bull ? COL_GOOD_DIM : COL_BAD_DIM);
+      let yH = priceToY(h);
+      let yL = priceToY(l);
+      if (yL < yH) { const tmp = yH; yH = yL; yL = tmp; }
+      gfx.drawFastVLine(x, yH, yL - yH + 1, wickCol);
 
-    let yO = priceToY(o);
-    let yC = priceToY(c);
-    let yTop = Math.min(yO, yC);
-    let bodyLen = Math.max(yO, yC) - yTop + 1;
-    gfx.drawFastVLine(x, yTop, bodyLen, bull ? COL_GOOD : COL_WARN);
+      let yO = priceToY(o);
+      let yC = priceToY(c);
+      let yTop = Math.min(yO, yC);
+      let bodyLen = Math.max(yO, yC) - yTop + 1;
+      gfx.drawFastVLine(x, yTop, bodyLen, bodyCol);
+    }
   }
 
   gfx.setTextColor(COL_TEXT2);
@@ -1750,17 +1883,58 @@ function drawBtcChart() {
   gfx.print(fmtBtc(rangeMin));
 }
 
+// 24h high/low bar: "L $lo [====o====] H $hi" -- mirrors pages.cpp's
+// drawBtcRangeBar() exactly (one compact row, independent of the candle-
+// size/range settings since it always reflects the 24hr window).
+function drawBtcRangeBar() {
+  if (!STATE.cfgBtcRangeBar) return;
+  const SCREEN_W      = 320;
+  const CONTENT_RIGHT = SCREEN_W - 4;
+  const ROW_Y = btcRangeBarY0();
+  const BAR_H = 6;
+  const BAR_Y = ROW_Y + 1;
+
+  gfx.setTextColor(COL_TEXT2);
+  gfx.setTextSize(1);
+  const loStr = 'L' + fmtBtc(STATE.btcLow24h);
+  const hiStr = 'H' + fmtBtc(STATE.btcHigh24h);
+  const loW = loStr.length * 6;
+  const hiW = hiStr.length * 6;
+
+  gfx.setCursor(4, ROW_Y);
+  gfx.print(loStr);
+
+  const barX0 = 4 + loW + 4;
+  const barX1 = CONTENT_RIGHT - hiW - 4;
+  const barW = barX1 - barX0;
+  if (barW > 0) {
+    gfx.fillRoundRect(barX0, BAR_Y, barW, BAR_H, 3, COL_TRACK);
+    if (STATE.btcHigh24h > 0 && STATE.btcLow24h > 0 && STATE.btcHigh24h > STATE.btcLow24h && barW > 6) {
+      let f = (latestBtcPrice() - STATE.btcLow24h) / (STATE.btcHigh24h - STATE.btcLow24h);
+      if (f < 0) f = 0;
+      if (f > 1) f = 1;
+      const markerX = barX0 + Math.floor(f * (barW - 6));
+      gfx.fillRoundRect(markerX, BAR_Y - 2, 6, BAR_H + 4, 2, COL_ACCENT);
+    }
+  }
+
+  gfx.setCursor(CONTENT_RIGHT - hiW, ROW_Y);
+  gfx.print(hiStr);
+}
+
 function drawBtcPriceRow() {
+  if (!STATE.cfgBtcPriceHero) return;
   const SCREEN_W      = 320;
   const CONTENT_RIGHT = SCREEN_W - 4;  // 4px min margin (matches the left-side clamp below)
 
   gfx.setTextSize(4);
-  if (STATE.btcPrice <= 0) {
+  const price = latestBtcPrice();
+  if (price <= 0) {
     gfx.setTextColor(COL_TEXT2);
     gfx.setCursor(4, 34);
     gfx.print('$--');
   } else {
-    const priceStr = '$' + fmtBtc(STATE.btcPrice);
+    const priceStr = '$' + fmtBtc(price);
     let x = CONTENT_RIGHT - gfx.textWidth(priceStr);
     if (x < 4) x = 4;
     gfx.setTextColor(COL_TEXT);
@@ -1816,6 +1990,7 @@ function drawBtcTickerPage() {
   gfx.fillCircle(CONTENT_RIGHT - 20, 12, 4, freshColor);
 
   drawBtcPriceRow();
+  drawBtcRangeBar();
   drawBtcChart();
 }
 
@@ -2065,6 +2240,39 @@ function loadShowCountdown() {
   STATE.cfgShowCountdown = raw !== '0';
 }
 
+function loadBtcCandleIv() {
+  const raw = localStorage.getItem(BTC_CANDLE_IV_KEY);
+  if (raw === null) return;
+  const v = parseInt(raw, 10);
+  if (BTC_CANDLE_IV_VALUES.includes(v)) STATE.cfgBtcCandleIvSec = v;
+}
+
+function loadBtcRange() {
+  const raw = localStorage.getItem(BTC_RANGE_KEY);
+  if (raw === null) return;
+  const v = parseInt(raw, 10);
+  if (BTC_RANGE_VALUES.includes(v)) STATE.cfgBtcRangeSec = v;
+}
+
+function loadBtcChartStyle() {
+  const raw = localStorage.getItem(BTC_CHART_STYLE_KEY);
+  if (raw === null) return;
+  const v = parseInt(raw, 10);
+  if (!Number.isNaN(v)) STATE.cfgBtcChartStyle = v;
+}
+
+function loadBtcRangeBar() {
+  const raw = localStorage.getItem(BTC_RANGE_BAR_KEY);
+  if (raw === null) return;
+  STATE.cfgBtcRangeBar = raw !== '0';
+}
+
+function loadBtcPriceHero() {
+  const raw = localStorage.getItem(BTC_PRICE_HERO_KEY);
+  if (raw === null) return;
+  STATE.cfgBtcPriceHero = raw !== '0';
+}
+
 function render() {
   // Pixel shift: advance the orbit on the firmware's cadence, blank the panel
   // (the firmware's clearShiftMargins() edge strips), then draw the whole
@@ -2189,7 +2397,7 @@ const MOCK = {
     credits: { used: 0.41, limit: 10.0, percent: 4 },
   },
   context: { tokens: 80000, percent: 40 },
-  btc: { price: 109432, changePct: 2.45 },
+  btc: { price: 109432, changePct: 2.45, high: 111200, low: 107800 },
   weather: {
     tempC: 34, code: 3, high: 35, low: 26,
     condition: 'Overcast', place: 'Bangkok',
@@ -2211,11 +2419,15 @@ const MOCK = {
   },
 };
 
-function generateMockCandles() {
+// intervalSec/count let the Settings UI preview any candle-size/range combo
+// while on mock data (see regenerateMockCandlesIfMocked below).
+function generateMockCandles(intervalSec, count) {
+  intervalSec = intervalSec || 300;
+  count = count || 288;
   const candles = [];
   let basePrice = 109000;
-  let t = Math.floor(Date.now() / 1000) - 288 * 300;
-  for (let i = 0; i < 288; i++) {
+  let t = Math.floor(Date.now() / 1000) - count * intervalSec;
+  for (let i = 0; i < count; i++) {
     const change = (Math.random() - 0.48) * 400;
     const open = basePrice;
     const close = basePrice + change;
@@ -2223,11 +2435,23 @@ function generateMockCandles() {
     const low = Math.min(open, close) - Math.random() * 150;
     candles.push([t, open, high, low, close]);
     basePrice = close;
-    t += 300;
+    t += intervalSec;
   }
   return candles;
 }
-MOCK.btc_candles = generateMockCandles();
+MOCK.btc_candles = generateMockCandles(300, 288);
+MOCK.btc_candles_meta = { intervalSec: 300, count: 288 };
+
+// Regenerates the mock candle series at the currently-selected candle-size/
+// range so BTC settings changes are actually previewable with "Use mock
+// data" checked -- mirrors the server re-fetching at the board's requested
+// combo (see usage_server.py's market_loop).
+function regenerateMockCandlesIfMocked() {
+  const count = Math.min(BTC_CANDLE_COUNT, Math.floor(STATE.cfgBtcRangeSec / STATE.cfgBtcCandleIvSec));
+  MOCK.btc_candles = generateMockCandles(STATE.cfgBtcCandleIvSec, count);
+  MOCK.btc_candles_meta = { intervalSec: STATE.cfgBtcCandleIvSec, count };
+  if (document.getElementById('mock-data').checked) fetchUsage();
+}
 
 // Mirrors the firmware's SD-backed daily log, using localStorage as the
 // simulator's stand-in for the on-device CSV (per the root CLAUDE.md's
@@ -2335,6 +2559,11 @@ function applyData(doc) {
   if (doc.btc && doc.btc.price > 0) {
     STATE.btcPrice = doc.btc.price;
     STATE.btcChangePct = doc.btc.changePct ?? STATE.btcChangePct;
+    STATE.btcHigh24h = doc.btc.high ?? STATE.btcHigh24h;
+    STATE.btcLow24h = doc.btc.low ?? STATE.btcLow24h;
+  }
+  if (doc.btc_candles_meta) {
+    STATE.btcCandleIntervalSec = doc.btc_candles_meta.intervalSec ?? STATE.btcCandleIntervalSec;
   }
   if (doc.btc_candles) {
     STATE.btcCandles = doc.btc_candles;
@@ -2466,7 +2695,11 @@ async function fetchUsage() {
     return;
   }
 
-  const url = document.getElementById('server-url').value.trim();
+  let url = document.getElementById('server-url').value.trim();
+  // Requests the board's currently-selected BTC candle size/range, mirrors
+  // the firmware's fetchUsage() query params -- see usage_server.py's do_GET.
+  url += (url.includes('?') ? '&' : '?') +
+    'civ=' + STATE.cfgBtcCandleIvSec + '&rng=' + STATE.cfgBtcRangeSec;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
   try {
@@ -2717,6 +2950,11 @@ loadCatShuffle();
 loadNightMode();
 loadRotation();
 loadShowCountdown();
+loadBtcCandleIv();
+loadBtcRange();
+loadBtcChartStyle();
+loadBtcRangeBar();
+loadBtcPriceHero();
 applyBrightnessFilter();
 render();
 fetchUsage();
