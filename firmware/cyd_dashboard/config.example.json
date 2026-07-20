@@ -14,5 +14,6 @@
   "brightness": 200,
   "boot_page": 0,
   "cat_shuffle_sec": 0,
-  "night_mode_preset": 0
+  "night_mode_preset": 0,
+  "show_countdown": 1
 }

@@ -51,7 +51,9 @@ STATE = {
     "context": None,    # {tokens, ts} — newest assistant event's context size
     "btc": None,        # {price, changePct} from Binance — fetched here so the board needs no TLS
     "btc_candles": None, # [ [t, o, h, l, c], ... ] 288 5-minute candles
-    "weather": None,    # {tempC, code} for Bangkok from Open-Meteo, same reason
+    # Bangkok weather for the status card + Weather page: current + next-6h
+    # hourly + next-5d daily, fetched here so the board needs no TLS.
+    "weather": None,
     "activity_event": threading.Event(),
     "lock": threading.Lock(),
 }
@@ -102,9 +104,17 @@ OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # handshake — proxying these through the plain-HTTP endpoint it already polls
 # avoids TLS on the board entirely.
 BTC_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
-WEATHER_URL = ("https://api.open-meteo.com/v1/forecast?latitude=13.7563"
-               "&longitude=100.5018&current=temperature_2m,weather_code"
-               "&timezone=Asia%2FBangkok")
+# Open-Meteo: current + hourly + daily so the board can render the Weather
+# page (next 6h + next 5 days) without a second HTTPS call.
+WEATHER_URL = (
+    "https://api.open-meteo.com/v1/forecast"
+    "?latitude=13.7563&longitude=100.5018"
+    "&current=temperature_2m,weather_code"
+    "&hourly=temperature_2m,weather_code"
+    "&daily=weather_code,temperature_2m_max,temperature_2m_min"
+    "&timezone=Asia%2FBangkok&forecast_days=6"
+)
+WEATHER_PLACE = "Bangkok"
 BTC_INTERVAL_SEC = 10
 WEATHER_INTERVAL_SEC = 600
 
@@ -163,7 +173,7 @@ def fmt_reset_time(iso_ts, with_date):
     # separately in the JSON for anyone who wants it.
     dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00")).astimezone()
     t = dt.strftime("%H:%M")
-    return f"{dt.strftime('%b')} {dt.day} at {t}" if with_date else t
+    return f"{dt.strftime('%b')} {dt.day}, {t}" if with_date else t
 
 
 def log_err(msg):
@@ -379,26 +389,188 @@ WEATHERAPI_TO_WMO.update({c: 71 for c in (
 WEATHERAPI_TO_WMO.update({c: 95 for c in (1087, 1273, 1276, 1279, 1282)})
 
 
+def wmo_condition(code):
+    # Short condition labels for the Weather page header. Buckets match
+    # drawWeatherIcon() so icon + text always describe the same condition.
+    if code is None or code < 0:
+        return ""
+    if code == 0:
+        return "Clear"
+    if code == 1:
+        return "Mainly Clear"
+    if code == 2:
+        return "Partly Cloudy"
+    if code == 3:
+        return "Overcast"
+    if code in (45, 48):
+        return "Fog"
+    if 51 <= code <= 57:
+        return "Drizzle"
+    if 61 <= code <= 67:
+        return "Rain"
+    if 71 <= code <= 77:
+        return "Snow"
+    if 80 <= code <= 82:
+        return "Showers"
+    if 85 <= code <= 86:
+        return "Snow Showers"
+    if code >= 95:
+        return "Thunderstorm"
+    return "Cloudy"
+
+
+def _iso_hour(ts):
+    # "2026-07-20T17:00" or "2026-07-20 17:00" -> hour int, or None.
+    if not ts or len(ts) < 13:
+        return None
+    try:
+        return int(ts[11:13])
+    except (TypeError, ValueError):
+        return None
+
+
+def _iso_wday(date_str):
+    # YYYY-MM-DD -> tm_wday style (0=Sun .. 6=Sat).
+    try:
+        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        return (dt.weekday() + 1) % 7
+    except (TypeError, ValueError):
+        return 0
+
+
+def weather_payload(temp_c, code, high=None, low=None, hourly=None, daily=None):
+    # Shared shape for both providers — the board/simulator contract.
+    out = {
+        "tempC": temp_c,
+        "code": code if code is not None else -1,
+        "condition": wmo_condition(code if code is not None else -1),
+        "place": WEATHER_PLACE,
+        "high": high if high is not None else None,
+        "low": low if low is not None else None,
+        "hourly": hourly or [],
+        "daily": daily or [],
+    }
+    return out
+
+
 def fetch_weather_openmeteo():
-    with urllib.request.urlopen(WEATHER_URL, timeout=8) as resp:
+    with urllib.request.urlopen(WEATHER_URL, timeout=10) as resp:
         doc = json.loads(resp.read())
     cur = doc.get("current") or {}
     if cur.get("temperature_2m") is None:
         return None
-    return {"tempC": cur["temperature_2m"], "code": cur.get("weather_code", -1)}
+    code = cur.get("weather_code", -1)
+    temp_c = cur["temperature_2m"]
+
+    # Next 6 hours starting at the current hour (or the next future slot if
+    # the exact current hour is missing from the series).
+    hourly_out = []
+    hdoc = doc.get("hourly") or {}
+    h_times = hdoc.get("time") or []
+    h_temps = hdoc.get("temperature_2m") or []
+    h_codes = hdoc.get("weather_code") or []
+    cur_time = cur.get("time") or ""
+    start_i = 0
+    for i, t in enumerate(h_times):
+        if t[:13] >= cur_time[:13]:
+            start_i = i
+            break
+    for i in range(start_i, min(start_i + 6, len(h_times))):
+        h = _iso_hour(h_times[i])
+        if h is None or i >= len(h_temps) or h_temps[i] is None:
+            continue
+        hc = h_codes[i] if i < len(h_codes) else -1
+        hourly_out.append({
+            "h": h,
+            "tempC": round(h_temps[i]),
+            "code": hc if hc is not None else -1,
+        })
+
+    # Today + next 4 days (5 rows on the Weather page).
+    daily_out = []
+    ddoc = doc.get("daily") or {}
+    d_times = ddoc.get("time") or []
+    d_max = ddoc.get("temperature_2m_max") or []
+    d_min = ddoc.get("temperature_2m_min") or []
+    d_codes = ddoc.get("weather_code") or []
+    high = low = None
+    for i in range(min(5, len(d_times))):
+        hi = d_max[i] if i < len(d_max) else None
+        lo = d_min[i] if i < len(d_min) else None
+        dc = d_codes[i] if i < len(d_codes) else -1
+        if i == 0:
+            high = None if hi is None else round(hi)
+            low = None if lo is None else round(lo)
+        daily_out.append({
+            "wd": _iso_wday(d_times[i]),
+            "high": None if hi is None else round(hi),
+            "low": None if lo is None else round(lo),
+            "code": dc if dc is not None else -1,
+        })
+
+    return weather_payload(temp_c, code, high=high, low=low,
+                           hourly=hourly_out, daily=daily_out)
 
 
 def fetch_weather_weatherapi(key):
-    url = f"http://api.weatherapi.com/v1/current.json?key={key}&q=Bangkok"
+    # forecast.json includes current + up to 14 days of hour/day slots.
+    url = (f"http://api.weatherapi.com/v1/forecast.json"
+           f"?key={key}&q=Bangkok&days=6&aqi=no&alerts=no")
     req = urllib.request.Request(url, headers={"User-Agent": "cydusage"})
-    with urllib.request.urlopen(req, timeout=8) as resp:
+    with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     cur = data.get("current") or {}
     temp_c = cur.get("temp_c")
     if temp_c is None:
         return None
     wa_code = (cur.get("condition") or {}).get("code", 1000)
-    return {"tempC": temp_c, "code": WEATHERAPI_TO_WMO.get(wa_code, 3)}
+    code = WEATHERAPI_TO_WMO.get(wa_code, 3)
+
+    # Flatten hour slots across forecast days, then take the next 6 from now.
+    now_local = datetime.now(timezone(timedelta(hours=7)))  # Asia/Bangkok fixed
+    now_key = now_local.strftime("%Y-%m-%d %H")
+    flat_hours = []
+    for day in (data.get("forecast") or {}).get("forecastday") or []:
+        for hour in day.get("hour") or []:
+            t = hour.get("time") or ""  # "2026-07-20 17:00"
+            if t[:13] < now_key:
+                continue
+            ht = hour.get("temp_c")
+            if ht is None:
+                continue
+            hc = WEATHERAPI_TO_WMO.get(
+                (hour.get("condition") or {}).get("code", 1000), 3)
+            flat_hours.append({
+                "h": _iso_hour(t.replace(" ", "T")) or 0,
+                "tempC": round(ht),
+                "code": hc,
+            })
+            if len(flat_hours) >= 6:
+                break
+        if len(flat_hours) >= 6:
+            break
+
+    daily_out = []
+    high = low = None
+    for i, day in enumerate(((data.get("forecast") or {}).get("forecastday") or [])[:5]):
+        day_date = day.get("date") or ""
+        d = day.get("day") or {}
+        hi = d.get("maxtemp_c")
+        lo = d.get("mintemp_c")
+        dc = WEATHERAPI_TO_WMO.get(
+            (d.get("condition") or {}).get("code", 1000), 3)
+        if i == 0:
+            high = None if hi is None else round(hi)
+            low = None if lo is None else round(lo)
+        daily_out.append({
+            "wd": _iso_wday(day_date),
+            "high": None if hi is None else round(hi),
+            "low": None if lo is None else round(lo),
+            "code": dc,
+        })
+
+    return weather_payload(temp_c, code, high=high, low=low,
+                           hourly=flat_hours[:6], daily=daily_out)
 
 
 def fetch_weather():

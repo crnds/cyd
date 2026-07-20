@@ -56,6 +56,9 @@ void loadRuntimeConfig() {
   if (!doc["night_mode_preset"].isNull()) {
     cfgNightModeOn = doc["night_mode_preset"].as<int>() != 0;
   }
+  if (!doc["show_countdown"].isNull()) {
+    cfgShowCountdown = doc["show_countdown"].as<int>() != 0;
+  }
   Serial.println("[config] loaded overrides from /config.json");
 }
 

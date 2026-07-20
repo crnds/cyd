@@ -223,7 +223,7 @@ static void drawLimitsRow(int y, const String& label, const String& right, int p
   }
 }
 
-// "Resets Jul 16 at 04:59  58%" — or bare "58%", or "--" when unknown.
+// "Resets Jul 16, 04:59  58%" — or bare "58%", or "--" when unknown.
 static String limitRowText(int percent, const char* resets) {
   if (percent < 0) return "--";
   String s;
@@ -534,8 +534,14 @@ static void drawLimitsCard() {
   drawCardLabel(12 + sessionPctStr.length() * 24 + 6, 37, "5H");
 
   drawMiniBar(12, 51, 122, STATE.sessionPercent, COL_ACCENT);
-  shineFillPx[0] = drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
-  drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[0], shineFillPx[0], millis());
+  // Green reset-countdown bars (and their shine) are optional via Settings
+  // "Show Countdown"; when off, clear the cached fill so shineTick no-ops.
+  if (cfgShowCountdown) {
+    shineFillPx[0] = drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+    drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[0], shineFillPx[0], millis());
+  } else {
+    shineFillPx[0] = -1;
+  }
 
   g->setTextColor(COL_TEXT2);
   g->setTextSize(2);
@@ -558,15 +564,24 @@ static void drawLimitsCard() {
   drawCardLabel(12 + weekPctStr.length() * 18 + 6, 158, "WEEK");
 
   drawMiniBar(12, 172, 122, STATE.weekPercent, COL_ACCENT);
-  shineFillPx[1] = drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
-  drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[1], shineFillPx[1], millis());
+  if (cfgShowCountdown) {
+    shineFillPx[1] = drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+    drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[1], shineFillPx[1], millis());
+  } else {
+    shineFillPx[1] = -1;
+  }
 
-  // "resets Jul 9 at 4:59am" is 22 chars = 132px at size1 — exactly the
+  // "resets Jul 9, 4:59am" is 20 chars = 120px at size1 — comfortably under the
   // card's inner width, so this line must stay size1.
   g->setTextColor(COL_TEXT2);
   g->setTextSize(1);
   g->setCursor(12, 196);
   g->print(STATE.weekResets[0] != '\0' ? String("resets ") + STATE.weekResets : String("resets --"));
+
+  g->setTextColor(COL_TEXT);
+  g->setTextSize(1);
+  g->setCursor(12, 206);
+  if (weekRem >= 0) g->print("in " + fmtCountdownDHM(weekRem));
 }
 
 void drawMixedPageStatic() {
@@ -576,6 +591,24 @@ void drawMixedPageStatic() {
   drawFooter();
 }
 
+// Timer region fill color: COL_GOOD blended 50% into COL_BG/COL_SURFACE
+// (the clock card's background — see drawTimerWedge below), precomputed in
+// RGB565 5-6-5 channel space since this display has no real alpha channel.
+// COL_BG=0x0841 (R5=1,G6=2,B5=1) + COL_GOOD=0x2668 (R5=4,G6=51,B5=8),
+// averaged and rounded per-channel -> R5=3,G6=27,B5=5 -> 0x1B65 (~rgb(25,109,41)).
+const uint16_t COL_GOOD_50 = 0x1B65;
+
+// Filled pie wedge from the hour hand's current angle clockwise to the
+// reset angle — a "time remaining" region layered under the ticks/hands so
+// they stay legible on top. Twin of simulator.html's drawTimerWedge, but
+// using LovyanGFX's fillArc (degrees, no radian conversion needed) plus the
+// precomputed solid blend color above instead of true alpha.
+static void drawTimerWedge(int cx, int cy, int r, float startAngle, float endAngle) {
+  float delta = fmodf(endAngle - startAngle, 360.0f);
+  if (delta < 0) delta += 360.0f;
+  g->fillArc(cx, cy, r, 0, startAngle, startAngle + delta, COL_GOOD_50);
+}
+
 // Minimal analog clock: a bare circle, 12/3/6/9 tick dots, and hour/minute
 // hands — no numerals, no second hand. Angles are screen-space (y grows
 // down) with a -90° offset so 0 minutes/hours points straight up (12
@@ -583,6 +616,21 @@ void drawMixedPageStatic() {
 // real clock face.
 static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int second,
                              bool haveReset, int resetHour24, int resetMinute) {
+  float hourAngle = ((hour24 % 12) + minute / 60.0f) * 30.0f - 90.0f;
+  float minAngle = (minute + second / 60.0f) * 6.0f - 90.0f;
+  float secAngle = second * 6.0f - 90.0f;
+  float hourRad = hourAngle * PI / 180.0f;
+  float minRad = minAngle * PI / 180.0f;
+  float secRad = secAngle * PI / 180.0f;
+
+  // Timer region: hour hand -> next 5h reset, drawn first so the circle,
+  // ticks, and hands all render crisply on top of the fill. Gated by
+  // Settings "Show Countdown"; the green reset hand below always draws.
+  if (haveReset && cfgShowCountdown) {
+    float resetAngleWedge = ((resetHour24 % 12) + resetMinute / 60.0f) * 30.0f - 90.0f;
+    drawTimerWedge(cx, cy, r - 1, hourAngle, resetAngleWedge);
+  }
+
   g->drawCircle(cx, cy, r, COL_TEXT);
   // 12 short hour ticks radiating in from the rim, same -90° zero-at-top
   // convention as the hands below.
@@ -594,13 +642,6 @@ static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int s
     int y1 = cy + (int)(sinf(tickRad) * (r - 5));
     g->drawLine(x0, y0, x1, y1, COL_TEXT);
   }
-
-  float hourAngle = ((hour24 % 12) + minute / 60.0f) * 30.0f - 90.0f;
-  float minAngle = (minute + second / 60.0f) * 6.0f - 90.0f;
-  float secAngle = second * 6.0f - 90.0f;
-  float hourRad = hourAngle * PI / 180.0f;
-  float minRad = minAngle * PI / 180.0f;
-  float secRad = secAngle * PI / 180.0f;
 
   int hx = cx + (int)(cosf(hourRad) * r * 0.5f);
   int hy = cy + (int)(sinf(hourRad) * r * 0.5f);
@@ -1007,6 +1048,222 @@ void drawOfflineBanner() {
   g->print("OFFLINE");
 }
 
+// Weather detail overlay (status-page weather card). Card-structured landscape
+// layout per design.md — no place / HOURLY / 5-DAY word labels (space goes to
+// daily row pitch). Hero (temp · H/L · icon · condition) + hourly 6-col +
+// 5-day range bars. Content band x=10..294; full 304×240, no footer; any tap
+// dismisses. Twin of simulator.html drawWeatherPage — lockstep.
+static void drawWeatherPage() {
+  // COL_BG (not pure black): borders define structure like the rest of the UI.
+  g->fillScreen(COL_BG);
+
+  static const char* WDAYS[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  const int heroRight = 286;  // card right pad (10+284-8)
+
+  // ── Hero card ────────────────────────────────────────────
+  // (10, 4, 284, 52) — single inline band fills the card:
+  //   icon | size5 temp | size2 condition + size2 H/L
+  // Icon leads on the far left, immediately before the current temp.
+  g->fillRoundRect(10, 4, 284, 52, 8, COL_SURFACE);
+  g->drawRoundRect(10, 4, 284, 52, 8, COL_BORDER);
+
+  // Icon far left, vertically centered in the 52px card (~14–16px tall).
+  const int iconX = 16;
+  drawWeatherIcon(iconX, 22, STATE.weatherCode);
+  const int tempX = iconX + 22;  // past icon box (~18) + gutter
+
+  int metaX = 100;  // start of meta column (after temp)
+  g->setTextSize(5);
+  g->setCursor(tempX, 10);
+  if (STATE.weatherTempC > -900) {
+    char tbuf[6];
+    snprintf(tbuf, sizeof(tbuf), "%d", (int)round(STATE.weatherTempC));
+    g->setTextColor(COL_TEXT);
+    g->print(tbuf);
+    int tw = (int)strlen(tbuf) * 30;  // size5 advance
+    // Raised degree mark (font has no ° glyph) — muted so digits dominate.
+    g->setTextSize(2);
+    g->setTextColor(COL_TEXT2);
+    g->setCursor(tempX + tw, 12);
+    g->print("o");
+    metaX = tempX + tw + 20;  // past degree + clear gutter into meta column
+  } else {
+    g->setTextColor(COL_TEXT2);
+    g->print("--");
+    metaX = tempX + 2 * 30 + 16;
+  }
+
+  const int metaMaxX = heroRight;  // full right edge — no trailing icon
+
+  // Condition (size2) — top of meta column, optically with upper temp.
+  {
+    const char* cond = STATE.weatherCondition[0] ? STATE.weatherCondition : "--";
+    int avail = metaMaxX - metaX;
+    if (avail < 12) avail = 12;
+    int maxChars = avail / 12;  // size2 = 12px/char
+    if (maxChars > 14) maxChars = 14;
+    if (maxChars < 1) maxChars = 1;
+    char cbuf[16];
+    int n = 0;
+    while (cond[n] && n < maxChars) {
+      cbuf[n] = cond[n];
+      n++;
+    }
+    cbuf[n] = 0;
+    g->setTextSize(2);
+    g->setTextColor(STATE.weatherCondition[0] ? COL_TEXT : COL_TEXT2);
+    g->setCursor(metaX, 14);
+    g->print(cbuf);
+  }
+
+  // High / Low (size2) — "H 35  L 26", same column under condition.
+  {
+    char hStr[5], lStr[5];
+    if (STATE.weatherHigh > -900) snprintf(hStr, sizeof(hStr), "%d", STATE.weatherHigh);
+    else snprintf(hStr, sizeof(hStr), "--");
+    if (STATE.weatherLow > -900) snprintf(lStr, sizeof(lStr), "%d", STATE.weatherLow);
+    else snprintf(lStr, sizeof(lStr), "--");
+
+    g->setTextSize(2);
+    int x = metaX;
+    g->setTextColor(COL_TEXT2);
+    g->setCursor(x, 36);
+    g->print("H ");           // label + space (2 cells)
+    x += 24;
+    g->setTextColor(COL_TEXT);
+    g->setCursor(x, 36);
+    g->print(hStr);
+    x += (int)strlen(hStr) * 12 + 18;  // value + inter-pair gap
+    g->setTextColor(COL_TEXT2);
+    g->setCursor(x, 36);
+    g->print("L ");
+    x += 24;
+    g->setTextColor(COL_TEXT);
+    g->setCursor(x, 36);
+    g->print(lStr);
+  }
+
+  // ── Hourly (next 6) — no "HOURLY" label ──────────────────
+  g->fillRoundRect(10, 60, 284, 56, 8, COL_SURFACE);
+  g->drawRoundRect(10, 60, 284, 56, 8, COL_BORDER);
+
+  const int hourCount = STATE.weatherHourlyCount > 0
+                          ? (int)STATE.weatherHourlyCount : WEATHER_HOURLY_N;
+  // 6 equal columns: 6×47 = 282 (+1px side pad each edge).
+  const int slotW = 47;
+  for (int i = 0; i < hourCount && i < WEATHER_HOURLY_N; i++) {
+    int sx = 11 + i * slotW;
+    int cx = sx + slotW / 2;
+    int code = -1;
+    int temp = 0;
+    int hour = -1;
+    bool have = (i < (int)STATE.weatherHourlyCount);
+    if (have) {
+      hour = STATE.weatherHourly[i].hour;
+      temp = STATE.weatherHourly[i].tempC;
+      code = STATE.weatherHourly[i].code;
+    }
+
+    // First slot = current hour: accent tick + accent hour label.
+    if (i == 0) {
+      g->fillRoundRect(sx + 6, 62, slotW - 12, 2, 1, COL_ACCENT);
+    }
+
+    g->setTextSize(1);
+    g->setTextColor(i == 0 ? COL_ACCENT : COL_TEXT2);
+    char hbuf[4];
+    if (have && hour >= 0) snprintf(hbuf, sizeof(hbuf), "%02d", hour);
+    else snprintf(hbuf, sizeof(hbuf), "--");
+    g->setCursor(cx - 6, 66);
+    g->print(hbuf);
+
+    drawWeatherIcon(cx - 8, 78, code);
+
+    if (have) {
+      char tbuf[5];
+      snprintf(tbuf, sizeof(tbuf), "%d", temp);
+      int tw = (int)strlen(tbuf) * 6;
+      g->setTextColor(COL_TEXT);
+      g->setCursor(cx - tw / 2, 102);
+      g->print(tbuf);
+    } else {
+      g->setTextColor(COL_TEXT2);
+      g->setCursor(cx - 6, 102);
+      g->print("--");
+    }
+  }
+
+  // ── 5-day — no "5-DAY" label; extra height → larger dayStep ─
+  // Card (10, 122, 284, 114): freed header + section-label rows go here.
+  g->fillRoundRect(10, 122, 284, 114, 8, COL_SURFACE);
+  g->drawRoundRect(10, 122, 284, 114, 8, COL_BORDER);
+
+  int minT = 100, maxT = -100;
+  for (uint8_t i = 0; i < STATE.weatherDailyCount; i++) {
+    if (STATE.weatherDaily[i].low < minT) minT = STATE.weatherDaily[i].low;
+    if (STATE.weatherDaily[i].high > maxT) maxT = STATE.weatherDaily[i].high;
+  }
+  if (maxT <= minT) {
+    minT = 20;
+    maxT = 40;
+  }
+
+  // Fixed columns: day 18 | icon 44 | low right@92 | bar 96..246 | high 252
+  // dayStep 22: 5×22 = 110 inside 114px card (was 15 in 78px).
+  const int dayY0 = 126;
+  const int dayStep = 22;
+  const int barX = 96, barW = 150, barH = 6;
+  const int dayCount = STATE.weatherDailyCount > 0
+                         ? (int)STATE.weatherDailyCount : WEATHER_DAILY_N;
+  for (int i = 0; i < dayCount && i < WEATHER_DAILY_N; i++) {
+    int y = dayY0 + i * dayStep;
+    bool have = (i < (int)STATE.weatherDailyCount);
+    int wd = have ? STATE.weatherDaily[i].wday : -1;
+    int lo = have ? STATE.weatherDaily[i].low : 0;
+    int hi = have ? STATE.weatherDaily[i].high : 0;
+    int code = have ? STATE.weatherDaily[i].code : -1;
+
+    // Vertically center text/icon/bar in the 22px row.
+    const int textY = y + 7;
+    const int barY = y + 8;
+    const int iconY = y + 4;
+
+    g->setTextSize(1);
+    g->setTextColor(i == 0 ? COL_ACCENT : COL_TEXT);
+    g->setCursor(18, textY);
+    if (have && wd >= 0 && wd < 7) g->print(WDAYS[wd]);
+    else g->print("---");
+
+    drawWeatherIcon(44, iconY, code);
+
+    char lbuf[5], hbuf[5];
+    if (have) {
+      snprintf(lbuf, sizeof(lbuf), "%d", lo);
+      snprintf(hbuf, sizeof(hbuf), "%d", hi);
+    } else {
+      snprintf(lbuf, sizeof(lbuf), "--");
+      snprintf(hbuf, sizeof(hbuf), "--");
+    }
+
+    g->setTextColor(COL_TEXT2);
+    g->setCursor(barX - 6 - (int)strlen(lbuf) * 6, textY);
+    g->print(lbuf);
+
+    g->fillRoundRect(barX, barY, barW, barH, barH / 2, COL_TRACK);
+    if (have && maxT > minT) {
+      float span = (float)(maxT - minT);
+      int x0 = barX + (int)((lo - minT) / span * barW);
+      int x1 = barX + (int)((hi - minT) / span * barW);
+      if (x1 - x0 < barH) x1 = x0 + barH;
+      g->fillRoundRect(x0, barY, x1 - x0, barH, barH / 2, COL_ACCENT);
+    }
+
+    g->setTextColor(COL_TEXT);
+    g->setCursor(barX + barW + 6, textY);
+    g->print(hbuf);
+  }
+}
+
 void render() {
   // The cat pages are animated frame-by-frame by gifTick() in loop(), not
   // drawn here. Offline mode is also driven by gifTick() (cats + an OFFLINE
@@ -1018,6 +1275,14 @@ void render() {
   // network task may reassign), then release before the SPI pushSprite so the
   // task's next brief STATE copy isn't delayed by the display write.
   lockState();
+  if (weatherPageOpen) {
+    drawWeatherPage();
+    unlockState();
+    presentFrame();
+    Serial.printf("[timing] render() weather took %luus\n",
+                  (unsigned long)(micros() - startUs));
+    return;
+  }
   g->fillScreen(COL_BG);
   switch (currentPage) {
     case 0: drawStatusPage(); break;

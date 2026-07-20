@@ -254,6 +254,14 @@ const STALE_AFTER_SEC = 60;
 // PULSE_HIT_X0/X1/Y0/Y1.
 const PULSE_HIT_X0 = 0, PULSE_HIT_X1 = 40, PULSE_HIT_Y0 = 214, PULSE_HIT_Y1 = 240;
 
+// Weather card hit-box on the status page (page 0): fillRoundRect(150,170,60,46).
+// Tap opens the Weather overlay — mirrors the firmware's WEATHER_HIT_*.
+const WEATHER_HIT_X0 = 150, WEATHER_HIT_X1 = 210;
+const WEATHER_HIT_Y0 = 170, WEATHER_HIT_Y1 = 216;
+const WEATHER_HOURLY_N = 6;
+const WEATHER_DAILY_N = 5;
+const LAST_WEATHER_KEY = 'cyddashboard_v1_weather';
+
 // Settings (generic LIST + leaf GRID) geometry -- mirrors the firmware's
 // SET_BACK_*/SET_BTN_*/SET_ROW_* exactly.
 const SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
@@ -276,6 +284,7 @@ const BOOT_PAGE_KEY = 'cyddashboard_v1_bootpage';
 const CAT_SHUFFLE_KEY = 'cyddashboard_v1_catshuffle';
 const NIGHT_MODE_KEY = 'cyddashboard_v1_nightmode';
 const ROTATION_KEY = 'cyddashboard_v1_rotation';
+const SHOW_COUNTDOWN_KEY = 'cyddashboard_v1_showcountdown';
 
 // SettingDef table -- mirrors the firmware's SettingDef struct/SETTINGS[]
 // array field-for-field (label/leafTitle/subtitle/hint/cols/rows/count/
@@ -361,6 +370,14 @@ function applyRotation(v) {
               'immediately, no restart -- see cyd_dashboard.ino for why touch needs no recalibration.');
 }
 
+// Show Countdown: green bars under 5h/week + analog clock timer wedge.
+// Green reset hand always stays. Default ON (mirrors cfgShowCountdown).
+function getCurrentShowCountdown() { return STATE.cfgShowCountdown ? 1 : 0; }
+function applyShowCountdown(v) {
+  STATE.cfgShowCountdown = v !== 0;
+  localStorage.setItem(SHOW_COUNTDOWN_KEY, String(v));
+}
+
 // Poll interval: wired to the sidebar's real "#poll-interval" select + its
 // restartPollTimer(), so picking a preset here actually changes the
 // simulated fetch cadence -- a genuine effect, not just a cosmetic stand-in.
@@ -434,8 +451,13 @@ const SETTINGS = [
     values: [1, 3], valueLabels: ['NORMAL', 'FLIPPED'],
     btnTextSize: 1, destructive: false,
     getCurrent: getCurrentRotation, apply: applyRotation },
+  { label: 'SHOW COUNTDOWN', leafTitle: 'SHOW COUNTDOWN', subtitle: 'GREEN BARS + CLOCK WEDGE',
+    hint: 'TAP TO TOGGLE', cols: 2, rows: 1, count: 2,
+    values: [0, 1], valueLabels: ['OFF', 'ON'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentShowCountdown, apply: applyShowCountdown },
 ];
-const SETTINGS_COUNT = 9;
+const SETTINGS_COUNT = 10;
 const SETTINGS_CONTENT_H = SETTINGS_COUNT * SET_ROW_STEP - (SET_ROW_STEP - SET_ROW_H);
 const SETTINGS_SCROLL_MAX = (SETTINGS_CONTENT_H > SETTINGS_VIEWPORT_H)
     ? (SETTINGS_CONTENT_H - SETTINGS_VIEWPORT_H) : 0;
@@ -472,6 +494,8 @@ const COL_TRACK   = 'rgb(90,89,90)';    // 0x5ACB neutral grey track
 const COL_TRACK_BLACK = 'rgb(0,0,0)';   // 0x0000 pure-black track (reset-countdown bars)
 const COL_GOOD_DIM = 'rgb(20,140,32)';  // 0x1462 dim green
 const COL_BAD_DIM  = 'rgb(148,36,32)';  // 0x9124 dim red
+// Weather page background — pure black. 0x0000. Reserved; weather overlay uses COL_BG.
+const COL_WEATHER_BG = 'rgb(0,0,0)';
 
 // ── STATE (mirroring the firmware UsageState struct) ──────
 const STATE = {
@@ -505,6 +529,13 @@ const STATE = {
   btcCandleCount: 0,
   weatherTempC: -999,     // Bangkok current temp; -999 = not received yet (see above)
   weatherCode: -1,        // WMO weather_code; -1 = not received yet (see above)
+  weatherHigh: -999,
+  weatherLow: -999,
+  weatherCondition: '',
+  weatherPlace: 'Bangkok',
+  weatherHourly: [],      // [{h, tempC, code}] next 6 hours
+  weatherDaily: [],       // [{wd, high, low, code}] next 5 days
+  weatherPageOpen: false, // Weather overlay (tap status-page weather card)
   // simulator-only
   lastPollMs: 0,          // when the last poll cycle started (progress line)
   currentPage: 0,
@@ -525,6 +556,7 @@ const STATE = {
   catShuffleSec: 0,     // mirrors the firmware's catShuffleMs (seconds here); cosmetic only --
                         // the simulator's cat page is a placeholder, no real GIF playback to pace
   cfgNightModeOn: false, // mirrors the firmware's cfgNightModeOn
+  cfgShowCountdown: true, // mirrors the firmware's cfgShowCountdown (default on)
   cfgScreenRotation: 1,  // mirrors the firmware's cfgScreenRotation (1=normal, 3=flipped)
 };
 
@@ -627,6 +659,10 @@ const gfx = {
     ctx.lineTo(x1 + 0.5, y1 + 0.5);
     ctx.stroke();
   },
+  // Mirrors LovyanGFX/Adafruit drawFastHLine — used by the Weather page separators.
+  drawFastHLine(x, y, w, c) {
+    this.drawLine(x, y, x + w - 1, y, c);
+  },
   // Mirrors LovyanGFX's drawWideLine(x0,y0,x1,y1,r,color) — r is the
   // wedge-line's half-width (radius), same unit as its firmware counterpart.
   drawWideLine(x0, y0, x1, y1, r, c) {
@@ -675,6 +711,21 @@ function fmtCountdown(sec) {
   const h = Math.floor(m / 60);
   m %= 60;
   return h > 0 ? h + 'h:' + String(m).padStart(2, '0') + 'm' : m + 'm';
+}
+// Day-aware countdown for windows that can span multiple days (the weekly
+// reset). >=1 day: "1d:12h" (days + hours only). <1 day: "23h:59m", same
+// shape as fmtCountdown.
+function fmtCountdownDHM(sec) {
+  if (sec < 0) return '';
+  let totalMin = Math.floor((sec + 30) / 60);  // round to nearest minute
+  const days = Math.floor(totalMin / 1440);
+  if (days > 0) {
+    const hours = Math.floor((totalMin % 1440) / 60);
+    return days + 'd:' + hours + 'h';
+  }
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  return hours + 'h:' + String(mins).padStart(2, '0') + 'm';
 }
 function fmtKB(bytes) { return (bytes / 1024).toFixed(1) + 'KB'; }
 function fmtGB(bytes) { return (bytes / (1024 ** 3)).toFixed(1) + 'GB'; }
@@ -769,7 +820,7 @@ function drawLimitsRow(y, label, right, percent) {
   }
 }
 
-// "Resets Jul 16 at 04:59  58%" — or bare "58%", or "--" when unknown.
+// "Resets Jul 16, 04:59  58%" — or bare "58%", or "--" when unknown.
 function limitRowText(percent, resets) {
   if (percent < 0) return '--';
   return (resets ? 'Resets ' + resets + '  ' : '') + percent + '%';
@@ -1048,8 +1099,11 @@ function drawLimitsCard() {
   drawCardLabel(12 + sessionPctStr.length * 24 + 6, 37, '5H');
 
   drawMiniBar(12, 51, 122, STATE.sessionPercent, COL_ACCENT);
-  const sessionFillW = drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
-  drawShineStrip(12, 61, sessionFillW, performance.now());
+  // Green reset-countdown bars (and shine) optional via Settings "Show Countdown".
+  if (STATE.cfgShowCountdown) {
+    const sessionFillW = drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+    drawShineStrip(12, 61, sessionFillW, performance.now());
+  }
 
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(2);
@@ -1072,15 +1126,45 @@ function drawLimitsCard() {
   drawCardLabel(12 + weekPctStr.length * 18 + 6, 158, 'WEEK');
 
   drawMiniBar(12, 172, 122, STATE.weekPercent, COL_ACCENT);
-  const weekFillW = drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
-  drawShineStrip(12, 182, weekFillW, performance.now());
+  if (STATE.cfgShowCountdown) {
+    const weekFillW = drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+    drawShineStrip(12, 182, weekFillW, performance.now());
+  }
 
-  // "resets Jul 9 at 4:59am" is 22 chars = 132px at size1 — exactly the
+  // "resets Jul 9, 4:59am" is 20 chars = 120px at size1 — comfortably under the
   // card's inner width, so this line must stay size1.
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(1);
   gfx.setCursor(12, 196);
   gfx.print(STATE.weekResets ? 'resets ' + STATE.weekResets : 'resets --');
+
+  gfx.setTextColor(COL_TEXT);
+  gfx.setTextSize(1);
+  gfx.setCursor(12, 206);
+  if (weekRem >= 0) gfx.print('in ' + fmtCountdownDHM(weekRem));
+}
+
+// Filled pie wedge from the hour hand's current angle clockwise to the
+// reset angle, at 50% opacity green — a "time remaining" region layered
+// under the ticks/hands so they stay legible on top. `startRad`/`endRad`
+// are in the same screen-space radians as the hand angles below (canvas
+// arc() already sweeps clockwise for increasing angle, matching the
+// clock's own -90°-offset convention, so no extra sign flip is needed).
+// True alpha here vs. pages.cpp's drawTimerWedge: LovyanGFX has no real
+// alpha blending on this RGB565 display, so the firmware twin uses a
+// precomputed solid blend color (COL_GOOD lerped 50% into COL_BG) instead.
+const COL_GOOD_50 = 'rgba(33,206,66,0.5)'; // COL_GOOD @ 50% alpha
+function drawTimerWedge(cx, cy, r, startRad, endRad) {
+  let delta = (endRad - startRad) % (2 * Math.PI);
+  if (delta < 0) delta += 2 * Math.PI;
+  ctx.save();
+  ctx.fillStyle = COL_GOOD_50;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, r, startRad, startRad + delta, false);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 }
 
 // Minimal analog clock: a bare circle, 12/3/6/9 tick dots, and hour/minute
@@ -1089,6 +1173,22 @@ function drawLimitsCard() {
 // o'clock); increasing angle then sweeps clockwise on screen, matching a
 // real clock face.
 function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour24, resetMinute) {
+  const hourAngle = ((hour24 % 12) + minute / 60) * 30 - 90;
+  const minAngle = (minute + second / 60) * 6 - 90;
+  const secAngle = second * 6 - 90;
+  const hourRad = hourAngle * Math.PI / 180;
+  const minRad = minAngle * Math.PI / 180;
+  const secRad = secAngle * Math.PI / 180;
+
+  // Timer region: hour hand -> next 5h reset, drawn first so the circle,
+  // ticks, and hands all render crisply on top of the translucent fill.
+  // Gated by Settings "Show Countdown"; the green reset hand below always draws.
+  if (haveReset && STATE.cfgShowCountdown) {
+    const resetAngle = ((resetHour24 % 12) + resetMinute / 60) * 30 - 90;
+    const resetRad = resetAngle * Math.PI / 180;
+    drawTimerWedge(cx, cy, r - 1, hourRad, resetRad);
+  }
+
   gfx.drawCircle(cx, cy, r, COL_TEXT);
   // 12 short hour ticks radiating in from the rim, same -90° zero-at-top
   // convention as the hands below.
@@ -1100,13 +1200,6 @@ function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour
     const y1 = cy + Math.sin(tickRad) * (r - 5);
     gfx.drawLine(x0, y0, x1, y1, COL_TEXT);
   }
-
-  const hourAngle = ((hour24 % 12) + minute / 60) * 30 - 90;
-  const minAngle = (minute + second / 60) * 6 - 90;
-  const secAngle = second * 6 - 90;
-  const hourRad = hourAngle * Math.PI / 180;
-  const minRad = minAngle * Math.PI / 180;
-  const secRad = secAngle * Math.PI / 180;
 
   const hx = cx + Math.cos(hourRad) * r * 0.5;
   const hy = cy + Math.sin(hourRad) * r * 0.5;
@@ -1222,6 +1315,187 @@ function drawStatusPage() {
   gfx.setTextSize(2);
   gfx.setCursor(221, 196);
   gfx.print(fmtBtc(STATE.btcPrice));
+}
+
+// Weather detail overlay — twin of pages.cpp drawWeatherPage; lockstep.
+// No place / HOURLY / 5-DAY word labels; freed height → larger daily dayStep.
+function drawWeatherPage() {
+  gfx.fillScreen(COL_BG);
+
+  const WDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const heroRight = 286;  // card right pad (10+284-8)
+
+  // ── Hero card ────────────────────────────────────────────
+  // (10, 4, 284, 52) — single inline band fills the card:
+  //   icon | size5 temp | size2 condition + size2 H/L
+  // Icon leads on the far left, immediately before the current temp.
+  gfx.fillRoundRect(10, 4, 284, 52, 8, COL_SURFACE);
+  gfx.drawRoundRect(10, 4, 284, 52, 8, COL_BORDER);
+
+  // Icon far left, vertically centered in the 52px card (~14–16px tall).
+  const iconX = 16;
+  drawWeatherIcon(iconX, 22, STATE.weatherCode);
+  const tempX = iconX + 22;  // past icon box (~18) + gutter
+
+  let metaX = 100;
+  gfx.setTextSize(5);
+  gfx.setCursor(tempX, 10);
+  if (STATE.weatherTempC > -900) {
+    const tbuf = String(Math.round(STATE.weatherTempC));
+    gfx.setTextColor(COL_TEXT);
+    gfx.print(tbuf);
+    const tw = tbuf.length * 30;  // size5 advance
+    gfx.setTextSize(2);
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setCursor(tempX + tw, 12);
+    gfx.print('o');
+    metaX = tempX + tw + 20;  // past degree + clear gutter into meta column
+  } else {
+    gfx.setTextColor(COL_TEXT2);
+    gfx.print('--');
+    metaX = tempX + 2 * 30 + 16;
+  }
+
+  const metaMaxX = heroRight;  // full right edge — no trailing icon
+
+  // Condition (size2) — top of meta column, optically with upper temp.
+  {
+    const hasCond = !!STATE.weatherCondition;
+    const cond = hasCond ? STATE.weatherCondition : '--';
+    let avail = metaMaxX - metaX;
+    if (avail < 12) avail = 12;
+    let maxChars = Math.floor(avail / 12);  // size2 = 12px/char
+    if (maxChars > 14) maxChars = 14;
+    if (maxChars < 1) maxChars = 1;
+    const cbuf = cond.slice(0, maxChars);
+    gfx.setTextSize(2);
+    gfx.setTextColor(hasCond ? COL_TEXT : COL_TEXT2);
+    gfx.setCursor(metaX, 14);
+    gfx.print(cbuf);
+  }
+
+  // High / Low (size2) — "H 35  L 26", same column under condition.
+  {
+    const hStr = STATE.weatherHigh > -900 ? String(STATE.weatherHigh) : '--';
+    const lStr = STATE.weatherLow > -900 ? String(STATE.weatherLow) : '--';
+    gfx.setTextSize(2);
+    let x = metaX;
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setCursor(x, 36);
+    gfx.print('H ');           // label + space (2 cells)
+    x += 24;
+    gfx.setTextColor(COL_TEXT);
+    gfx.setCursor(x, 36);
+    gfx.print(hStr);
+    x += hStr.length * 12 + 18;  // value + inter-pair gap
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setCursor(x, 36);
+    gfx.print('L ');
+    x += 24;
+    gfx.setTextColor(COL_TEXT);
+    gfx.setCursor(x, 36);
+    gfx.print(lStr);
+  }
+
+  // ── Hourly (next 6) — no "HOURLY" label ──────────────────
+  gfx.fillRoundRect(10, 60, 284, 56, 8, COL_SURFACE);
+  gfx.drawRoundRect(10, 60, 284, 56, 8, COL_BORDER);
+
+  const hourCount = STATE.weatherHourly.length > 0
+    ? STATE.weatherHourly.length : WEATHER_HOURLY_N;
+  const slotW = 47;
+  for (let i = 0; i < hourCount && i < WEATHER_HOURLY_N; i++) {
+    const sx = 11 + i * slotW;
+    const cx = sx + Math.floor(slotW / 2);
+    const slot = STATE.weatherHourly[i];
+    const have = !!slot;
+    const hour = have ? slot.h : -1;
+    const temp = have ? slot.tempC : 0;
+    const code = have ? slot.code : -1;
+
+    if (i === 0) {
+      gfx.fillRoundRect(sx + 6, 62, slotW - 12, 2, 1, COL_ACCENT);
+    }
+
+    gfx.setTextSize(1);
+    gfx.setTextColor(i === 0 ? COL_ACCENT : COL_TEXT2);
+    const hbuf = (have && hour >= 0)
+      ? String(hour).padStart(2, '0') : '--';
+    gfx.setCursor(cx - 6, 66);
+    gfx.print(hbuf);
+
+    drawWeatherIcon(cx - 8, 78, code);
+
+    if (have) {
+      const tbuf = String(temp);
+      const tw = tbuf.length * 6;
+      gfx.setTextColor(COL_TEXT);
+      gfx.setCursor(cx - Math.floor(tw / 2), 102);
+      gfx.print(tbuf);
+    } else {
+      gfx.setTextColor(COL_TEXT2);
+      gfx.setCursor(cx - 6, 102);
+      gfx.print('--');
+    }
+  }
+
+  // ── 5-day — no "5-DAY" label; extra height → larger dayStep ─
+  gfx.fillRoundRect(10, 122, 284, 114, 8, COL_SURFACE);
+  gfx.drawRoundRect(10, 122, 284, 114, 8, COL_BORDER);
+
+  let minT = 100, maxT = -100;
+  for (const d of STATE.weatherDaily) {
+    if (d.low < minT) minT = d.low;
+    if (d.high > maxT) maxT = d.high;
+  }
+  if (maxT <= minT) { minT = 20; maxT = 40; }
+
+  // dayStep 22: 5×22 = 110 inside 114px card (was 15 in 78px).
+  const dayY0 = 126;
+  const dayStep = 22;
+  const barX = 96, barW = 150, barH = 6;
+  const dayCount = STATE.weatherDaily.length > 0
+    ? STATE.weatherDaily.length : WEATHER_DAILY_N;
+  for (let i = 0; i < dayCount && i < WEATHER_DAILY_N; i++) {
+    const y = dayY0 + i * dayStep;
+    const day = STATE.weatherDaily[i];
+    const have = !!day;
+    const wd = have ? day.wd : -1;
+    const lo = have ? day.low : 0;
+    const hi = have ? day.high : 0;
+    const code = have ? day.code : -1;
+
+    const textY = y + 7;
+    const barY = y + 8;
+    const iconY = y + 4;
+
+    gfx.setTextSize(1);
+    gfx.setTextColor(i === 0 ? COL_ACCENT : COL_TEXT);
+    gfx.setCursor(18, textY);
+    gfx.print((have && wd >= 0 && wd < 7) ? WDAYS[wd] : '---');
+
+    drawWeatherIcon(44, iconY, code);
+
+    const lbuf = have ? String(lo) : '--';
+    const hbuf = have ? String(hi) : '--';
+
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setCursor(barX - 6 - lbuf.length * 6, textY);
+    gfx.print(lbuf);
+
+    gfx.fillRoundRect(barX, barY, barW, barH, Math.floor(barH / 2), COL_TRACK);
+    if (have && maxT > minT) {
+      const span = maxT - minT;
+      let x0 = barX + Math.round((lo - minT) / span * barW);
+      let x1 = barX + Math.round((hi - minT) / span * barW);
+      if (x1 - x0 < barH) x1 = x0 + barH;
+      gfx.fillRoundRect(x0, barY, x1 - x0, barH, Math.floor(barH / 2), COL_ACCENT);
+    }
+
+    gfx.setTextColor(COL_TEXT);
+    gfx.setCursor(barX + barW + 6, textY);
+    gfx.print(hbuf);
+  }
 }
 
 function drawLongTrendPage() {
@@ -1703,6 +1977,13 @@ function loadRotation() {
   if (!Number.isNaN(v)) STATE.cfgScreenRotation = v;
 }
 
+function loadShowCountdown() {
+  const raw = localStorage.getItem(SHOW_COUNTDOWN_KEY);
+  if (raw === null) return;
+  // Default on when unset; only '0' turns it off (same as night_mode).
+  STATE.cfgShowCountdown = raw !== '0';
+}
+
 function render() {
   // Pixel shift: advance the orbit on the firmware's cadence, blank the panel
   // (the firmware's clearShiftMargins() edge strips), then draw the whole
@@ -1755,6 +2036,13 @@ function drawScreenContent() {
   if (STATE.settingsScreen === 'list') {
     drawSettingsList();
     document.getElementById('page-status').textContent = 'SETTINGS (list)';
+    return;
+  }
+  if (STATE.weatherPageOpen) {
+    drawWeatherPage();
+    // 5% right-edge padding (16px of 320px) always overlaid in black
+    gfx.fillRect(304, 0, 16, 240, '#000000');
+    document.getElementById('page-status').textContent = 'WEATHER (tap to close)';
     return;
   }
   // Offline mode also shows cats (with an OFFLINE banner on top) instead of a bare offline screen — mirrors
@@ -1815,13 +2103,31 @@ const MOCK = {
   limits: {
     tz: 'Asia/Bangkok',
     session: { percent: 27, resets: '03:19', resets_in_sec: 5400 },
-    week: { percent: 86, resets: 'Jul 9 at 04:59', resets_in_sec: 302400 },
-    week_model: { name: 'Fable', percent: 58, resets: 'Jul 16 at 04:59' },  // set null to test the hidden row
+    week: { percent: 86, resets: 'Jul 9, 04:59', resets_in_sec: 302400 },
+    week_model: { name: 'Fable', percent: 58, resets: 'Jul 16, 04:59' },  // set null to test the hidden row
     credits: { used: 0.41, limit: 10.0, percent: 4 },
   },
   context: { tokens: 80000, percent: 40 },
   btc: { price: 109432, changePct: 2.45 },
-  weather: { tempC: 34, code: 3 },
+  weather: {
+    tempC: 34, code: 3, high: 35, low: 26,
+    condition: 'Overcast', place: 'Bangkok',
+    hourly: [
+      { h: 17, tempC: 34, code: 3 },
+      { h: 18, tempC: 33, code: 2 },
+      { h: 19, tempC: 32, code: 0 },
+      { h: 20, tempC: 31, code: 0 },
+      { h: 21, tempC: 30, code: 0 },
+      { h: 22, tempC: 29, code: 2 },
+    ],
+    daily: [
+      { wd: 1, high: 35, low: 26, code: 51 },
+      { wd: 2, high: 35, low: 27, code: 95 },
+      { wd: 3, high: 35, low: 26, code: 95 },
+      { wd: 4, high: 34, low: 26, code: 95 },
+      { wd: 5, high: 32, low: 25, code: 51 },
+    ],
+  },
 };
 
 function generateMockCandles() {
@@ -1953,12 +2259,58 @@ function applyData(doc) {
     STATE.btcCandles = doc.btc_candles;
     STATE.btcCandleCount = STATE.btcCandles.length;
   }
-  if (doc.weather) {
-    STATE.weatherTempC = doc.weather.tempC ?? STATE.weatherTempC;
-    STATE.weatherCode = doc.weather.code ?? STATE.weatherCode;
-  }
+  if (doc.weather) applyWeatherData(doc.weather);
   STATE.lastFetchOkMs = performance.now();
   document.getElementById('raw-json').textContent = JSON.stringify(doc, null, 2);
+}
+
+// Mirrors the firmware's applyWeatherDoc + /weather.json SD cache (localStorage
+// is the simulator stand-in for the board's local weather DB).
+function applyWeatherData(w) {
+  if (!w) return;
+  if (w.tempC != null) STATE.weatherTempC = w.tempC;
+  if (w.code != null) STATE.weatherCode = w.code;
+  if (w.high != null) STATE.weatherHigh = Math.round(w.high);
+  if (w.low != null) STATE.weatherLow = Math.round(w.low);
+  if (w.condition != null) STATE.weatherCondition = w.condition;
+  if (w.place != null) STATE.weatherPlace = w.place;
+  if (Array.isArray(w.hourly)) {
+    STATE.weatherHourly = w.hourly.slice(0, WEATHER_HOURLY_N).map(h => ({
+      h: h.h ?? -1, tempC: Math.round(h.tempC ?? 0), code: h.code ?? -1,
+    }));
+  }
+  if (Array.isArray(w.daily)) {
+    STATE.weatherDaily = w.daily.slice(0, WEATHER_DAILY_N).map(d => ({
+      wd: d.wd ?? -1,
+      high: Math.round(d.high ?? 0),
+      low: Math.round(d.low ?? 0),
+      code: d.code ?? -1,
+    }));
+  }
+  saveWeatherCache();
+}
+
+function saveWeatherCache() {
+  try {
+    localStorage.setItem(LAST_WEATHER_KEY, JSON.stringify({
+      tempC: STATE.weatherTempC,
+      code: STATE.weatherCode,
+      high: STATE.weatherHigh > -900 ? STATE.weatherHigh : null,
+      low: STATE.weatherLow > -900 ? STATE.weatherLow : null,
+      condition: STATE.weatherCondition,
+      place: STATE.weatherPlace,
+      hourly: STATE.weatherHourly,
+      daily: STATE.weatherDaily,
+    }));
+  } catch { /* storage full/unavailable — cache is best-effort */ }
+}
+
+function loadWeatherCache() {
+  try {
+    const raw = localStorage.getItem(LAST_WEATHER_KEY);
+    if (!raw) return;
+    applyWeatherData(JSON.parse(raw));
+  } catch { /* ignore corrupt cache */ }
 }
 
 // The browser has no on-device NTP equivalent to the firmware's
@@ -2220,9 +2572,25 @@ canvas.addEventListener('click', (event) => {
     return;  // fully handled by the mousedown/mousemove/mouseup drag-scroll listeners below
   }
 
+  if (STATE.weatherPageOpen) {
+    // Any tap dismisses the Weather overlay — mirrors the firmware.
+    STATE.weatherPageOpen = false;
+    render();
+    return;
+  }
+
   if (!catMode && tx >= PULSE_HIT_X0 && tx < PULSE_HIT_X1 && ty >= PULSE_HIT_Y0 && ty < PULSE_HIT_Y1) {
     STATE.settingsScreen = 'list';
     STATE.settingsScrollOffset = 0;
+    render();
+    return;
+  }
+
+  if (!catMode && STATE.currentPage === 0 &&
+      tx >= WEATHER_HIT_X0 && tx < WEATHER_HIT_X1 &&
+      ty >= WEATHER_HIT_Y0 && ty < WEATHER_HIT_Y1) {
+    // Tap the status-page weather card → open Weather overlay.
+    STATE.weatherPageOpen = true;
     render();
     return;
   }
@@ -2261,11 +2629,13 @@ function tick() {
 setInterval(tick, 50);
 
 loadLongTrend();
+loadWeatherCache();
 loadBrightness();
 loadBootPage();
 loadCatShuffle();
 loadNightMode();
 loadRotation();
+loadShowCountdown();
 applyBrightnessFilter();
 render();
 fetchUsage();

@@ -31,7 +31,7 @@ static const char* const BRIGHTNESS_LABELS[5] = {"0%", "25%", "50%", "75%", "100
 // from each setting's apply().
 const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT] = {
   "brightness", "poll_interval_sec", "pixel_shift_min", "boot_page", "cat_shuffle_sec",
-  "night_mode_preset", "screen_rotation"
+  "night_mode_preset", "screen_rotation", "show_countdown"
 };
 
 void queueConfigSave(uint8_t keyId, int32_t value) {
@@ -142,6 +142,18 @@ static void applyRotation(int v) {
   queueConfigSave(CFGKEY_ROTATION, v);
 }
 
+// Show Countdown: green progress bars under the 5h/week usage bars on the
+// status/mixed limits card, plus the translucent pie wedge on the analog
+// clock (hour hand -> next 5h reset). The thin green reset hand on the clock
+// always stays when a reset time is known. Default ON.
+static const int SHOW_COUNTDOWN_VALUES[2] = {0, 1};
+static const char* const SHOW_COUNTDOWN_LABELS[2] = {"OFF", "ON"};
+static int getCurrentShowCountdown() { return cfgShowCountdown ? 1 : 0; }
+static void applyShowCountdown(int v) {
+  cfgShowCountdown = (v != 0);
+  queueConfigSave(CFGKEY_SHOW_COUNTDOWN, v);
+}
+
 static const SettingDef SETTINGS[] = {
   { "BRIGHTNESS", "BRIGHTNESS", "BACKLIGHT BRIGHTNESS", "TAP A LEVEL TO APPLY",
     5, 1, 5, BRIGHTNESS_VALUES, BRIGHTNESS_LABELS, 2, false,
@@ -170,8 +182,11 @@ static const SettingDef SETTINGS[] = {
   { "ROTATION", "ROTATION", "FOR UPSIDE-DOWN MOUNTING", "APPLIES IMMEDIATELY",
     2, 1, 2, ROTATION_VALUES, ROTATION_LABELS, 1, false,
     getCurrentRotation, applyRotation },
+  { "SHOW COUNTDOWN", "SHOW COUNTDOWN", "GREEN BARS + CLOCK WEDGE", "TAP TO TOGGLE",
+    2, 1, 2, SHOW_COUNTDOWN_VALUES, SHOW_COUNTDOWN_LABELS, 2, false,
+    getCurrentShowCountdown, applyShowCountdown },
 };
-const int SETTINGS_COUNT = 9;
+const int SETTINGS_COUNT = 10;
 
 static const int SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
 static const int SET_BTN_X0 = 11, SET_BTN_Y = 100, SET_BTN_W = 54, SET_BTN_H = 56;

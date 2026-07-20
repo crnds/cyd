@@ -253,7 +253,7 @@ flash storage for the scheme change to orphan.
 - **Hidden Settings area** (`settingsScreen`: `SET_OFF`/`SET_LIST`/`SET_LEAF`).
   Tapping an invisible hit-box over the footer's connection-status pulse dot
   (`PULSE_HIT_*`, only live on non-cat/non-offline pages) opens `SET_LIST`, a
-  paginated list of setting names (9 settings, 3 per page); tapping a row
+  paginated list of setting names (10 settings, scrollable); tapping a row
   opens `SET_LEAF`, a generic value-picker button grid for that one setting.
   Both screens, and every setting, are driven by one data table (`SettingDef
   SETTINGS[]`, plain function pointers — no `std::function`/virtual dispatch,
@@ -303,7 +303,9 @@ flash storage for the scheme change to orphan.
     0 = off), `boot_page` (0-7, which page `currentPage` starts on),
     `cat_shuffle_sec` (0-300, forces a cat GIF to rotate before its natural
     end; 0 = always play to the end), `night_mode_preset` (0/1, fixed
-    23:00-07:00 auto-dim to 25%). All of these except `wifi_ssid`/
+    23:00-07:00 auto-dim to 25%), `show_countdown` (0/1, default 1 — green
+    reset bars under 5h/week + analog clock timer wedge; green reset hand
+    always stays). All of these except `wifi_ssid`/
     `wifi_password`/`server_host`/`server_port`/the touch calibration keys
     are also settable at runtime from the on-device Settings area (see
     above) — lets a set-once board be retuned without reflashing or pulling

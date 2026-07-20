@@ -47,6 +47,7 @@ int longTrendCount = 0;  // valid entries, oldest at [0]; may be < LONG_TREND_DA
 
 int currentPage = 0;
 int cfgBootPage = 0;  // which page currentPage starts on; overridable via /config.json "boot_page"
+bool weatherPageOpen = false;  // Weather overlay (tap status-page weather card)
 SettingsScreen settingsScreen = SET_OFF;
 int settingsScrollOffset = 0;  // vertical scroll position (px) of the SET_LIST list
 int settingsLeafIndex = -1;  // index into SETTINGS[] currently open in SET_LEAF
@@ -93,6 +94,7 @@ int cfgBrightness = 200;   // 0-255 panel backlight; overridable via /config.jso
 // -- nightDimActive tracks whether the dim is currently applied, so
 // applyNightMode() can restore immediately if toggled off mid-dim.
 bool cfgNightModeOn = false;
+bool cfgShowCountdown = true;  // default on; /config.json "show_countdown"
 bool nightDimActive = false;
 // Generic Settings-page persistence queue: a leaf's apply() (loop(), core 1)
 // mutates its live global directly, then queues the /config.json key/value
@@ -255,6 +257,7 @@ void setup() {
     gfx.setBrightness(cfgBrightness);  // honor the /config.json override
     loadLongTrendFromSD();
     loadEnvCache();     // show last-known BTC/weather immediately, before any live fetch
+    loadWeatherCache(); // full Weather-page snapshot (hourly/daily) if present
     showBootSplash();   // optional /splash.bmp, briefly, before the WiFi spinner
     scanCats();         // index /cats/*.gif for the page-6 player
   } else {
@@ -342,6 +345,11 @@ void loop() {
     // Static page: no clock/session countdown to tick, no progress line, no
     // GIF playback -- drawn once on entry/change (see renderSettings() calls
     // inside handleSettingsTouch()), not on a periodic cadence.
+  } else if (weatherPageOpen) {
+    // Weather overlay is also static (forecast data only refreshes on the
+    // poll cadence via networkTask). Redraw only on pixel-shift so the anti-
+    // retention orbit still works while the page is open.
+    if (shiftDirty) render();
   } else if (catMode) {
     // Cats animate frame-by-frame; they own the whole screen (no footer or
     // poll-progress line) and need no 1s repaint.
@@ -411,11 +419,21 @@ void loop() {
       handleSettingsTouch(tx, ty, now, catMode);
     } else if (settingsScreen == SET_LIST) {
       settingsListDragBegin(tx, ty);  // resolved as a tap or a scroll on release, below
+    } else if (weatherPageOpen) {
+      // Any tap dismisses the Weather overlay back to the status page.
+      weatherPageOpen = false;
+      render();
     } else if (!catMode && tx >= PULSE_HIT_X0 && tx < PULSE_HIT_X1 &&
                ty >= PULSE_HIT_Y0 && ty < PULSE_HIT_Y1) {
       settingsScreen = SET_LIST;
       settingsScrollOffset = 0;
       renderSettings();
+    } else if (!catMode && currentPage == 0 &&
+               tx >= WEATHER_HIT_X0 && tx < WEATHER_HIT_X1 &&
+               ty >= WEATHER_HIT_Y0 && ty < WEATHER_HIT_Y1) {
+      // Tap the status-page weather card → open Weather overlay.
+      weatherPageOpen = true;
+      render();
     } else {
       bool isRight = (tx >= 152);
       if (isRight) {

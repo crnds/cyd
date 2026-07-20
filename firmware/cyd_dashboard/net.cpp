@@ -68,6 +68,63 @@ bool resolveServer() {
 }
 
 static const char* CACHE_PATH = "/last_usage.json";
+static const char* WEATHER_CACHE_PATH = "/weather.json";
+
+// Apply one weather object (live /api/usage or SD /weather.json) into STATE.
+// Caller must hold stateMutex. Keeps prior values when a field is absent so a
+// partial payload (old server, or last_env-style cache) never blanks the page.
+static void applyWeatherDoc(JsonObjectConst w) {
+  if (w.isNull()) return;
+  if (!w["tempC"].isNull()) STATE.weatherTempC = w["tempC"].as<float>();
+  if (!w["code"].isNull()) STATE.weatherCode = w["code"].as<int>();
+  // high/low may be JSON null when the provider omitted them — only write
+  // when the value is actually numeric.
+  if (w["high"].is<float>() || w["high"].is<int>() || w["high"].is<double>()) {
+    STATE.weatherHigh = (int)round(w["high"].as<double>());
+  }
+  if (w["low"].is<float>() || w["low"].is<int>() || w["low"].is<double>()) {
+    STATE.weatherLow = (int)round(w["low"].as<double>());
+  }
+  if (w["condition"].is<const char*>()) {
+    const char* c = w["condition"].as<const char*>();
+    if (c) {
+      strncpy(STATE.weatherCondition, c, sizeof(STATE.weatherCondition) - 1);
+      STATE.weatherCondition[sizeof(STATE.weatherCondition) - 1] = '\0';
+    }
+  }
+  if (w["place"].is<const char*>()) {
+    const char* p = w["place"].as<const char*>();
+    if (p) {
+      strncpy(STATE.weatherPlace, p, sizeof(STATE.weatherPlace) - 1);
+      STATE.weatherPlace[sizeof(STATE.weatherPlace) - 1] = '\0';
+    }
+  }
+  if (w["hourly"].is<JsonArrayConst>()) {
+    JsonArrayConst arr = w["hourly"].as<JsonArrayConst>();
+    uint8_t n = 0;
+    for (JsonObjectConst h : arr) {
+      if (n >= WEATHER_HOURLY_N) break;
+      STATE.weatherHourly[n].hour = (int8_t)(h["h"] | -1);
+      STATE.weatherHourly[n].tempC = (int8_t)round((double)(h["tempC"] | 0.0));
+      STATE.weatherHourly[n].code = (int16_t)(h["code"] | -1);
+      n++;
+    }
+    STATE.weatherHourlyCount = n;
+  }
+  if (w["daily"].is<JsonArrayConst>()) {
+    JsonArrayConst arr = w["daily"].as<JsonArrayConst>();
+    uint8_t n = 0;
+    for (JsonObjectConst d : arr) {
+      if (n >= WEATHER_DAILY_N) break;
+      STATE.weatherDaily[n].wday = (int8_t)(d["wd"] | -1);
+      STATE.weatherDaily[n].high = (int8_t)round((double)(d["high"] | 0.0));
+      STATE.weatherDaily[n].low = (int8_t)round((double)(d["low"] | 0.0));
+      STATE.weatherDaily[n].code = (int16_t)(d["code"] | -1);
+      n++;
+    }
+    STATE.weatherDailyCount = n;
+  }
+}
 
 // Parses one /api/usage payload into STATE. Shared by a live fetch and a
 // cached-on-SD read, so a stale card-backed copy renders identically to a
@@ -183,8 +240,7 @@ bool applyUsageJson(const String& payload) {
     }
   }
   if (!doc["weather"].isNull()) {
-    STATE.weatherTempC = doc["weather"]["tempC"] | STATE.weatherTempC;
-    STATE.weatherCode = doc["weather"]["code"] | STATE.weatherCode;
+    applyWeatherDoc(doc["weather"].as<JsonObjectConst>());
   }
 
   STATE.lastFetchOkMs = millis();
@@ -240,6 +296,65 @@ void loadEnvCache() {
   STATE.btcChangePct = doc["changePct"] | STATE.btcChangePct;
   STATE.weatherTempC = doc["tempC"] | STATE.weatherTempC;
   STATE.weatherCode = doc["code"] | STATE.weatherCode;
+  unlockState();
+}
+
+// Full Weather-page snapshot (current + 6h + 5d). SD is this board's local
+// DB — the project never mounts SPIFFS/LittleFS (huge_app partition, all
+// persistence is the card; see CLAUDE.md). Written once per successful
+// usage poll so the board's Poll Interval setting paces the refresh.
+static void saveWeatherCache() {
+  if (!STATE.sdOk) return;
+  lockState();
+  if (STATE.weatherTempC < -900 && STATE.weatherHourlyCount == 0) {
+    unlockState();
+    return;  // nothing useful to persist yet
+  }
+  JsonDocument doc;
+  doc["tempC"] = STATE.weatherTempC;
+  doc["code"] = STATE.weatherCode;
+  if (STATE.weatherHigh > -900) doc["high"] = STATE.weatherHigh;
+  if (STATE.weatherLow > -900) doc["low"] = STATE.weatherLow;
+  doc["condition"] = STATE.weatherCondition;
+  doc["place"] = STATE.weatherPlace;
+  JsonArray hourly = doc["hourly"].to<JsonArray>();
+  for (uint8_t i = 0; i < STATE.weatherHourlyCount; i++) {
+    JsonObject h = hourly.add<JsonObject>();
+    h["h"] = STATE.weatherHourly[i].hour;
+    h["tempC"] = STATE.weatherHourly[i].tempC;
+    h["code"] = STATE.weatherHourly[i].code;
+  }
+  JsonArray daily = doc["daily"].to<JsonArray>();
+  for (uint8_t i = 0; i < STATE.weatherDailyCount; i++) {
+    JsonObject d = daily.add<JsonObject>();
+    d["wd"] = STATE.weatherDaily[i].wday;
+    d["high"] = STATE.weatherDaily[i].high;
+    d["low"] = STATE.weatherDaily[i].low;
+    d["code"] = STATE.weatherDaily[i].code;
+  }
+  unlockState();
+
+  // Serialize outside the lock (string build can allocate); card write is
+  // under the caller's sdMutex (fetchUsage).
+  String payload;
+  serializeJson(doc, payload);
+  SD.remove(WEATHER_CACHE_PATH);
+  File f = SD.open(WEATHER_CACHE_PATH, FILE_WRITE);
+  if (f) {
+    f.print(payload);
+    f.close();
+  }
+}
+
+void loadWeatherCache() {
+  File f = SD.open(WEATHER_CACHE_PATH, FILE_READ);
+  if (!f) return;
+  String payload = f.readString();
+  f.close();
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return;
+  lockState();
+  applyWeatherDoc(doc.as<JsonObjectConst>());
   unlockState();
 }
 
@@ -330,6 +445,7 @@ bool fetchUsage() {
     }
     appendArchiveRow(doc);      // fine-grained per-poll history for later analysis
     saveEnvCache();             // refresh the BTC/weather cold-boot cache
+    saveWeatherCache();         // full Weather-page snapshot (paced by poll interval)
     unlockSD();
   }
 

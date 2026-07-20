@@ -169,6 +169,30 @@ const uint16_t COL_TRACK = 0x5ACB;   // neutral grey bar track
 const uint16_t COL_TRACK_BLACK = 0x0000; // pure-black bar track (reset-countdown bars)
 const uint16_t COL_BLUE = 0x3C1E;    // device-stats bar chart accent
 const uint16_t COL_YELLOW = 0xFFE0;  // yellow for sun/lightning icons
+// Weather page background — pure black (same as other pages' near-black COL_BG
+// family). Used only by drawWeatherPage.
+const uint16_t COL_WEATHER_BG = 0x0000;
+// Weather card hit-box on the status page (page 0): fillRoundRect(150,170,60,46).
+// Tap opens the Weather overlay (mirrors settings' PULSE_HIT_* pattern).
+const int WEATHER_HIT_X0 = 150, WEATHER_HIT_X1 = 210;
+const int WEATHER_HIT_Y0 = 170, WEATHER_HIT_Y1 = 216;
+
+// Weather forecast slots delivered by /api/usage (Mac-proxied Open-Meteo /
+// WeatherAPI) and cached on SD as /weather.json. Fixed-size arrays — no
+// String/heap churn on every poll.
+const int WEATHER_HOURLY_N = 6;
+const int WEATHER_DAILY_N = 5;
+struct WeatherHour {
+  int8_t hour = -1;   // 0-23 local; -1 = empty slot
+  int8_t tempC = 0;
+  int16_t code = -1;  // WMO weather_code
+};
+struct WeatherDay {
+  int8_t wday = -1;   // 0=Sun .. 6=Sat (tm_wday); -1 = empty
+  int8_t high = 0;
+  int8_t low = 0;
+  int16_t code = -1;
+};
 
 
 // ── STATE ──────────────────────────────────────────────────
@@ -216,6 +240,17 @@ struct UsageState {
   int btcCandleCount = 0;
   float weatherTempC = -999; // Bangkok temp (from the Mac via /api/usage); -999 = unknown
   int weatherCode = -1;      // WMO weather_code (from the Mac); -1 = unknown
+  // Weather page fields — same payload as the status card's temp/code, plus
+  // today's H/L, a short condition label, place name, next 6h, and next 5d.
+  // -999 / -1 / empty mean "not received yet" (show "--" / hide row).
+  int weatherHigh = -999;
+  int weatherLow = -999;
+  char weatherCondition[20] = "";
+  char weatherPlace[16] = "Bangkok";
+  WeatherHour weatherHourly[WEATHER_HOURLY_N];
+  uint8_t weatherHourlyCount = 0;
+  WeatherDay weatherDaily[WEATHER_DAILY_N];
+  uint8_t weatherDailyCount = 0;
   bool sdOk = false;
   int lastLoggedYday = -1;  // tm_yday of the last day appended to the SD log
   // Written by networkTask() (core 0) without stateMutex (see state.h's lock
@@ -238,6 +273,9 @@ extern int longTrendCount;
 // read by pages.cpp/settings.cpp/gif_player.cpp to know what's on screen.
 extern int currentPage;
 extern int cfgBootPage;
+// Weather detail overlay (opened by tapping the weather card on page 0).
+// Not a swipe-cycle page — same pattern as settingsScreen: any tap exits.
+extern bool weatherPageOpen;
 enum SettingsScreen { SET_OFF, SET_LIST, SET_LEAF };
 extern SettingsScreen settingsScreen;
 extern int settingsScrollOffset;  // vertical scroll position (px) of the SET_LIST list
@@ -311,6 +349,9 @@ extern int cfgBrightness;
 extern bool cfgNightModeOn;
 extern bool nightDimActive;
 const uint8_t NIGHT_MODE_DIM_VALUE = 64;  // ~25%, matches the brightness preset
+// Green reset-countdown bars (under 5h/week) + analog-clock timer wedge.
+// Green reset hand on the clock is always drawn when a reset is known.
+extern bool cfgShowCountdown;
 extern int cfgScreenRotation;
 extern int cfgTouchXMin;
 extern int cfgTouchXMax;
@@ -332,7 +373,7 @@ extern volatile bool pendingForgetWifi;
 // sd_store.cpp's saveIntConfigToSD and settings.cpp's queueConfigSave).
 enum ConfigKeyId {
   CFGKEY_BRIGHTNESS = 0, CFGKEY_POLL_INTERVAL, CFGKEY_PIXEL_SHIFT, CFGKEY_BOOT_PAGE,
-  CFGKEY_CAT_SHUFFLE, CFGKEY_NIGHT_MODE, CFGKEY_ROTATION, CFGKEY_COUNT
+  CFGKEY_CAT_SHUFFLE, CFGKEY_NIGHT_MODE, CFGKEY_ROTATION, CFGKEY_SHOW_COUNTDOWN, CFGKEY_COUNT
 };
 extern const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT];
 
@@ -341,6 +382,7 @@ String fmtTokens(int64_t t);
 String fmtCost(float c);
 String fmtBtc(double p);
 String fmtCountdown(long sec);
+String fmtCountdownDHM(long sec);
 String fmtKB(uint32_t bytes);
 String fmtGB(uint64_t bytes);
 int flashPercent(uint32_t &usedOut, uint32_t &totalOut);
@@ -354,6 +396,7 @@ bool resolveServer();
 bool fetchUsage();
 bool loadCachedUsage();
 void loadEnvCache();
+void loadWeatherCache();
 bool applyUsageJson(const String& payload);
 // Set false by networkTask() (cyd_dashboard.ino) on WiFi loss, so ensureMdns()
 // re-initializes once WiFi returns.
