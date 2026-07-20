@@ -22,8 +22,8 @@ struct SettingDef {
   void (*apply)(int value);   // live mutation + queues SD persistence
 };
 
-static const int BRIGHTNESS_VALUES[5] = {0, 64, 128, 191, 255};
-static const char* const BRIGHTNESS_LABELS[5] = {"0%", "25%", "50%", "75%", "100%"};
+static const int BRIGHTNESS_VALUES[6] = {0, 13, 64, 128, 191, 255};
+static const char* const BRIGHTNESS_LABELS[6] = {"0%", "5%", "25%", "50%", "75%", "100%"};
 
 // Config keys persisted through the generic queue (see pendingConfigSave in
 // state.h and sd_store.cpp's saveIntConfigToSD()/cyd_dashboard.ino's
@@ -118,6 +118,7 @@ static void applyNightMode(int v) {
   cfgNightModeOn = (v != 0);
   if (!cfgNightModeOn && nightDimActive) {
     gfx.setBrightness(cfgBrightness);  // restore immediately if toggled off mid-dim
+    applyUiPalette(false);             // restore day chrome (was red monochrome)
     nightDimActive = false;
   }
   queueConfigSave(CFGKEY_NIGHT_MODE, v);
@@ -156,7 +157,7 @@ static void applyShowCountdown(int v) {
 
 static const SettingDef SETTINGS[] = {
   { "BRIGHTNESS", "BRIGHTNESS", "BACKLIGHT BRIGHTNESS", "TAP A LEVEL TO APPLY",
-    5, 1, 5, BRIGHTNESS_VALUES, BRIGHTNESS_LABELS, 2, false,
+    3, 2, 6, BRIGHTNESS_VALUES, BRIGHTNESS_LABELS, 2, false,
     getCurrentBrightness, applyBrightness },
   { "POLL INTERVAL", "POLL INTERVAL", "HOW OFTEN TO FETCH /API/USAGE", "TAP A RATE TO APPLY",
     5, 1, 5, POLL_VALUES, POLL_LABELS, 2, false,
@@ -176,7 +177,7 @@ static const SettingDef SETTINGS[] = {
   { "CAT SHUFFLE", "CAT SHUFFLE", "HOW LONG EACH CAT GIF PLAYS", "TAP A RATE TO APPLY",
     4, 1, 4, CAT_SHUFFLE_VALUES, CAT_SHUFFLE_LABELS, 2, false,
     getCurrentCatShuffle, applyCatShuffle },
-  { "NIGHT MODE", "NIGHT MODE", "23:00-07:00, DIMS TO 25%", "TAP TO TOGGLE",
+  { "NIGHT MODE", "NIGHT MODE", "23:00-07:00 DIM+RED UI", "TAP TO TOGGLE",
     2, 1, 2, NIGHT_MODE_VALUES, NIGHT_MODE_LABELS, 2, false,
     getCurrentNightMode, applyNightMode },
   { "ROTATION", "ROTATION", "FOR UPSIDE-DOWN MOUNTING", "APPLIES IMMEDIATELY",

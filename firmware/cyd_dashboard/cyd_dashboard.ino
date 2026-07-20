@@ -309,7 +309,8 @@ void loop() {
 
   // Night mode: applies regardless of page/catMode/settings state, on its
   // own 1s timer (decoupled from the render cadence below, which is skipped
-  // in catMode/settings). Only calls setBrightness() on a transition edge.
+  // in catMode/settings). On each transition edge: dim/restore brightness
+  // AND swap the UI palette to/from red monochrome (applyUiPalette).
   if (cfgNightModeOn) {
     static uint32_t lastNightCheckMs = 0;
     if (now - lastNightCheckMs >= 1000) {
@@ -319,10 +320,18 @@ void loop() {
         bool inWindow = (ti.tm_hour >= 23 || ti.tm_hour < 7);
         if (inWindow && !nightDimActive) {
           gfx.setBrightness(NIGHT_MODE_DIM_VALUE);
+          applyUiPalette(true);
           nightDimActive = true;
+          // Force a full redraw so the new palette is visible immediately
+          // (settings/weather are static otherwise; normal pages wait ≤1s).
+          if (settingsScreen != SET_OFF) renderSettings();
+          else if (!catMode) render();
         } else if (!inWindow && nightDimActive) {
           gfx.setBrightness(cfgBrightness);
+          applyUiPalette(false);
           nightDimActive = false;
+          if (settingsScreen != SET_OFF) renderSettings();
+          else if (!catMode) render();
         }
       }
     }

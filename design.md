@@ -385,7 +385,7 @@ Table-driven `SettingDef SETTINGS[]` (10 entries) with function pointers (no `st
 | Restart | destructive confirm-arm (~4s) |
 | Forget WiFi | `pendingForgetWifi` → erase strings on SD → restart |
 | Cat Shuffle | `cat_shuffle_sec` |
-| Night Mode | `night_mode_preset` (23:00–07:00 → 25% dim) |
+| Night Mode | `night_mode_preset` (23:00–07:00 → 25% dim **+ red monochrome UI** via `applyUiPalette`) |
 | Rotation | `screen_rotation` 1/3 live (touch tracks LovyanGFX convert) |
 | Show Countdown | `show_countdown` |
 
@@ -645,7 +645,7 @@ Weather icon selection is **code-bucketed** from Open-Meteo/WeatherAPI weather c
 | Session countdown wedge | Analog clock | `COL_GOOD_50` arc from now → reset; green reset hand always if known |
 | Hourly flash | Full white edge flash | Even/odd second at hour boundary (`checkHourlyFlash`) |
 | Pixel-shift orbit | Whole frame blit | Configurable minutes per step; 0 = off; blanks exposed margins |
-| Night mode | Backlight | Fixed 23:00–07:00 → ~25% brightness when preset on |
+| Night mode | Backlight + palette | Fixed 23:00–07:00 → ~25% brightness **and** red monochrome UI (`applyUiPalette(true)` swaps all `COL_*` to pure-red RGB565; day palette restored on exit) |
 | Touch border flash | Page change | Brief white L/R edges thickness T |
 | Confirm arm | Destructive leaf | Recolor WARN + “TAP AGAIN” for 4 s |
 
