@@ -143,7 +143,6 @@ static JsonDocument usageFilter() {
   f["limits"]["credits"] = true;
   f["context"] = true;
   f["btc"] = true;
-  f["btc_candles"] = true;
   f["weather"] = true;
   f["today"] = true;  // needed by appendArchiveRow's caller (fetchUsage)
   f["active_now"] = true;
@@ -224,20 +223,6 @@ bool applyUsageJson(const String& payload) {
     double p = doc["btc"]["price"] | -1.0;
     if (p > 0) STATE.btcPrice = p;
     STATE.btcChangePct = doc["btc"]["changePct"] | STATE.btcChangePct;
-  }
-  if (!doc["btc_candles"].isNull()) {
-    JsonArray arr = doc["btc_candles"].as<JsonArray>();
-    STATE.btcCandleCount = 0;
-    for (JsonArray candle : arr) {
-      if (STATE.btcCandleCount >= CANDLE_COUNT) break;
-      CandleRec& rec = STATE.btcCandles[STATE.btcCandleCount];
-      rec.openEpoch = candle[0].as<uint32_t>();
-      rec.o = candle[1].as<float>();
-      rec.h = candle[2].as<float>();
-      rec.l = candle[3].as<float>();
-      rec.c = candle[4].as<float>();
-      STATE.btcCandleCount++;
-    }
   }
   if (!doc["weather"].isNull()) {
     applyWeatherDoc(doc["weather"].as<JsonObjectConst>());

@@ -50,7 +50,6 @@ STATE = {
     "limits": None,     # latest plan-limit snapshot from the OAuth usage endpoint
     "context": None,    # {tokens, ts} — newest assistant event's context size
     "btc": None,        # {price, changePct} from Binance — fetched here so the board needs no TLS
-    "btc_candles": None, # [ [t, o, h, l, c], ... ] 288 5-minute candles
     # Bangkok weather for the status card + Weather page: current + next-6h
     # hourly + next-5d daily, fetched here so the board needs no TLS.
     "weather": None,
@@ -341,23 +340,6 @@ def fetch_btc():
     return {"price": price, "changePct": change_pct} if price > 0 else None
 
 
-def fetch_btc_klines():
-    url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=288"
-    req = urllib.request.Request(url, headers={"User-Agent": "cydusage"})
-    with urllib.request.urlopen(req, timeout=8) as resp:
-        data = json.loads(resp.read())
-    candles = []
-    for item in data:
-        candles.append([
-            int(item[0]) // 1000,
-            float(item[1]),
-            float(item[2]),
-            float(item[3]),
-            float(item[4])
-        ])
-    return candles
-
-
 def load_weather_api_key():
     # secrets.local.json lives in the repo root (one level up from server/).
     # Read once at import time rather than on every fetch_weather() call.
@@ -593,10 +575,9 @@ def market_loop():
     # BTC on a ~10s cadence, weather every 10 min. Each keeps its last good value
     # on failure so a transient outage doesn't blank the board's tiles.
     last_weather = 0.0
-    last_candles = 0.0
 
     def body():
-        nonlocal last_weather, last_candles
+        nonlocal last_weather
         try:
             btc = fetch_btc()
             if btc:
@@ -604,14 +585,6 @@ def market_loop():
         except Exception as e:
             log_err(f"market_loop btc: {type(e).__name__}: {e}")
         now = time.time()
-        if now - last_candles >= 30:
-            last_candles = now
-            try:
-                candles = fetch_btc_klines()
-                if candles:
-                    STATE["btc_candles"] = candles
-            except Exception as e:
-                log_err(f"market_loop candles: {type(e).__name__}: {e}")
         if now - last_weather >= WEATHER_INTERVAL_SEC:
             last_weather = now
             try:
@@ -979,7 +952,6 @@ def build_report():
                      "percent": round(ctx["tokens"] / CONTEXT_WINDOW_TOKENS * 100)}
                     if ctx else None),
         "btc": STATE["btc"],
-        "btc_candles": STATE["btc_candles"],
         "weather": STATE["weather"],
         "clients": clients,
     }

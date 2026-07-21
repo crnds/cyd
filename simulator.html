@@ -224,7 +224,7 @@ pre {
 <script>
 // ── CONSTANTS (mirroring cyd_dashboard.ino) ───────────────
 const POLL_DEFAULT_MS = 20000;
-const PAGE_COUNT = 9;
+const PAGE_COUNT = 8;
 const GIF_PAGE = 6;   // 7th page: random cat GIFs on the device (stand-in here — see drawGifPage)
 const MIXED_PAGE = 7; // 8th page: status + cats split
 
@@ -492,8 +492,6 @@ const COL_SHINE_HI  = 'rgb(214,247,214)'; // 0xD7BA ~80% to white (shine band ce
 const COL_WARN    = 'rgb(255,24,49)';   // 0xF8C6
 const COL_TRACK   = 'rgb(90,89,90)';    // 0x5ACB neutral grey track
 const COL_TRACK_BLACK = 'rgb(0,0,0)';   // 0x0000 pure-black track (reset-countdown bars)
-const COL_GOOD_DIM = 'rgb(20,140,32)';  // 0x1462 dim green
-const COL_BAD_DIM  = 'rgb(148,36,32)';  // 0x9124 dim red
 // Weather page background — pure black. 0x0000. Reserved; weather overlay uses COL_BG.
 const COL_WEATHER_BG = 'rgb(0,0,0)';
 
@@ -525,8 +523,6 @@ const STATE = {
                           // (fetched by the Mac), same as the firmware -- not fetched
                           // directly from Binance here (see applyData()).
   btcChangePct: NaN,
-  btcCandles: [],
-  btcCandleCount: 0,
   weatherTempC: -999,     // Bangkok current temp; -999 = not received yet (see above)
   weatherCode: -1,        // WMO weather_code; -1 = not received yet (see above)
   weatherHigh: -999,
@@ -1600,144 +1596,6 @@ function drawDevicePage() {
                      sdColor);
 }
 
-function drawBtcChart() {
-  const SCREEN_W      = 320;
-  const PAD_RIGHT     = 20;
-  const CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
-  const CANDLE_COUNT  = 288;
-  const CHART_X0 = CONTENT_RIGHT - CANDLE_COUNT - 2;  // 10
-  const CHART_Y0 = 84;
-  const CHART_H  = 128;
-
-  gfx.drawRect(CHART_X0 - 2, CHART_Y0 - 2, CANDLE_COUNT + 4, CHART_H + 4, COL_BORDER);
-
-  const n = STATE.btcCandleCount;
-  if (!n) return;
-
-  let rangeMin = 1e18, rangeMax = -1e18;
-  let haveRange = false;
-  for (let i = 0; i < n; i++) {
-    const r = STATE.btcCandles[i];
-    if (!r || r[0] === 0) continue;
-    const l = r[3];
-    const h = r[2];
-    if (l < rangeMin) rangeMin = l;
-    if (h > rangeMax) rangeMax = h;
-    haveRange = true;
-  }
-  if (!haveRange) return;
-  let span = rangeMax - rangeMin;
-  if (span < 1.0) span = 1.0;
-
-  for (let i = 0; i < n; i++) {
-    const r = STATE.btcCandles[i];
-    if (!r || r[0] === 0) continue;
-    const x = CHART_X0 + i;
-    const o = r[1];
-    const h = r[2];
-    const l = r[3];
-    const c = r[4];
-    const bull = c >= o;
-
-    const priceToY = (p) => {
-      const f = (p - rangeMin) / span;
-      let y = CHART_Y0 + CHART_H - 1 - Math.floor(f * (CHART_H - 1));
-      if (y < CHART_Y0) y = CHART_Y0;
-      if (y > CHART_Y0 + CHART_H - 1) y = CHART_Y0 + CHART_H - 1;
-      return y;
-    };
-
-    let yH = priceToY(h);
-    let yL = priceToY(l);
-    if (yL < yH) { const tmp = yH; yH = yL; yL = tmp; }
-    gfx.drawFastVLine(x, yH, yL - yH + 1, bull ? COL_GOOD_DIM : COL_BAD_DIM);
-
-    let yO = priceToY(o);
-    let yC = priceToY(c);
-    let yTop = Math.min(yO, yC);
-    let bodyLen = Math.max(yO, yC) - yTop + 1;
-    gfx.drawFastVLine(x, yTop, bodyLen, bull ? COL_GOOD : COL_WARN);
-  }
-
-  gfx.setTextColor(COL_TEXT2);
-  gfx.setTextSize(1);
-  gfx.setCursor(CHART_X0 + 2, CHART_Y0 + 1);
-  gfx.print(fmtBtc(rangeMax));
-  gfx.setCursor(CHART_X0 + 2, CHART_Y0 + CHART_H - 9);
-  gfx.print(fmtBtc(rangeMin));
-}
-
-function drawBtcPriceRow() {
-  const SCREEN_W      = 320;
-  const PAD_RIGHT     = 20;
-  const CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
-
-  gfx.setTextSize(4);
-  if (STATE.btcPrice <= 0) {
-    gfx.setTextColor(COL_TEXT2);
-    gfx.setCursor(4, 34);
-    gfx.print('$--');
-  } else {
-    const priceStr = '$' + fmtBtc(STATE.btcPrice);
-    let x = CONTENT_RIGHT - gfx.textWidth(priceStr);
-    if (x < 4) x = 4;
-    gfx.setTextColor(COL_TEXT);
-    gfx.setCursor(x, 34);
-    gfx.print(priceStr);
-  }
-
-  gfx.setTextSize(2);
-  if (Number.isNaN(STATE.btcChangePct)) {
-    gfx.setTextColor(COL_TEXT2);
-    gfx.setCursor(4, 62);
-    gfx.print('--');
-  } else {
-    const s = (STATE.btcChangePct >= 0 ? '+' : '') + STATE.btcChangePct.toFixed(2) + '%';
-    let x = CONTENT_RIGHT - gfx.textWidth(s);
-    if (x < 4) x = 4;
-    gfx.setTextColor(STATE.btcChangePct >= 0 ? COL_GOOD : COL_WARN);
-    gfx.setCursor(x, 62);
-    gfx.print(s);
-  }
-}
-
-function drawBtcTickerPage() {
-  const SCREEN_W      = 320;
-  const PAD_RIGHT     = 20;
-  const CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
-
-  const bkk = bangkokParts();
-
-  gfx.setTextSize(2);
-  gfx.setCursor(4, 4);
-  if (bkk) {
-    gfx.setTextColor(COL_TEXT);
-    gfx.print(bkk.hour + ':' + bkk.minute + ':' + bkk.second);
-
-    gfx.setTextColor(COL_TEXT2);
-    gfx.setTextSize(1);
-    gfx.setCursor(100, 10);
-    gfx.print(bkk.weekday + ' ' + bkk.day + ' ' + bkk.month);
-  } else {
-    gfx.setTextColor(COL_TEXT2);
-    gfx.print('--:--:--');
-  }
-
-  // status dots, right-aligned
-  gfx.fillCircle(CONTENT_RIGHT - 4, 12, 4, STATE.wifiOk ? COL_GOOD : COL_WARN);
-
-  let freshColor = COL_WARN;
-  if (STATE.lastFetchOkMs !== 0) {
-    const age = performance.now() - STATE.lastFetchOkMs;
-    if (age <= 25000) freshColor = COL_GOOD;
-    else if (age <= 60000) freshColor = COL_ACCENT;
-  }
-  gfx.fillCircle(CONTENT_RIGHT - 20, 12, 4, freshColor);
-
-  drawBtcPriceRow();
-  drawBtcChart();
-}
-
 // "OFFLINE" banner overlaid on top of whatever page 8 is already showing —
 // mirrors the firmware's drawOfflineBanner(). A solid bar behind the text
 // keeps it legible over a busy GIF frame on the real device.
@@ -2072,15 +1930,13 @@ function drawScreenContent() {
     case 3: drawDevicePage(); break;
     case 4: drawLongTrendPage(); break;
     case 5: drawLimitsPage(); break;    // /usage-style limits panel
-    case 8: drawBtcTickerPage(); break;
   }
   drawFooter();
-  
+
   // 5% right-edge padding (16px of 320px) always overlaid in black
   gfx.fillRect(304, 0, 16, 240, '#000000');
-  
+
   let label = 'page ' + (STATE.currentPage + 1) + '/' + PAGE_COUNT;
-  if (STATE.currentPage === 8) label += ' (BTC ticker)';
   document.getElementById('page-status').textContent = label;
 }
 
@@ -2129,24 +1985,6 @@ const MOCK = {
     ],
   },
 };
-
-function generateMockCandles() {
-  const candles = [];
-  let basePrice = 109000;
-  let t = Math.floor(Date.now() / 1000) - 288 * 300;
-  for (let i = 0; i < 288; i++) {
-    const change = (Math.random() - 0.48) * 400;
-    const open = basePrice;
-    const close = basePrice + change;
-    const high = Math.max(open, close) + Math.random() * 150;
-    const low = Math.min(open, close) - Math.random() * 150;
-    candles.push([t, open, high, low, close]);
-    basePrice = close;
-    t += 300;
-  }
-  return candles;
-}
-MOCK.btc_candles = generateMockCandles();
 
 // Mirrors the firmware's SD-backed daily log, using localStorage as the
 // simulator's stand-in for the on-device CSV (per the root CLAUDE.md's
@@ -2254,10 +2092,6 @@ function applyData(doc) {
   if (doc.btc && doc.btc.price > 0) {
     STATE.btcPrice = doc.btc.price;
     STATE.btcChangePct = doc.btc.changePct ?? STATE.btcChangePct;
-  }
-  if (doc.btc_candles) {
-    STATE.btcCandles = doc.btc_candles;
-    STATE.btcCandleCount = STATE.btcCandles.length;
   }
   if (doc.weather) applyWeatherData(doc.weather);
   STATE.lastFetchOkMs = performance.now();
