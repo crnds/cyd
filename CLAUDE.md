@@ -303,7 +303,7 @@ flash storage for the scheme change to orphan.
     0 = off), `boot_page` (0-7, which page `currentPage` starts on),
     `cat_shuffle_sec` (0-300, forces a cat GIF to rotate before its natural
     end; 0 = always play to the end), `night_mode_preset` (0/1, fixed
-    23:00-07:00 auto-dim to 25% + red monochrome UI palette), `show_countdown` (0/1, default 1 — green
+    23:00-07:00 auto-dim to 25%), `show_countdown` (0/1, default 1 — green
     reset bars under 5h/week + analog clock timer wedge; green reset hand
     always stays). All of these except `wifi_ssid`/
     `wifi_password`/`server_host`/`server_port`/the touch calibration keys

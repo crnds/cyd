@@ -63,12 +63,6 @@ header p { color: var(--text2); font-size: 13px; margin-top: 4px; }
   border-radius: 4px;
   cursor: pointer;
   image-rendering: pixelated;
-  /* content-box (overriding the global border-box reset): the canvas's
-     width/height attributes are the true 320x240 pixel grid the firmware
-     draws to. Under border-box the 3px border would eat into that grid,
-     squeezing/clipping content near the edges — breaking the simulator's
-     job of predicting what fits on the real 320px-wide screen. */
-  box-sizing: content-box;
 }
 
 /* ── control panel ── */
@@ -330,9 +324,8 @@ function applyCatShuffle(v) {
   localStorage.setItem(CAT_SHUFFLE_KEY, String(v));
 }
 
-// Night mode: fixed 23:00-07:00 schedule — dims to 25% AND swaps the UI
-// palette to red monochrome (applyUiPalette). Mirrors the firmware's
-// cfgNightModeOn/nightDimActive/NIGHT_MODE_DIM_VALUE/applyUiPalette.
+// Night mode: fixed 23:00-07:00 schedule, dims to a fixed 25% while active --
+// mirrors the firmware's cfgNightModeOn/nightDimActive/NIGHT_MODE_DIM_VALUE.
 // bangkokParts() is this simulator's getLocalTime() stand-in (no DST, fixed
 // UTC+7, matching GMT_OFFSET_SEC), checked once/sec from tick() below.
 let nightDimActive = false;
@@ -342,10 +335,8 @@ function applyNightMode(v) {
   STATE.cfgNightModeOn = v !== 0;
   localStorage.setItem(NIGHT_MODE_KEY, String(v));
   if (!STATE.cfgNightModeOn && nightDimActive) {
-    applyUiPalette(false);        // restore day chrome
-    applyBrightnessFilter();      // restore brightness filter
+    applyBrightnessFilter();  // restore immediately if toggled off mid-dim
     nightDimActive = false;
-    render();
   }
 }
 function checkNightMode() {
@@ -358,15 +349,11 @@ function checkNightMode() {
   const hour = parseInt(bkk.hour, 10);
   const inWindow = hour >= 23 || hour < 7;
   if (inWindow && !nightDimActive) {
-    applyUiPalette(true);
     canvas.style.filter = 'brightness(25%)';
     nightDimActive = true;
-    render();
   } else if (!inWindow && nightDimActive) {
-    applyUiPalette(false);
     applyBrightnessFilter();
     nightDimActive = false;
-    render();
   }
 }
 
@@ -419,8 +406,8 @@ function applyBootPage(v) {
 
 const SETTINGS = [
   { label: 'BRIGHTNESS', leafTitle: 'BRIGHTNESS', subtitle: 'BACKLIGHT BRIGHTNESS',
-    hint: 'TAP A LEVEL TO APPLY', cols: 3, rows: 2, count: 6,
-    values: [0, 13, 64, 128, 191, 255], valueLabels: ['0%', '5%', '25%', '50%', '75%', '100%'],
+    hint: 'TAP A LEVEL TO APPLY', cols: 5, rows: 1, count: 5,
+    values: [0, 64, 128, 191, 255], valueLabels: ['0%', '25%', '50%', '75%', '100%'],
     btnTextSize: 2, destructive: false,
     getCurrent: getCurrentBrightness, apply: applyBrightness },
   { label: 'POLL INTERVAL', leafTitle: 'POLL INTERVAL', subtitle: 'HOW OFTEN TO FETCH /API/USAGE',
@@ -454,7 +441,7 @@ const SETTINGS = [
     values: [0, 5, 10, 30], valueLabels: ['OFF', '5s', '10s', '30s'],
     btnTextSize: 2, destructive: false,
     getCurrent: getCurrentCatShuffle, apply: applyCatShuffle },
-  { label: 'NIGHT MODE', leafTitle: 'NIGHT MODE', subtitle: '23:00-07:00 DIM+RED UI',
+  { label: 'NIGHT MODE', leafTitle: 'NIGHT MODE', subtitle: '23:00-07:00, DIMS TO 25%',
     hint: 'TAP TO TOGGLE', cols: 2, rows: 1, count: 2,
     values: [0, 1], valueLabels: ['OFF', 'ON'],
     btnTextSize: 2, destructive: false,
@@ -489,97 +476,26 @@ const TOTAL_RAM_BYTES = 327680;
 const SD_USED_BYTES = 2483027968;
 const SD_TOTAL_BYTES = 7948206080;
 
-// Active UI palette (RGB888 mirrors of firmware RGB565). Mutable so night
-// mode can swap to red monochrome — twin of pages.cpp applyUiPalette.
-const DAY_PALETTE = {
-  COL_BG: 'rgb(8,8,8)',              // 0x0841
-  COL_SURFACE: 'rgb(8,8,8)',         // 0x0841
-  COL_BORDER: 'rgb(58,57,58)',       // 0x39C7
-  COL_TEXT: 'rgb(255,255,255)',      // 0xFFFF
-  COL_TEXT2: 'rgb(156,154,156)',     // 0x9CD3
-  COL_ACCENT: 'rgb(255,97,66)',      // 0xFB08
-  COL_BLUE: 'rgb(58,130,247)',       // 0x3C1E
-  COL_YELLOW: 'rgb(255,255,0)',      // 0xFFE0
-  COL_GOOD: 'rgb(33,206,66)',        // 0x2668
-  COL_SHINE_LO: 'rgb(90,219,115)',   // 0x5ECE
-  COL_SHINE_MID: 'rgb(148,231,165)', // 0x9734
-  COL_SHINE_HI: 'rgb(214,247,214)',  // 0xD7BA
-  COL_WARN: 'rgb(255,24,49)',        // 0xF8C6
-  COL_TRACK: 'rgb(90,89,90)',        // 0x5ACB
-  COL_TRACK_BLACK: 'rgb(0,0,0)',     // 0x0000
-  COL_GOOD_DIM: 'rgb(20,140,32)',    // 0x1462
-  COL_BAD_DIM: 'rgb(148,36,32)',     // 0x9124
-  COL_WEATHER_BG: 'rgb(0,0,0)',      // 0x0000
-  COL_GOOD_50: 'rgba(33,206,66,0.5)', // day timer wedge (alpha blend)
-};
-// Night: pure red channel hierarchy (G=B=0) — scotopic-friendly red UI.
-const NIGHT_PALETTE = {
-  COL_BG: 'rgb(0,0,0)',              // 0x0000
-  COL_SURFACE: 'rgb(0,0,0)',
-  COL_BORDER: 'rgb(128,0,0)',        // 0x8000
-  COL_TEXT: 'rgb(255,0,0)',          // 0xF800
-  COL_TEXT2: 'rgb(192,0,0)',         // 0xC000
-  COL_ACCENT: 'rgb(255,0,0)',        // 0xF800
-  COL_BLUE: 'rgb(176,0,0)',          // 0xB000
-  COL_YELLOW: 'rgb(255,0,0)',        // 0xF800
-  COL_GOOD: 'rgb(208,0,0)',          // 0xD000
-  COL_SHINE_LO: 'rgb(160,0,0)',      // 0xA000
-  COL_SHINE_MID: 'rgb(200,0,0)',     // 0xC800
-  COL_SHINE_HI: 'rgb(255,0,0)',      // 0xF800
-  COL_WARN: 'rgb(255,0,0)',
-  COL_TRACK: 'rgb(72,0,0)',          // 0x4800
-  COL_TRACK_BLACK: 'rgb(0,0,0)',
-  COL_GOOD_DIM: 'rgb(128,0,0)',
-  COL_BAD_DIM: 'rgb(192,0,0)',
-  COL_WEATHER_BG: 'rgb(0,0,0)',
-  COL_GOOD_50: 'rgba(96,0,0,0.5)',   // night timer wedge
-};
-
-let COL_BG = DAY_PALETTE.COL_BG;
-let COL_SURFACE = DAY_PALETTE.COL_SURFACE;
-let COL_BORDER = DAY_PALETTE.COL_BORDER;
-let COL_TEXT = DAY_PALETTE.COL_TEXT;
-let COL_TEXT2 = DAY_PALETTE.COL_TEXT2;
-let COL_ACCENT = DAY_PALETTE.COL_ACCENT;
-let COL_BLUE = DAY_PALETTE.COL_BLUE;
-let COL_YELLOW = DAY_PALETTE.COL_YELLOW;
-let COL_GOOD = DAY_PALETTE.COL_GOOD;
-let COL_SHINE_LO = DAY_PALETTE.COL_SHINE_LO;
-let COL_SHINE_MID = DAY_PALETTE.COL_SHINE_MID;
-let COL_SHINE_HI = DAY_PALETTE.COL_SHINE_HI;
-let COL_WARN = DAY_PALETTE.COL_WARN;
-let COL_TRACK = DAY_PALETTE.COL_TRACK;
-let COL_TRACK_BLACK = DAY_PALETTE.COL_TRACK_BLACK;
-let COL_GOOD_DIM = DAY_PALETTE.COL_GOOD_DIM;
-let COL_BAD_DIM = DAY_PALETTE.COL_BAD_DIM;
-let COL_WEATHER_BG = DAY_PALETTE.COL_WEATHER_BG;
-let COL_GOOD_50 = DAY_PALETTE.COL_GOOD_50;
-let uiPaletteNight = false;
-
-function applyUiPalette(nightRed) {
-  if (nightRed === uiPaletteNight) return;
-  uiPaletteNight = nightRed;
-  const p = nightRed ? NIGHT_PALETTE : DAY_PALETTE;
-  COL_BG = p.COL_BG;
-  COL_SURFACE = p.COL_SURFACE;
-  COL_BORDER = p.COL_BORDER;
-  COL_TEXT = p.COL_TEXT;
-  COL_TEXT2 = p.COL_TEXT2;
-  COL_ACCENT = p.COL_ACCENT;
-  COL_BLUE = p.COL_BLUE;
-  COL_YELLOW = p.COL_YELLOW;
-  COL_GOOD = p.COL_GOOD;
-  COL_SHINE_LO = p.COL_SHINE_LO;
-  COL_SHINE_MID = p.COL_SHINE_MID;
-  COL_SHINE_HI = p.COL_SHINE_HI;
-  COL_WARN = p.COL_WARN;
-  COL_TRACK = p.COL_TRACK;
-  COL_TRACK_BLACK = p.COL_TRACK_BLACK;
-  COL_GOOD_DIM = p.COL_GOOD_DIM;
-  COL_BAD_DIM = p.COL_BAD_DIM;
-  COL_WEATHER_BG = p.COL_WEATHER_BG;
-  COL_GOOD_50 = p.COL_GOOD_50;
-}
+// RGB565 firmware colors converted to RGB888 exactly as the panel shows them
+const COL_BG      = 'rgb(8,8,8)';       // 0x0841
+const COL_SURFACE = 'rgb(8,8,8)';       // 0x0841 (card fill = bg, no surface tint)
+const COL_BORDER  = 'rgb(58,57,58)';    // 0x39C7
+const COL_TEXT    = 'rgb(255,255,255)'; // 0xFFFF
+const COL_TEXT2   = 'rgb(156,154,156)'; // 0x9CD3
+const COL_ACCENT  = 'rgb(255,97,66)';   // 0xFB08
+const COL_BLUE    = 'rgb(58,130,247)';  // 0x3C1E device-stats bar chart accent
+const COL_YELLOW  = 'rgb(255,255,0)';   // 0xFFE0 yellow for sun/lightning icons
+const COL_GOOD    = 'rgb(33,206,66)';   // 0x2668
+const COL_SHINE_LO  = 'rgb(90,219,115)';  // 0x5ECE COL_GOOD lerped ~25% to white (shine band edge)
+const COL_SHINE_MID = 'rgb(148,231,165)'; // 0x9734 ~50% to white (shine band mid)
+const COL_SHINE_HI  = 'rgb(214,247,214)'; // 0xD7BA ~80% to white (shine band center)
+const COL_WARN    = 'rgb(255,24,49)';   // 0xF8C6
+const COL_TRACK   = 'rgb(90,89,90)';    // 0x5ACB neutral grey track
+const COL_TRACK_BLACK = 'rgb(0,0,0)';   // 0x0000 pure-black track (reset-countdown bars)
+const COL_GOOD_DIM = 'rgb(20,140,32)';  // 0x1462 dim green
+const COL_BAD_DIM  = 'rgb(148,36,32)';  // 0x9124 dim red
+// Weather page background — pure black. 0x0000. Reserved; weather overlay uses COL_BG.
+const COL_WEATHER_BG = 'rgb(0,0,0)';
 
 // ── STATE (mirroring the firmware UsageState struct) ──────
 const STATE = {
@@ -1237,7 +1153,7 @@ function drawLimitsCard() {
 // True alpha here vs. pages.cpp's drawTimerWedge: LovyanGFX has no real
 // alpha blending on this RGB565 display, so the firmware twin uses a
 // precomputed solid blend color (COL_GOOD lerped 50% into COL_BG) instead.
-// COL_GOOD_50 lives in the active palette (applyUiPalette).
+const COL_GOOD_50 = 'rgba(33,206,66,0.5)'; // COL_GOOD @ 50% alpha
 function drawTimerWedge(cx, cy, r, startRad, endRad) {
   let delta = (endRad - startRad) % (2 * Math.PI);
   if (delta < 0) delta += 2 * Math.PI;
@@ -1686,9 +1602,10 @@ function drawDevicePage() {
 
 function drawBtcChart() {
   const SCREEN_W      = 320;
-  const CONTENT_RIGHT = SCREEN_W - 4;  // 4px min margin (matches the left-side clamp below) so glyphs/border don't clip flush against the edge
+  const PAD_RIGHT     = 20;
+  const CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
   const CANDLE_COUNT  = 288;
-  const CHART_X0 = CONTENT_RIGHT - CANDLE_COUNT - 2;
+  const CHART_X0 = CONTENT_RIGHT - CANDLE_COUNT - 2;  // 10
   const CHART_Y0 = 84;
   const CHART_H  = 128;
 
@@ -1752,7 +1669,8 @@ function drawBtcChart() {
 
 function drawBtcPriceRow() {
   const SCREEN_W      = 320;
-  const CONTENT_RIGHT = SCREEN_W - 4;  // 4px min margin (matches the left-side clamp below)
+  const PAD_RIGHT     = 20;
+  const CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
 
   gfx.setTextSize(4);
   if (STATE.btcPrice <= 0) {
@@ -1785,7 +1703,8 @@ function drawBtcPriceRow() {
 
 function drawBtcTickerPage() {
   const SCREEN_W      = 320;
-  const CONTENT_RIGHT = SCREEN_W - 4;  // 4px min margin (matches the left-side clamp below)
+  const PAD_RIGHT     = 20;
+  const CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
 
   const bkk = bangkokParts();
 

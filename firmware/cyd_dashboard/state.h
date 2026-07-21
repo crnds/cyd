@@ -154,29 +154,24 @@ const uint32_t TOTAL_RAM_BYTES = 327680;
 const long GMT_OFFSET_SEC = 7 * 3600;
 const int DST_OFFSET_SEC = 0;
 
-// Active UI palette — mutable so night mode can swap the whole chrome to a
-// red monochrome set (preserves dark adaptation). Defaults = day palette.
-// Defined in pages.cpp; applyUiPalette(true/false) swaps day ↔ night-red.
-extern uint16_t COL_BG;       // near-black day / pure black night
-extern uint16_t COL_SURFACE;  // card fill (= BG)
-extern uint16_t COL_BORDER;
-extern uint16_t COL_TEXT;
-extern uint16_t COL_TEXT2;
-extern uint16_t COL_ACCENT;
-extern uint16_t COL_GOOD;
-extern uint16_t COL_SHINE_LO;
-extern uint16_t COL_SHINE_MID;
-extern uint16_t COL_SHINE_HI;
-extern uint16_t COL_WARN;
-extern uint16_t COL_TRACK;
-extern uint16_t COL_TRACK_BLACK;
-extern uint16_t COL_BLUE;
-extern uint16_t COL_YELLOW;
-extern uint16_t COL_WEATHER_BG;
-extern uint16_t COL_GOOD_50;  // timer-wedge blend (day green / night red)
-// true → red monochrome palette active (paired with nightDimActive).
-extern bool uiPaletteNight;
-void applyUiPalette(bool nightRed);
+const uint16_t COL_BG = 0x0841;      // near-black
+const uint16_t COL_SURFACE = 0x0841; // card fill = bg (no surface tint)
+const uint16_t COL_BORDER = 0x39C7;
+const uint16_t COL_TEXT = 0xFFFF;
+const uint16_t COL_TEXT2 = 0x9CD3;
+const uint16_t COL_ACCENT = 0xFB08;  // orange
+const uint16_t COL_GOOD = 0x2668;    // green
+const uint16_t COL_SHINE_LO = 0x5ECE;  // COL_GOOD lerped ~25% to white (shine band edge)
+const uint16_t COL_SHINE_MID = 0x9734; // ~50% to white (shine band mid)
+const uint16_t COL_SHINE_HI = 0xD7BA;  // ~80% to white (shine band center)
+const uint16_t COL_WARN = 0xF8C6;    // rose
+const uint16_t COL_TRACK = 0x5ACB;   // neutral grey bar track
+const uint16_t COL_TRACK_BLACK = 0x0000; // pure-black bar track (reset-countdown bars)
+const uint16_t COL_BLUE = 0x3C1E;    // device-stats bar chart accent
+const uint16_t COL_YELLOW = 0xFFE0;  // yellow for sun/lightning icons
+// Weather page background — pure black (same as other pages' near-black COL_BG
+// family). Used only by drawWeatherPage.
+const uint16_t COL_WEATHER_BG = 0x0000;
 // Weather card hit-box on the status page (page 0): fillRoundRect(150,170,60,46).
 // Tap opens the Weather overlay (mirrors settings' PULSE_HIT_* pattern).
 const int WEATHER_HIT_X0 = 150, WEATHER_HIT_X1 = 210;
@@ -354,7 +349,6 @@ extern int cfgBrightness;
 extern bool cfgNightModeOn;
 extern bool nightDimActive;
 const uint8_t NIGHT_MODE_DIM_VALUE = 64;  // ~25%, matches the brightness preset
-// Night mode also swaps the UI palette to red monochrome (see applyUiPalette).
 // Green reset-countdown bars (under 5h/week) + analog-clock timer wedge.
 // Green reset hand on the clock is always drawn when a reset is known.
 extern bool cfgShowCountdown;

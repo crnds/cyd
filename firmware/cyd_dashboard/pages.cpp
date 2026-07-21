@@ -5,123 +5,21 @@
 // here without updating the simulator too. Split out of cyd_dashboard.ino.
 #include "state.h"
 
-// ── UI palette (day default / night red monochrome) ─────────
-// Day values match the historical const tokens in state.h. Night is a pure
-// red channel set (no green/blue) so the panel is scotopic-friendly while
-// dimmed — classic "red night mode" for a desk display at 23:00–07:00.
-static const uint16_t DAY_COL_BG          = 0x0841;
-static const uint16_t DAY_COL_SURFACE     = 0x0841;
-static const uint16_t DAY_COL_BORDER      = 0x39C7;
-static const uint16_t DAY_COL_TEXT        = 0xFFFF;
-static const uint16_t DAY_COL_TEXT2       = 0x9CD3;
-static const uint16_t DAY_COL_ACCENT      = 0xFB08;
-static const uint16_t DAY_COL_GOOD        = 0x2668;
-static const uint16_t DAY_COL_SHINE_LO    = 0x5ECE;
-static const uint16_t DAY_COL_SHINE_MID   = 0x9734;
-static const uint16_t DAY_COL_SHINE_HI    = 0xD7BA;
-static const uint16_t DAY_COL_WARN        = 0xF8C6;
-static const uint16_t DAY_COL_TRACK       = 0x5ACB;
-static const uint16_t DAY_COL_TRACK_BLACK = 0x0000;
-static const uint16_t DAY_COL_BLUE        = 0x3C1E;
-static const uint16_t DAY_COL_YELLOW      = 0xFFE0;
-static const uint16_t DAY_COL_WEATHER_BG  = 0x0000;
-static const uint16_t DAY_COL_GOOD_50     = 0x1B65;  // GOOD blended 50% into BG
-
-// Night: pure reds in RGB565 (G=B=0). Hierarchy by R channel only.
-static const uint16_t NIGHT_COL_BG          = 0x0000;  // pure black
-static const uint16_t NIGHT_COL_SURFACE     = 0x0000;
-static const uint16_t NIGHT_COL_BORDER      = 0x8000;  // dark red
-static const uint16_t NIGHT_COL_TEXT        = 0xF800;  // full red
-static const uint16_t NIGHT_COL_TEXT2       = 0xC000;  // mid red (muted labels)
-static const uint16_t NIGHT_COL_ACCENT      = 0xF800;  // bright red (= text)
-static const uint16_t NIGHT_COL_GOOD        = 0xD000;  // mid-bright red (was green)
-static const uint16_t NIGHT_COL_SHINE_LO    = 0xA000;
-static const uint16_t NIGHT_COL_SHINE_MID   = 0xC800;
-static const uint16_t NIGHT_COL_SHINE_HI    = 0xF800;
-static const uint16_t NIGHT_COL_WARN        = 0xF800;  // same peak red
-static const uint16_t NIGHT_COL_TRACK       = 0x4800;  // very dark red track
-static const uint16_t NIGHT_COL_TRACK_BLACK = 0x0000;
-static const uint16_t NIGHT_COL_BLUE        = 0xB000;  // maps charts to red
-static const uint16_t NIGHT_COL_YELLOW      = 0xF800;  // weather icons red
-static const uint16_t NIGHT_COL_WEATHER_BG  = 0x0000;
-static const uint16_t NIGHT_COL_GOOD_50     = 0x6000;  // dark red wedge fill
-
-uint16_t COL_BG          = DAY_COL_BG;
-uint16_t COL_SURFACE     = DAY_COL_SURFACE;
-uint16_t COL_BORDER      = DAY_COL_BORDER;
-uint16_t COL_TEXT        = DAY_COL_TEXT;
-uint16_t COL_TEXT2       = DAY_COL_TEXT2;
-uint16_t COL_ACCENT      = DAY_COL_ACCENT;
-uint16_t COL_GOOD        = DAY_COL_GOOD;
-uint16_t COL_SHINE_LO    = DAY_COL_SHINE_LO;
-uint16_t COL_SHINE_MID   = DAY_COL_SHINE_MID;
-uint16_t COL_SHINE_HI    = DAY_COL_SHINE_HI;
-uint16_t COL_WARN        = DAY_COL_WARN;
-uint16_t COL_TRACK       = DAY_COL_TRACK;
-uint16_t COL_TRACK_BLACK = DAY_COL_TRACK_BLACK;
-uint16_t COL_BLUE        = DAY_COL_BLUE;
-uint16_t COL_YELLOW      = DAY_COL_YELLOW;
-uint16_t COL_WEATHER_BG  = DAY_COL_WEATHER_BG;
-uint16_t COL_GOOD_50     = DAY_COL_GOOD_50;
-bool uiPaletteNight = false;
-
-void applyUiPalette(bool nightRed) {
-  if (nightRed == uiPaletteNight) return;
-  uiPaletteNight = nightRed;
-  if (nightRed) {
-    COL_BG = NIGHT_COL_BG;
-    COL_SURFACE = NIGHT_COL_SURFACE;
-    COL_BORDER = NIGHT_COL_BORDER;
-    COL_TEXT = NIGHT_COL_TEXT;
-    COL_TEXT2 = NIGHT_COL_TEXT2;
-    COL_ACCENT = NIGHT_COL_ACCENT;
-    COL_GOOD = NIGHT_COL_GOOD;
-    COL_SHINE_LO = NIGHT_COL_SHINE_LO;
-    COL_SHINE_MID = NIGHT_COL_SHINE_MID;
-    COL_SHINE_HI = NIGHT_COL_SHINE_HI;
-    COL_WARN = NIGHT_COL_WARN;
-    COL_TRACK = NIGHT_COL_TRACK;
-    COL_TRACK_BLACK = NIGHT_COL_TRACK_BLACK;
-    COL_BLUE = NIGHT_COL_BLUE;
-    COL_YELLOW = NIGHT_COL_YELLOW;
-    COL_WEATHER_BG = NIGHT_COL_WEATHER_BG;
-    COL_GOOD_50 = NIGHT_COL_GOOD_50;
-  } else {
-    COL_BG = DAY_COL_BG;
-    COL_SURFACE = DAY_COL_SURFACE;
-    COL_BORDER = DAY_COL_BORDER;
-    COL_TEXT = DAY_COL_TEXT;
-    COL_TEXT2 = DAY_COL_TEXT2;
-    COL_ACCENT = DAY_COL_ACCENT;
-    COL_GOOD = DAY_COL_GOOD;
-    COL_SHINE_LO = DAY_COL_SHINE_LO;
-    COL_SHINE_MID = DAY_COL_SHINE_MID;
-    COL_SHINE_HI = DAY_COL_SHINE_HI;
-    COL_WARN = DAY_COL_WARN;
-    COL_TRACK = DAY_COL_TRACK;
-    COL_TRACK_BLACK = DAY_COL_TRACK_BLACK;
-    COL_BLUE = DAY_COL_BLUE;
-    COL_YELLOW = DAY_COL_YELLOW;
-    COL_WEATHER_BG = DAY_COL_WEATHER_BG;
-    COL_GOOD_50 = DAY_COL_GOOD_50;
-  }
-}
-
-// Touch feedback: flash a 5px border (COL_TEXT — white by day, red at night)
-// for one frame, straight to the panel over the already-pushed frame, then
-// re-push the clean frame to clear it. Drawn on `gfx` (not `g`) so it overlays
-// the composited page; presentFrame() restores the borderless frame.
+// Touch feedback: flash a 5px white border on the left or right part of the screen
+// for one frame, straight to the panel over the already-pushed frame, then re-push
+// the clean frame to clear it. Drawn on `gfx` (not `g`) so it overlays the
+// composited page; presentFrame() restores the borderless frame.
 void flashTouchBorder(bool isRight) {
   const int T = 5;
-  const uint16_t flash = COL_TEXT;
+  const uint16_t WHITE = 0xFFFF;
   if (isRight) {
-    gfx.fillRect(152, 0, 152, T, flash);        // top right
-    gfx.fillRect(152, 240 - T, 152, T, flash);  // bottom right
-    gfx.fillRect(304 - T, 0, T, 240, flash);    // right
+    gfx.fillRect(152, 0, 152, T, WHITE);        // top right
+    gfx.fillRect(152, 240 - T, 152, T, WHITE);  // bottom right
+    gfx.fillRect(304 - T, 0, T, 240, WHITE);    // right
   } else {
-    gfx.fillRect(0, 0, 152, T, flash);          // top left
-    gfx.fillRect(0, 240 - T, 152, T, flash);    // bottom left
-    gfx.fillRect(0, 0, T, 240, flash);          // left
+    gfx.fillRect(0, 0, 152, T, WHITE);          // top left
+    gfx.fillRect(0, 240 - T, 152, T, WHITE);    // bottom left
+    gfx.fillRect(0, 0, T, 240, WHITE);          // left
   }
   delay(60);
   presentFrame();
@@ -693,11 +591,18 @@ void drawMixedPageStatic() {
   drawFooter();
 }
 
+// Timer region fill color: COL_GOOD blended 50% into COL_BG/COL_SURFACE
+// (the clock card's background — see drawTimerWedge below), precomputed in
+// RGB565 5-6-5 channel space since this display has no real alpha channel.
+// COL_BG=0x0841 (R5=1,G6=2,B5=1) + COL_GOOD=0x2668 (R5=4,G6=51,B5=8),
+// averaged and rounded per-channel -> R5=3,G6=27,B5=5 -> 0x1B65 (~rgb(25,109,41)).
+const uint16_t COL_GOOD_50 = 0x1B65;
+
 // Filled pie wedge from the hour hand's current angle clockwise to the
 // reset angle — a "time remaining" region layered under the ticks/hands so
 // they stay legible on top. Twin of simulator.html's drawTimerWedge, but
-// using LovyanGFX's fillArc (degrees, no radian conversion needed) plus
-// COL_GOOD_50 (day green blend / night dark red — see applyUiPalette).
+// using LovyanGFX's fillArc (degrees, no radian conversion needed) plus the
+// precomputed solid blend color above instead of true alpha.
 static void drawTimerWedge(int cx, int cy, int r, float startAngle, float endAngle) {
   float delta = fmodf(endAngle - startAngle, 360.0f);
   if (delta < 0) delta += 360.0f;
@@ -991,8 +896,9 @@ static void drawDevicePage() {
 
 static void drawBtcChart() {
   const int SCREEN_W      = 320;
-  const int CONTENT_RIGHT = SCREEN_W - 4;  // 4px min margin (matches the left-side clamp below) so glyphs/border don't clip flush against the edge
-  const int CHART_X0 = CONTENT_RIGHT - CANDLE_COUNT - 2;  // right edge lands on CONTENT_RIGHT
+  const int PAD_RIGHT     = 20;
+  const int CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
+  const int CHART_X0 = CONTENT_RIGHT - CANDLE_COUNT - 2;  // right edge lands on CONTENT_RIGHT (10)
   const int CHART_Y0 = 84;
   const int CHART_H  = 128;  // y 84..212
   const uint16_t COL_GOOD_DIM = 0x1462;  // dim green (wick)
@@ -1052,7 +958,8 @@ static void drawBtcChart() {
 
 static void drawBtcPriceRow() {
   const int SCREEN_W      = 320;
-  const int CONTENT_RIGHT = SCREEN_W - 4;  // 4px min margin (matches the left-side clamp below)
+  const int PAD_RIGHT     = 20;
+  const int CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
 
   g->setTextSize(4);
   if (STATE.btcPrice <= 0) {
@@ -1087,7 +994,8 @@ static void drawBtcPriceRow() {
 
 static void drawBtcTickerPage() {
   const int SCREEN_W      = 320;
-  const int CONTENT_RIGHT = SCREEN_W - 4;  // 4px min margin (matches the left-side clamp below)
+  const int PAD_RIGHT     = 20;
+  const int CONTENT_RIGHT = SCREEN_W - PAD_RIGHT;  // 300
 
   struct tm t;
   bool haveTime = getLocalTime(&t, 0);
