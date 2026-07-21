@@ -77,8 +77,10 @@ def probe_endpoint():
 
 
 def set_battery_save(enabled):
-    # Proxy to usage_server POST /api/battery-save (localhost-only there too).
-    body = json.dumps({"enabled": bool(enabled)}).encode("utf-8")
+    # Proxy to usage_server POST /api/battery-save (localhost-only there
+    # too). enabled: True/False forces the mode, None clears the override
+    # back to auto — pass through as-is so None serializes to JSON null.
+    body = json.dumps({"enabled": enabled}).encode("utf-8")
     req = urllib.request.Request(
         BATTERY_SAVE_URL,
         data=body,
@@ -145,6 +147,16 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, doc, status=200):
         self._send(status, json.dumps(doc).encode("utf-8"), "application/json")
 
+    def do_OPTIONS(self):
+        # CORS preflight — the battery-save POST sends a JSON Content-Type
+        # header, which makes it a non-simple request browsers preflight.
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
         if self.path in ("/", "/index.html", "/server.html"):
             try:
@@ -184,9 +196,11 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 self._send_json({"ok": False, "detail": "invalid JSON"}, status=400)
                 return
-            if "enabled" not in doc or not isinstance(doc.get("enabled"), bool):
+            if "enabled" not in doc or (
+                doc.get("enabled") is not None and not isinstance(doc.get("enabled"), bool)
+            ):
                 self._send_json(
-                    {"ok": False, "detail": "body must be {\"enabled\": true|false}"},
+                    {"ok": False, "detail": "body must be {\"enabled\": true|false|null}"},
                     status=400,
                 )
                 return

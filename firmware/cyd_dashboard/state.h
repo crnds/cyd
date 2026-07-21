@@ -173,9 +173,10 @@ const uint16_t COL_YELLOW = 0xFFE0;  // yellow for sun/lightning icons
 // Weather page background — pure black (same as other pages' near-black COL_BG
 // family). Used only by drawWeatherPage.
 const uint16_t COL_WEATHER_BG = 0x0000;
-// Weather card hit-box on the status page (page 0): fillRoundRect(161,166,60,52).
-// Tap opens the Weather overlay (mirrors settings' PULSE_HIT_* pattern).
-const int WEATHER_HIT_X0 = 161, WEATHER_HIT_X1 = 221;
+// Weather card hit-box on the status page (page 0): matches the full card
+// drawn at fillRect(161,166,157,52) (pages.cpp). Tap opens the Weather
+// overlay (mirrors settings' PULSE_HIT_* pattern).
+const int WEATHER_HIT_X0 = 161, WEATHER_HIT_X1 = 318;
 const int WEATHER_HIT_Y0 = 166, WEATHER_HIT_Y1 = 218;
 
 // Battery Save top-right corner overlay: y-range of drawBatterySaveIcon()'s

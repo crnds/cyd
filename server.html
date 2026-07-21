@@ -125,6 +125,20 @@ h1 span { color: var(--muted); font-weight: 400; }
 .power-toggle:hover { opacity: 0.85; }
 .power-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .power-toggle:disabled { opacity: 0.45; cursor: wait; }
+.power-reset-link {
+  background: none;
+  border: none;
+  color: var(--text2);
+  font-size: 0.82rem;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 4px 2px;
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+.power-reset-link:hover { color: var(--accent); }
+.power-reset-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.power-reset-link:disabled { opacity: 0.4; cursor: default; text-decoration: none; }
+.power-reset-link[hidden] { display: none; }
 
 main { max-width: 960px; margin: 0 auto; display: grid; gap: 16px; }
 
@@ -308,6 +322,8 @@ footer {
       </div>
       <button type="button" class="power-toggle off" id="battery-save-btn" disabled
               aria-label="Toggle battery saver on or off">Turn on</button>
+      <button type="button" class="power-reset-link" id="battery-save-reset-btn" disabled
+              aria-label="Clear manual override and return to automatic">Reset to auto</button>
     </div>
     <dl class="power-meta">
       <div>
@@ -441,7 +457,8 @@ async function postBatterySave(enabled) {
   render();
   const logEl = document.getElementById('action-log');
   logEl.className = 'action-log';
-  logEl.textContent = enabled ? 'Turning battery saver on…' : 'Turning battery saver off…';
+  logEl.textContent = enabled === null ? 'Resetting battery saver to auto…'
+    : enabled ? 'Turning battery saver on…' : 'Turning battery saver off…';
   try {
     const resp = await fetch(CONTROL_BASE + '/api/battery-save', {
       method: 'POST',
@@ -553,6 +570,7 @@ function render() {
   const bsVal = document.getElementById('v-battery-save');
   const bsSub = document.getElementById('s-battery-save');
   const bsBtn = document.getElementById('battery-save-btn');
+  const bsResetBtn = document.getElementById('battery-save-reset-btn');
   if (!ep.up || !power) {
     bsVal.textContent = ep.up ? 'unknown' : '—';
     bsVal.className = 'value dim';
@@ -567,6 +585,8 @@ function render() {
     bsBtn.textContent = 'Turn on';
     bsBtn.className = 'power-toggle off';
     bsBtn.onclick = null;
+    bsResetBtn.hidden = true;
+    bsResetBtn.onclick = null;
   } else {
     const on = !!power.battery_save;
     bsVal.textContent = on ? 'ON' : 'OFF';
@@ -595,6 +615,10 @@ function render() {
       bsBtn.className = 'power-toggle off';
       bsBtn.onclick = () => postBatterySave(true);
     }
+    const isOverridden = power.battery_save_manual !== null && power.battery_save_manual !== undefined;
+    bsResetBtn.hidden = !isOverridden;
+    bsResetBtn.disabled = STATE.batteryBusy || STATE.busy;
+    bsResetBtn.onclick = isOverridden ? () => postBatterySave(null) : null;
   }
 
   // Diagnostics checklist

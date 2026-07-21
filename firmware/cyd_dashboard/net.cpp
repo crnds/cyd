@@ -195,6 +195,10 @@ bool applyUsageJson(const String& payload, bool fromNetwork) {
     STATE.trend[i] = i < (int)trend.size() ? trend[i].as<int64_t>() : 0;
   }
 
+  // Keep the last-known values on a null/absent limits field, same as
+  // btc/weather below — a transient miss shouldn't wipe a good snapshot to
+  // "--", and under Battery Save's floored 120s poll interval a wipe would
+  // stay visible for minutes instead of self-healing within one cycle.
   if (!doc["limits"].isNull()) {
     STATE.sessionPercent = doc["limits"]["session"]["percent"] | -1;
     snprintf(STATE.sessionResets, sizeof(STATE.sessionResets), "%s",
@@ -212,19 +216,6 @@ bool applyUsageJson(const String& payload, bool fromNetwork) {
     STATE.creditsUsed = doc["limits"]["credits"]["used"] | -1.0f;
     STATE.creditsLimit = doc["limits"]["credits"]["limit"] | -1.0f;
     STATE.creditsPercent = doc["limits"]["credits"]["percent"] | -1;
-  } else {
-    STATE.sessionPercent = -1;
-    STATE.sessionResets[0] = '\0';
-    STATE.sessionResetsInSec = -1L;
-    STATE.weekPercent = -1;
-    STATE.weekResets[0] = '\0';
-    STATE.weekResetsInSec = -1L;
-    STATE.weekModelPercent = -1;
-    STATE.weekModelName[0] = '\0';
-    STATE.weekModelResets[0] = '\0';
-    STATE.creditsUsed = -1;
-    STATE.creditsLimit = -1;
-    STATE.creditsPercent = -1;
   }
 
   // Context window of the latest session — computed by the server from the

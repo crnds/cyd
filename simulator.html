@@ -247,9 +247,10 @@ const STALE_AFTER_SEC = 60;
 // PULSE_HIT_X0/X1/Y0/Y1.
 const PULSE_HIT_X0 = 0, PULSE_HIT_X1 = 40, PULSE_HIT_Y0 = 214, PULSE_HIT_Y1 = 240;
 
-// Weather card hit-box on the status page (page 0): fillRoundRect(161,166,60,52).
-// Tap opens the Weather overlay — mirrors the firmware's WEATHER_HIT_*.
-const WEATHER_HIT_X0 = 161, WEATHER_HIT_X1 = 221;
+// Weather card hit-box on the status page (page 0): matches the full card
+// drawn at fillRect(161,166,157,52). Tap opens the Weather overlay —
+// mirrors the firmware's WEATHER_HIT_*.
+const WEATHER_HIT_X0 = 161, WEATHER_HIT_X1 = 318;
 const WEATHER_HIT_Y0 = 166, WEATHER_HIT_Y1 = 218;
 const WEATHER_HOURLY_N = 6;
 const WEATHER_DAILY_N = 5;
@@ -2083,6 +2084,10 @@ function loadCachedUsage() {
 function applyData(doc) {
   STATE.projects = (doc.projects || []).slice(0, 5);
   STATE.trend = Array.from({ length: 7 }, (_, i) => doc.trend?.[i] ?? 0);
+  // Keep the last-known values on a null/absent limits field, same as
+  // btc/weather below — mirrors net.cpp's applyUsageJson (a transient miss
+  // shouldn't wipe a good snapshot to "--", especially under Battery Save's
+  // floored 120s poll interval where a wipe would stay visible for minutes).
   if (doc.limits) {
     STATE.sessionPercent = doc.limits.session?.percent ?? -1;
     STATE.sessionResets = doc.limits.session?.resets ?? '';
@@ -2096,19 +2101,6 @@ function applyData(doc) {
     STATE.creditsUsed = doc.limits.credits?.used ?? -1;
     STATE.creditsLimit = doc.limits.credits?.limit ?? -1;
     STATE.creditsPercent = doc.limits.credits?.percent ?? -1;
-  } else {
-    STATE.sessionPercent = -1;
-    STATE.sessionResets = '';
-    STATE.sessionResetsInSec = -1;
-    STATE.weekPercent = -1;
-    STATE.weekResets = '';
-    STATE.weekResetsInSec = -1;
-    STATE.weekModelPercent = -1;
-    STATE.weekModelName = '';
-    STATE.weekModelResets = '';
-    STATE.creditsUsed = -1;
-    STATE.creditsLimit = -1;
-    STATE.creditsPercent = -1;
   }
   if (doc.context) {
     STATE.ctxTokens = doc.context.tokens ?? -1;

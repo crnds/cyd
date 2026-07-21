@@ -126,15 +126,16 @@ def is_on_battery():
 
 
 def set_battery_save_manual(enabled):
-    # enabled True/False forces battery-save on/off; wake loops so intervals
-    # change without waiting out a sleep.
+    # enabled True/False forces battery-save on/off; None clears the
+    # override back to automatic (derived from on_ac). Wake loops so
+    # intervals change without waiting out a sleep.
     with STATE["lock"]:
         p = dict(STATE["power"])
-        p["battery_save_manual"] = bool(enabled)
+        p["battery_save_manual"] = enabled
         STATE["power"] = p
     STATE["activity_event"].set()
     log_err("battery_save: manual override %s"
-            % ("on" if enabled else "off"))
+            % ("on" if enabled is True else "off" if enabled is False else "cleared (auto)"))
 
 
 def activity_gated_loop(body):
@@ -1101,9 +1102,11 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self._send_json({"ok": False, "detail": "invalid JSON"}, status=400)
             return
-        if "enabled" not in doc or not isinstance(doc.get("enabled"), bool):
+        if "enabled" not in doc or (
+            doc.get("enabled") is not None and not isinstance(doc.get("enabled"), bool)
+        ):
             self._send_json(
-                {"ok": False, "detail": "body must be {\"enabled\": true|false}"},
+                {"ok": False, "detail": "body must be {\"enabled\": true|false|null}"},
                 status=400,
             )
             return
