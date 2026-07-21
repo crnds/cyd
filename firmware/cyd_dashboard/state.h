@@ -129,18 +129,20 @@ void shineTick(uint32_t nowMs);
 // start; also settable at runtime from the Settings page's Poll Interval
 // leaf (loop(), core 1), so it's volatile -- networkTask (core 0) reads it
 // every cycle. Defined in cyd_dashboard.ino.
+//
+// cfgPollIntervalSec is the user's chosen rate (what the Poll Interval leaf
+// shows/saves). POLL_INTERVAL_MS is the *effective* interval networkTask
+// uses — Battery Save may stretch it via applyEffectivePoll().
+extern uint32_t cfgPollIntervalSec;
 extern volatile uint32_t POLL_INTERVAL_MS;
 
 // ── SHARED CONSTANTS ───────────────────────────────────────
 // Internal linkage per TU (C++ global `const` default) — safe to define
 // identically in every file that includes this header; no ODR issue.
 const uint32_t TOUCH_DEBOUNCE_MS = 350;
-const int PAGE_COUNT = 8;
-const int GIF_PAGE = 6;    // 7th page (0-indexed): random cat GIFs from /cats/ on SD
-const int MIXED_PAGE = 7;  // 8th page: status + cats split
-
-const int DOT_SPACING = 12;
-const int DOT_START_X = 300 - (PAGE_COUNT - 1) * DOT_SPACING;
+const int PAGE_COUNT = 7;
+const int GIF_PAGE = 5;    // 6th page (0-indexed): random cat GIFs from /cats/ on SD
+const int MIXED_PAGE = 6;  // 7th page: status + cats split
 
 const int PULSE_HIT_X0 = 0, PULSE_HIT_X1 = 40, PULSE_HIT_Y0 = 214, PULSE_HIT_Y1 = 240;
 
@@ -171,10 +173,15 @@ const uint16_t COL_YELLOW = 0xFFE0;  // yellow for sun/lightning icons
 // Weather page background — pure black (same as other pages' near-black COL_BG
 // family). Used only by drawWeatherPage.
 const uint16_t COL_WEATHER_BG = 0x0000;
-// Weather card hit-box on the status page (page 0): fillRoundRect(150,170,60,46).
+// Weather card hit-box on the status page (page 0): fillRoundRect(161,166,60,52).
 // Tap opens the Weather overlay (mirrors settings' PULSE_HIT_* pattern).
-const int WEATHER_HIT_X0 = 150, WEATHER_HIT_X1 = 210;
-const int WEATHER_HIT_Y0 = 170, WEATHER_HIT_Y1 = 216;
+const int WEATHER_HIT_X0 = 161, WEATHER_HIT_X1 = 221;
+const int WEATHER_HIT_Y0 = 166, WEATHER_HIT_Y1 = 218;
+
+// Battery Save top-right corner overlay: y-range of drawBatterySaveIcon()'s
+// backing box (pages.cpp), needed by gif_player.cpp to fold the icon's rows
+// into the mixed page's dirty-band partial push (see gifTick()).
+const int BATTERY_ICON_Y0 = 2, BATTERY_ICON_Y1 = 14;
 
 // Weather forecast slots delivered by /api/usage (Mac-proxied Open-Meteo /
 // WeatherAPI) and cached on SD as /weather.json. Fixed-size arrays — no
@@ -208,9 +215,6 @@ struct UsageState {
   int64_t projectTokens[5];
   int projectCount = 0;
   int64_t trend[7];
-  int64_t last24hTokens = 0;  // rolling trailing-24h total, for the 30-Day Trend page's
-                              // "today" bar — trend[6] is midnight-to-now and only equals
-                              // a full day right before the day rolls over
   int sessionPercent = -1;   // -1 = limits unavailable
   char sessionResets[24] = "";
   long sessionResetsInSec = -1;  // countdown to session reset; -1 = unknown
@@ -242,7 +246,6 @@ struct UsageState {
   WeatherDay weatherDaily[WEATHER_DAILY_N];
   uint8_t weatherDailyCount = 0;
   bool sdOk = false;
-  int lastLoggedYday = -1;  // tm_yday of the last day appended to the SD log
   // Written by networkTask() (core 0) without stateMutex (see state.h's lock
   // comment: only the brief result-copy takes the lock, not this flag), read
   // by loop()/presentFrame()/GIFDraw()/openCatAtIndex() on core 1 -- volatile
@@ -252,12 +255,6 @@ struct UsageState {
 };
 // Defined in cyd_dashboard.ino.
 extern UsageState STATE;
-
-// 30-day on-device history, backed by /daily_log.csv on the SD card. Defined
-// in cyd_dashboard.ino; read/written from sd_store.cpp and pages.cpp.
-const int LONG_TREND_DAYS = 30;
-extern int64_t longTrend[LONG_TREND_DAYS];
-extern int longTrendCount;
 
 // Page/navigation state — owned by loop()'s touch handler (cyd_dashboard.ino),
 // read by pages.cpp/settings.cpp/gif_player.cpp to know what's on screen.
@@ -307,8 +304,8 @@ extern bool wifiOk;
 // volatile for the same cross-core-visibility reason as STATE.haveData.
 extern volatile bool connected;
 
-// Guards every read/write of the shared UsageState (and longTrend[]) between
-// the render loop (core 1) and the network task (core 0). Non-recursive —
+// Guards every read/write of the shared UsageState between the render loop
+// (core 1) and the network task (core 0). Non-recursive —
 // draw helpers must never re-lock. See cyd_dashboard.ino's networkTask()/
 // pages.cpp's render() for the two sides of this.
 extern SemaphoreHandle_t stateMutex;
@@ -316,7 +313,7 @@ inline void lockState()   { if (stateMutex) xSemaphoreTake(stateMutex, portMAX_D
 inline void unlockState() { if (stateMutex) xSemaphoreGive(stateMutex); }
 
 // Serializes the SD/HSPI bus between the two cores (networkTask on core 0,
-// and the page-6 GIF player reading frames from SD on the render core, core
+// and the page-5 GIF player reading frames from SD on the render core, core
 // 1). NON-RECURSIVE and NON-NESTABLE with stateMutex in the reverse order:
 // the only nesting allowed is sdMutex -> stateMutex.
 extern SemaphoreHandle_t sdMutex;
@@ -339,6 +336,24 @@ extern int cfgBrightness;
 extern bool cfgNightModeOn;
 extern bool nightDimActive;
 const uint8_t NIGHT_MODE_DIM_VALUE = 64;  // ~25%, matches the brightness preset
+// Battery Save: floor usage-poll interval only (no backlight change). User's
+// Poll Interval preference stays stored; applyEffectivePoll() applies the floor.
+// Mode is Settings OFF/ON/AUTO (persisted as /config.json "battery_save"):
+//   0 OFF  — never floor
+//   1 ON   — always floor
+//   2 AUTO — follow Mac /api/usage power.battery_save (default)
+// serverBatterySave is the last *live* Mac flag (not applied from SD cache).
+const int BATTERY_SAVE_OFF = 0;
+const int BATTERY_SAVE_ON = 1;
+const int BATTERY_SAVE_AUTO = 2;
+extern int cfgBatterySaveMode;
+extern volatile bool serverBatterySave;
+const uint32_t BATTERY_SAVE_POLL_SEC = 120;   // 2 min minimum while mode is on
+inline bool batterySaveActive() {
+  if (cfgBatterySaveMode == BATTERY_SAVE_ON) return true;
+  if (cfgBatterySaveMode == BATTERY_SAVE_AUTO) return serverBatterySave;
+  return false;
+}
 // Green reset-countdown bars (under 5h/week) + analog-clock timer wedge.
 // Green reset hand on the clock is always drawn when a reset is known.
 extern bool cfgShowCountdown;
@@ -363,7 +378,8 @@ extern volatile bool pendingForgetWifi;
 // sd_store.cpp's saveIntConfigToSD and settings.cpp's queueConfigSave).
 enum ConfigKeyId {
   CFGKEY_BRIGHTNESS = 0, CFGKEY_POLL_INTERVAL, CFGKEY_PIXEL_SHIFT, CFGKEY_BOOT_PAGE,
-  CFGKEY_CAT_SHUFFLE, CFGKEY_NIGHT_MODE, CFGKEY_ROTATION, CFGKEY_SHOW_COUNTDOWN, CFGKEY_COUNT
+  CFGKEY_CAT_SHUFFLE, CFGKEY_NIGHT_MODE, CFGKEY_ROTATION, CFGKEY_SHOW_COUNTDOWN,
+  CFGKEY_BATTERY_SAVE, CFGKEY_COUNT
 };
 extern const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT];
 
@@ -387,7 +403,10 @@ bool fetchUsage();
 bool loadCachedUsage();
 void loadEnvCache();
 void loadWeatherCache();
-bool applyUsageJson(const String& payload);
+// fromNetwork=true only for a live /api/usage fetch — applies power.battery_save
+// into serverBatterySave. SD cache loads pass false so a stale Mac power flag
+// can't floor the poll across an overnight offline boot.
+bool applyUsageJson(const String& payload, bool fromNetwork = false);
 // Set false by networkTask() (cyd_dashboard.ino) on WiFi loss, so ensureMdns()
 // re-initializes once WiFi returns.
 extern bool mdnsStarted;
@@ -396,8 +415,6 @@ extern bool mdnsStarted;
 void loadRuntimeConfig();
 const char* resetReasonStr();
 void logDiag(const char* event);
-void loadLongTrendFromSD();
-void appendDailyLogIfNeeded(const struct tm& nowInfo, int64_t justEndedDayTokens);
 bool drawBmpFromSD(const char* path, int dx, int dy);
 void showBootSplash();
 void saveWifiCredsToSD(const String& ssid, const String& password);
@@ -408,6 +425,7 @@ void forgetWifiFromSD();
 void render();
 void drawOfflineBanner();
 void drawMixedPageStatic();
+void drawBatterySaveIcon();
 
 // ── GIF PLAYER (gif_player.cpp) ─────────────────────────────
 void scanCats();
@@ -423,6 +441,10 @@ void gifPlayerResetForPageChange(); // force a fresh random GIF on the next tick
 void renderSettings();
 const extern int SETTINGS_COUNT;
 void queueConfigSave(uint8_t keyId, int32_t value);
+// Recompute live backlight (night mode) / poll cadence (battery save). Call
+// after any of those inputs change (and once after loadRuntimeConfig).
+void applyEffectiveBrightness();
+void applyEffectivePoll();
 // Handles a tap while settingsScreen == SET_LEAF; returns true if it consumed
 // the tap. Keeps the SettingDef/button-layout internals out of
 // cyd_dashboard.ino entirely.

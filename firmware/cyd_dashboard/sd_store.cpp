@@ -1,5 +1,5 @@
-// SD-card config load/save, diagnostics log, 30-day trend log, and the
-// self-hosted BMP splash loader. Split out of cyd_dashboard.ino.
+// SD-card config load/save, diagnostics log, and the self-hosted BMP splash
+// loader. Split out of cyd_dashboard.ino.
 #include "state.h"
 
 // ── SD CONFIG / DIAGNOSTICS ────────────────────────────────
@@ -31,8 +31,10 @@ void loadRuntimeConfig() {
   }
   if (!doc["poll_interval_sec"].isNull()) {
     // Clamp to a sane floor so a typo can't hammer the Mac or the card.
+    // Stored as the user preference; applyEffectivePoll() (below) turns it
+    // into the live POLL_INTERVAL_MS, which Battery Save may stretch.
     int sec = doc["poll_interval_sec"].as<int>();
-    POLL_INTERVAL_MS = (uint32_t)constrain(sec, 5, 3600) * 1000;
+    cfgPollIntervalSec = (uint32_t)constrain(sec, 5, 3600);
   }
   if (!doc["screen_rotation"].isNull()) cfgScreenRotation = doc["screen_rotation"].as<int>();
   if (!doc["touch_x_min"].isNull()) cfgTouchXMin = doc["touch_x_min"].as<int>();
@@ -59,6 +61,15 @@ void loadRuntimeConfig() {
   if (!doc["show_countdown"].isNull()) {
     cfgShowCountdown = doc["show_countdown"].as<int>() != 0;
   }
+  if (!doc["battery_save"].isNull()) {
+    // 0=OFF, 1=ON, 2=AUTO (legacy 0/1 still map correctly).
+    cfgBatterySaveMode = constrain(doc["battery_save"].as<int>(),
+                                   BATTERY_SAVE_OFF, BATTERY_SAVE_AUTO);
+  }
+  // Apply after all related keys are loaded so Battery Save can floor the
+  // poll interval against the user's poll_interval_sec preference. AUTO
+  // won't floor until a live fetch sets serverBatterySave.
+  applyEffectivePoll();
   Serial.println("[config] loaded overrides from /config.json");
 }
 
@@ -99,102 +110,6 @@ void logDiag(const char* event) {
     f.close();
   }
   unlockSD();
-}
-
-// ── SD LOG ─────────────────────────────────────────────────
-static const char* DAILY_LOG_PATH = "/daily_log.csv";
-
-// Read the tail of the CSV into longTrend[]. Streamed line-by-line (never
-// buffered whole) since the file grows unbounded over the card's lifetime;
-// only the most recent LONG_TREND_DAYS rows matter.
-void loadLongTrendFromSD() {
-  longTrendCount = 0;
-  File f = SD.open(DAILY_LOG_PATH, FILE_READ);
-  if (!f) return;  // no log yet (fresh card) — not an error
-
-  String lastDate;
-  while (f.available()) {
-    String line = f.readStringUntil('\n');
-    line.trim();
-    if (!line.length()) continue;
-    int comma = line.indexOf(',');
-    if (comma < 0) continue;
-    lastDate = line.substring(0, comma);
-    int64_t tokens = line.substring(comma + 1).toInt();
-    if (longTrendCount < LONG_TREND_DAYS) {
-      longTrend[longTrendCount++] = tokens;
-    } else {
-      // Shift left to keep only the newest LONG_TREND_DAYS rows.
-      memmove(longTrend, longTrend + 1, (LONG_TREND_DAYS - 1) * sizeof(int64_t));
-      longTrend[LONG_TREND_DAYS - 1] = tokens;
-    }
-  }
-  f.close();
-
-  // Recover lastLoggedYday from the last logged date so a reboot mid-day
-  // doesn't re-append a row for a day already recorded.
-  if (lastDate.length() == 10) {
-    struct tm t = {};
-    t.tm_year = lastDate.substring(0, 4).toInt() - 1900;
-    t.tm_mon = lastDate.substring(5, 7).toInt() - 1;
-    t.tm_mday = lastDate.substring(8, 10).toInt();
-    time_t asTime = mktime(&t);
-    struct tm normalized;
-    localtime_r(&asTime, &normalized);
-    STATE.lastLoggedYday = normalized.tm_yday;
-  }
-}
-
-// Called once per poll cycle, right after fetchUsage(). Appends a row only
-// when the local calendar day has just rolled over since the last poll,
-// logging the day that just ended (yesterday, relative to nowInfo) with the
-// token total it finished on — captured by the caller *before* fetchUsage()
-// overwrote STATE.trend[6] with the new day's (near-zero) running total.
-void appendDailyLogIfNeeded(const struct tm& nowInfo, int64_t justEndedDayTokens) {
-  if (!STATE.sdOk) return;
-
-  struct tm nowCopy = nowInfo;
-  time_t nowEpoch = mktime(&nowCopy);
-  time_t yesterdayEpoch = nowEpoch - 86400;
-  struct tm yesterday;
-  localtime_r(&yesterdayEpoch, &yesterday);
-
-  lockState();
-  int lastYday = STATE.lastLoggedYday;
-  unlockState();
-
-  if (yesterday.tm_yday == lastYday) return;  // same day, nothing to do
-
-  if (lastYday == -1) {
-    // First poll ever (fresh card, nothing to compare against yet) — just
-    // record yesterday's yday as the baseline; the actual log starts tomorrow.
-    lockState();
-    STATE.lastLoggedYday = yesterday.tm_yday;
-    unlockState();
-    return;
-  }
-
-  char dateBuf[11];
-  snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d",
-            yesterday.tm_year + 1900, yesterday.tm_mon + 1, yesterday.tm_mday);
-
-  lockSD();
-  File f = SD.open(DAILY_LOG_PATH, FILE_APPEND);
-  if (f) {
-    f.printf("%s,%lld\n", dateBuf, (long long)justEndedDayTokens);
-    f.close();
-  }
-  unlockSD();
-
-  lockState();
-  if (longTrendCount < LONG_TREND_DAYS) {
-    longTrend[longTrendCount++] = justEndedDayTokens;
-  } else {
-    memmove(longTrend, longTrend + 1, (LONG_TREND_DAYS - 1) * sizeof(int64_t));
-    longTrend[LONG_TREND_DAYS - 1] = justEndedDayTokens;
-  }
-  STATE.lastLoggedYday = yesterday.tm_yday;
-  unlockState();
 }
 
 // ── SELF-HOSTED ASSETS ─────────────────────────────────────

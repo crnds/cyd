@@ -80,6 +80,52 @@ h1 span { color: var(--muted); font-weight: 400; }
 .toggle-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .toggle-btn:disabled { opacity: 0.45; cursor: wait; }
 
+/* Battery saver panel: status + on/off control */
+.power-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.power-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+  flex: 1;
+}
+.power-status .value { font-size: 1.35rem; font-weight: 700; }
+.power-status .sub { color: var(--text2); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+.power-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px 16px;
+  width: 100%;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.power-meta dt { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 2px; }
+.power-meta dd { color: var(--text); font-variant-numeric: tabular-nums; }
+.power-toggle {
+  padding: 9px 18px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--surface-alt);
+  color: var(--text);
+  white-space: nowrap;
+  transition: background 0.2s ease, opacity 0.2s ease;
+}
+.power-toggle.on { background: var(--accent); color: #1a0a00; border-color: transparent; }
+.power-toggle.off { background: var(--surface-alt); color: var(--text2); }
+.power-toggle:hover { opacity: 0.85; }
+.power-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.power-toggle:disabled { opacity: 0.45; cursor: wait; }
+
 main { max-width: 960px; margin: 0 auto; display: grid; gap: 16px; }
 
 .banner {
@@ -253,6 +299,36 @@ footer {
     </div>
   </section>
 
+  <section class="panel" aria-label="Battery saver">
+    <h2>Battery saver</h2>
+    <div class="power-row">
+      <div class="power-status">
+        <div class="value dim" id="v-battery-save">—</div>
+        <div class="sub" id="s-battery-save">Mac low-power cadences (BTC / weather / scan)</div>
+      </div>
+      <button type="button" class="power-toggle off" id="battery-save-btn" disabled
+              aria-label="Toggle battery saver on or off">Turn on</button>
+    </div>
+    <dl class="power-meta">
+      <div>
+        <dt>Power source</dt>
+        <dd id="v-power-source">—</dd>
+      </div>
+      <div>
+        <dt>Battery</dt>
+        <dd id="v-power-pct">—</dd>
+      </div>
+      <div>
+        <dt>Control</dt>
+        <dd id="v-power-source-mode">—</dd>
+      </div>
+      <div>
+        <dt>HTTP server</dt>
+        <dd id="v-power-paused">—</dd>
+      </div>
+    </dl>
+  </section>
+
   <section class="panel" aria-label="Diagnostics">
     <h2>Diagnostics</h2>
     <div id="checks"></div>
@@ -295,6 +371,7 @@ const STATE = {
   status: null,
   controlUp: false,
   busy: false,
+  batteryBusy: false,
 };
 
 // ── FORMATTING ─────────────────────────────────────────────
@@ -356,6 +433,35 @@ async function postAction(action) {
   // launchd takes a beat to spawn/kill the process; refresh twice.
   setTimeout(fetchStatus, 800);
   setTimeout(fetchStatus, 2500);
+}
+
+async function postBatterySave(enabled) {
+  if (STATE.batteryBusy) return;
+  STATE.batteryBusy = true;
+  render();
+  const logEl = document.getElementById('action-log');
+  logEl.className = 'action-log';
+  logEl.textContent = enabled ? 'Turning battery saver on…' : 'Turning battery saver off…';
+  try {
+    const resp = await fetch(CONTROL_BASE + '/api/battery-save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!enabled }),
+    });
+    const doc = await resp.json();
+    logEl.textContent = doc.detail || (doc.ok ? 'done' : 'failed');
+    if (!doc.ok) logEl.className = 'action-log err';
+    // Optimistic update so the panel flips before the next 4s poll.
+    if (doc.ok && doc.power && STATE.status && STATE.status.endpoint) {
+      STATE.status.endpoint.power = doc.power;
+    }
+  } catch (err) {
+    logEl.textContent = 'Control server unreachable: ' + err.message;
+    logEl.className = 'action-log err';
+  }
+  STATE.batteryBusy = false;
+  render();
+  setTimeout(fetchStatus, 400);
 }
 
 // ── RENDER ─────────────────────────────────────────────────
@@ -442,8 +548,58 @@ function render() {
       newest.ip + ' · ' + fmtAgo(newest.last_seen_sec));
   }
 
+  // Battery saver panel
+  const power = ep.power || null;
+  const bsVal = document.getElementById('v-battery-save');
+  const bsSub = document.getElementById('s-battery-save');
+  const bsBtn = document.getElementById('battery-save-btn');
+  if (!ep.up || !power) {
+    bsVal.textContent = ep.up ? 'unknown' : '—';
+    bsVal.className = 'value dim';
+    bsSub.textContent = ep.up
+      ? 'usage server has no power field yet — restart com.corner.cydusage'
+      : 'server not responding';
+    document.getElementById('v-power-source').textContent = '—';
+    document.getElementById('v-power-pct').textContent = '—';
+    document.getElementById('v-power-source-mode').textContent = '—';
+    document.getElementById('v-power-paused').textContent = '—';
+    bsBtn.disabled = true;
+    bsBtn.textContent = 'Turn on';
+    bsBtn.className = 'power-toggle off';
+    bsBtn.onclick = null;
+  } else {
+    const on = !!power.battery_save;
+    bsVal.textContent = on ? 'ON' : 'OFF';
+    bsVal.className = 'value ' + (on ? 'good' : 'dim');
+    const src = power.source === 'manual' ? 'manual override' : 'auto from AC';
+    bsSub.textContent = on
+      ? 'low-power cadences active · ' + src
+      : 'full-speed cadences · ' + src;
+    document.getElementById('v-power-source').textContent =
+      power.on_ac ? 'AC power' : 'Battery';
+    document.getElementById('v-power-pct').textContent =
+      power.percent == null ? 'n/a (desktop?)' : power.percent + '%';
+    document.getElementById('v-power-source-mode').textContent =
+      power.battery_save_manual === true ? 'forced on'
+        : power.battery_save_manual === false ? 'forced off'
+        : 'auto';
+    document.getElementById('v-power-paused').textContent =
+      power.paused ? 'paused (≤50% battery)' : 'listening';
+    bsBtn.disabled = STATE.batteryBusy || STATE.busy;
+    if (on) {
+      bsBtn.textContent = 'Turn off';
+      bsBtn.className = 'power-toggle on';
+      bsBtn.onclick = () => postBatterySave(false);
+    } else {
+      bsBtn.textContent = 'Turn on';
+      bsBtn.className = 'power-toggle off';
+      bsBtn.onclick = () => postBatterySave(true);
+    }
+  }
+
   // Diagnostics checklist
   const age = ep.up ? generatedAgeSec(ep.generated_at) : null;
+  const powerOn = !!(ep.power && ep.power.battery_save);
   const checks = [
     ['launchd job loaded', ld.loaded, ld.state || ''],
     ['server process running', !!ld.pid, ld.pid ? 'pid ' + ld.pid : ''],
@@ -452,6 +608,9 @@ function render() {
     ['plan limits from keychain', !!(ep.up && ep.limits_ok), ''],
     ['board polled recently', boards.length > 0 && boards[0].last_seen_sec <= BOARD_STALE_SEC,
       boards.length ? fmtAgo(boards[0].last_seen_sec) : 'never seen'],
+    ['battery saver', ep.up && !!ep.power, ep.power
+      ? ((powerOn ? 'ON' : 'OFF') + ' · ' + (ep.power.source || '?'))
+      : ''],
   ];
   document.getElementById('checks').innerHTML = checks.map(([name, ok, detail]) =>
     '<div class="check-row ' + (ok ? 'pass' : 'fail') + '">' +

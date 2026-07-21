@@ -16,6 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LOG_GLOB = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 PORT = 8787
 SCAN_INTERVAL_SEC = 15
+# On battery (still serving): slow the jsonl tail a bit. Token pages update
+# from board polls of cached aggregates, so 30s ingest lag is invisible.
+SCAN_INTERVAL_BATTERY_SEC = 30
 RETENTION = timedelta(days=8)
 ACTIVE_WINDOW_SEC = 180
 # Assumed model context size for the "context window" percent — the jsonl
@@ -53,41 +56,115 @@ STATE = {
     # Bangkok weather for the status card + Weather page: current + next-6h
     # hourly + next-5d daily, fetched here so the board needs no TLS.
     "weather": None,
+    # Power / battery-save. battery_guard_loop writes on_ac/percent/paused;
+    # battery_save_manual is set by POST /api/battery-save (control panel):
+    #   None  → auto (follow AC: unplugged = save on)
+    #   True  → force low-power cadences on
+    #   False → force full-speed cadences (even on battery)
+    # on_ac=True until the first pmset sample so desktop Macs stay full-speed.
+    "power": {
+        "on_ac": True,
+        "percent": None,
+        "paused": False,
+        "battery_save_manual": None,
+    },
     "activity_event": threading.Event(),
     "lock": threading.Lock(),
 }
 
 CLIENT_RETENTION = timedelta(hours=24)
+# How long after the last board/sim poll we treat the Mac as "no clients".
+CLIENT_ACTIVE_SEC = 180
+# Idle park timeout while clients are absent but the HTTP server is still up.
+IDLE_WAIT_SEC = 60
+# Harder park while battery_guard has unbound the socket — nothing can wake us
+# via HTTP, so don't spin every minute just to re-check is_client_active.
+PAUSED_WAIT_SEC = 300
 
 
 def is_client_active():
     now = datetime.now(timezone.utc)
     with STATE["lock"]:
-        # Active if a client requested within the last 3 minutes
         for ip, ts in STATE["clients"].items():
-            if (now - ts).total_seconds() <= 180:
+            if (now - ts).total_seconds() <= CLIENT_ACTIVE_SEC:
                 return True
     return False
 
 
+def is_http_paused():
+    with STATE["lock"]:
+        return bool(STATE["power"].get("paused"))
+
+
+def power_snapshot():
+    # Read-only view of power + effective battery_save for API/status.
+    with STATE["lock"]:
+        p = dict(STATE["power"])
+    on_ac = bool(p.get("on_ac", True))
+    manual = p.get("battery_save_manual")  # None | True | False
+    if manual is not None:
+        battery_save = bool(manual)
+        source = "manual"
+    else:
+        battery_save = not on_ac
+        source = "auto"
+    return {
+        "on_ac": on_ac,
+        "percent": p.get("percent"),
+        "paused": bool(p.get("paused")),
+        "battery_save": battery_save,
+        "battery_save_manual": manual,
+        "source": source,
+    }
+
+
+def is_on_battery():
+    # Low-power cadences (BTC/weather/scan/limits). Named for historical
+    # reasons; now also honors a manual battery_save override from the
+    # control panel, not only physical AC state.
+    return power_snapshot()["battery_save"]
+
+
+def set_battery_save_manual(enabled):
+    # enabled True/False forces battery-save on/off; wake loops so intervals
+    # change without waiting out a sleep.
+    with STATE["lock"]:
+        p = dict(STATE["power"])
+        p["battery_save_manual"] = bool(enabled)
+        STATE["power"] = p
+    STATE["activity_event"].set()
+    log_err("battery_save: manual override %s"
+            % ("on" if enabled else "off"))
+
+
 def activity_gated_loop(body):
     # Shared "skip work while no client has polled recently" wrapper for
-    # scan_loop/limits_loop/market_loop: they were each hand-rolling this same
-    # preamble. The first iteration always runs (so state is populated even
-    # before any client connects); after that, an idle stretch parks the
-    # thread on activity_event instead of spinning its own poll loop.
+    # scan_loop/limits_loop/market_loop. The first iteration always runs (so
+    # state is populated even before any client connects); after that, idle
+    # stretches park on activity_event instead of spinning a poll loop.
+    # While battery_guard has unbound the listener, park harder — no HTTP
+    # client can set the event until the socket is rebound.
     first_run = True
     while True:
-        if not first_run and not is_client_active():
-            with STATE["lock"]:
-                STATE["activity_event"].clear()
-            STATE["activity_event"].wait(timeout=60)
+        if not first_run and (is_http_paused() or not is_client_active()):
+            # clear-then-recheck: a poll between is_client_active and clear
+            # would otherwise lose its wake signal for a full idle timeout.
+            STATE["activity_event"].clear()
+            if is_http_paused():
+                STATE["activity_event"].wait(timeout=PAUSED_WAIT_SEC)
+                continue
+            if is_client_active():
+                continue
+            STATE["activity_event"].wait(timeout=IDLE_WAIT_SEC)
             continue
         first_run = False
         body()
 
 
 LIMITS_INTERVAL_SEC = 120
+# On battery (still serving — above BATTERY_LOW_PCT): stretch OAuth a bit.
+# Display already recomputes resets_in_sec per request from the last snapshot.
+LIMITS_INTERVAL_BATTERY_SEC = 300
 # The OAuth endpoint rate-limits aggressive polling; after a 429, back off
 # hard — the last-good snapshot plus per-request resets_in_sec keeps the
 # board's display fresh in the meantime. Retry-After is respected but clamped:
@@ -114,8 +191,15 @@ WEATHER_URL = (
     "&timezone=Asia%2FBangkok&forecast_days=6"
 )
 WEATHER_PLACE = "Bangkok"
-BTC_INTERVAL_SEC = 10
+# 60s is plenty for a 320px tile — the old 10s cadence was ~8640 HTTPS/day
+# of radio/TLS work that never changed what the board could usefully show.
+# On battery: stretch further (3 min BTC / 30 min weather) so the Mac isn't
+# doing continuous HTTPS while trying to idle; pairs with the board's
+# Battery Save 2 min usage-poll floor.
+BTC_INTERVAL_SEC = 60
+BTC_INTERVAL_BATTERY_SEC = 180
 WEATHER_INTERVAL_SEC = 600
+WEATHER_INTERVAL_BATTERY_SEC = 1800
 
 # The CYD polls every ~20s nonstop; that's frequent enough that macOS never
 # accumulates a long idle gap and just never commits to real system sleep.
@@ -283,6 +367,10 @@ def fetch_limits():
     }
 
 
+def limits_interval():
+    return LIMITS_INTERVAL_BATTERY_SEC if is_on_battery() else LIMITS_INTERVAL_SEC
+
+
 def limits_loop():
     was_empty = False
     last_fetch = 0.0
@@ -290,8 +378,9 @@ def limits_loop():
     def body():
         nonlocal was_empty, last_fetch
         now = time.time()
+        interval = limits_interval()
         sleep_sec = 5
-        if now - last_fetch >= LIMITS_INTERVAL_SEC:
+        if now - last_fetch >= interval:
             try:
                 limits = fetch_limits()
                 if limits:
@@ -320,11 +409,11 @@ def limits_loop():
                                     LIMITS_429_BACKOFF_MAX_SEC)
                     log_err(f"limits_loop: backing off {sleep_sec}s "
                             f"(Retry-After: {e.headers.get('Retry-After')!r})")
-                    last_fetch = now - LIMITS_INTERVAL_SEC + sleep_sec
+                    last_fetch = now - interval + sleep_sec
             else:
-                sleep_sec = LIMITS_INTERVAL_SEC
+                sleep_sec = interval
         else:
-            sleep_sec = max(1, int(LIMITS_INTERVAL_SEC - (now - last_fetch)))
+            sleep_sec = max(1, int(interval - (now - last_fetch)))
 
         time.sleep(sleep_sec)
 
@@ -571,13 +660,20 @@ def fetch_weather():
         return None
 
 
+def market_intervals():
+    if is_on_battery():
+        return BTC_INTERVAL_BATTERY_SEC, WEATHER_INTERVAL_BATTERY_SEC
+    return BTC_INTERVAL_SEC, WEATHER_INTERVAL_SEC
+
+
 def market_loop():
-    # BTC on a ~10s cadence, weather every 10 min. Each keeps its last good value
-    # on failure so a transient outage doesn't blank the board's tiles.
+    # BTC ~60s on AC / ~3 min on battery; weather 10 min / 30 min. Each keeps
+    # its last good value on failure so a transient outage doesn't blank tiles.
     last_weather = 0.0
 
     def body():
         nonlocal last_weather
+        btc_iv, weather_iv = market_intervals()
         try:
             btc = fetch_btc()
             if btc:
@@ -585,7 +681,7 @@ def market_loop():
         except Exception as e:
             log_err(f"market_loop btc: {type(e).__name__}: {e}")
         now = time.time()
-        if now - last_weather >= WEATHER_INTERVAL_SEC:
+        if now - last_weather >= weather_iv:
             last_weather = now
             try:
                 weather = fetch_weather()
@@ -593,7 +689,7 @@ def market_loop():
                     STATE["weather"] = weather
             except Exception as e:
                 log_err(f"market_loop weather: {type(e).__name__}: {e}")
-        time.sleep(BTC_INTERVAL_SEC)
+        time.sleep(btc_iv)
 
     activity_gated_loop(body)
 
@@ -786,8 +882,8 @@ def maybe_log_stats():
 
 def compute_aggregates():
     # Rolls the bucketed state up into everything build_report() needs that
-    # doesn't have to be fresh on every single request (today/last5h/last24h/
-    # week totals, top projects, per-model cost split, 7-day trend). Called
+    # doesn't have to be fresh on every single request (today/last5h/week
+    # totals, top projects, per-model cost split, 7-day trend). Called
     # once per scan cycle (~15s) instead of once per HTTP request, so it's
     # decoupled from how many clients are polling.
     now = datetime.now(timezone.utc)
@@ -798,14 +894,12 @@ def compute_aggregates():
 
     today_tokens = today_cost = 0
     last5h_tokens = last5h_cost = 0
-    last24h_tokens = last24h_cost = 0
     week_tokens = week_cost = 0
     project_totals = {}
     model_totals = {}
     day_totals = {}
 
     five_h_ago = now - timedelta(hours=5)
-    twenty_four_h_ago = now - timedelta(hours=24)
     seven_d_ago = now - timedelta(days=7)
 
     for bucket_epoch, dims in buckets:
@@ -825,10 +919,6 @@ def compute_aggregates():
         if bucket_dt >= five_h_ago:
             last5h_tokens += bucket_tokens
             last5h_cost += bucket_cost
-
-        if bucket_dt >= twenty_four_h_ago:
-            last24h_tokens += bucket_tokens
-            last24h_cost += bucket_cost
 
         if bucket_dt >= seven_d_ago:
             week_tokens += bucket_tokens
@@ -860,7 +950,6 @@ def compute_aggregates():
     aggregates = {
         "today": {"tokens": today_tokens, "cost": round(today_cost, 4)},
         "last5h": {"tokens": last5h_tokens, "cost": round(last5h_cost, 4)},
-        "last24h": {"tokens": last24h_tokens, "cost": round(last24h_cost, 4)},
         "week": {"tokens": week_tokens, "cost": round(week_cost, 4)},
         "projects": [{"name": name, "tokens": tokens} for name, tokens in top_projects],
         "models": models,
@@ -868,6 +957,12 @@ def compute_aggregates():
     }
     with STATE["lock"]:
         STATE["aggregates"] = aggregates
+
+
+def scan_interval():
+    # On battery, scan half as often — jsonl tails are cheap, but glob +
+    # recompute every 15s is pure waste when the Mac is trying to idle.
+    return SCAN_INTERVAL_BATTERY_SEC if is_on_battery() else SCAN_INTERVAL_SEC
 
 
 def scan_loop():
@@ -879,7 +974,7 @@ def scan_loop():
         except Exception as e:
             # never let a transient error (e.g. during sleep/wake) kill the thread
             log_err(f"scan_loop: {type(e).__name__}: {e}")
-        time.sleep(SCAN_INTERVAL_SEC)
+        time.sleep(scan_interval())
 
     activity_gated_loop(body)
 
@@ -890,7 +985,7 @@ def build_report():
     with STATE["lock"]:
         agg = STATE["aggregates"] or {
             "today": {"tokens": 0, "cost": 0.0}, "last5h": {"tokens": 0, "cost": 0.0},
-            "last24h": {"tokens": 0, "cost": 0.0}, "week": {"tokens": 0, "cost": 0.0},
+            "week": {"tokens": 0, "cost": 0.0},
             "projects": [], "models": [], "trend": [0] * 7,
         }
         ctx = STATE["context"]
@@ -938,9 +1033,9 @@ def build_report():
 
     return {
         "generated_at": now.isoformat(),
+        "epoch": int(now.timestamp()),
         "today": agg["today"],
         "last5h": agg["last5h"],
-        "last24h": agg["last24h"],
         "week": agg["week"],
         "active_now": active_now,
         "last_activity_sec": last_activity_sec,
@@ -954,12 +1049,22 @@ def build_report():
         "btc": STATE["btc"],
         "weather": STATE["weather"],
         "clients": clients,
+        "power": power_snapshot(),
     }
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
+
+    def _send_json(self, doc, status=200):
+        body = json.dumps(doc).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
         if self.path != "/api/usage":
@@ -973,13 +1078,37 @@ class Handler(BaseHTTPRequestHandler):
         if ip not in ("127.0.0.1", "::1"):
             # One heartbeat line per board poll; local probes stay quiet.
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {ip} GET /api/usage", flush=True)
-        body = json.dumps(build_report()).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_json(build_report())
+
+    def do_POST(self):
+        # Manual battery-save override from the localhost control panel.
+        # LAN clients (the board) get 403 — power policy stays Mac-local.
+        if self.path != "/api/battery-save":
+            self.send_response(404)
+            self.end_headers()
+            return
+        ip = self.client_address[0]
+        if ip not in ("127.0.0.1", "::1"):
+            self._send_json({"ok": False, "detail": "localhost only"}, status=403)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            doc = json.loads(raw.decode("utf-8") or "{}")
+        except ValueError:
+            self._send_json({"ok": False, "detail": "invalid JSON"}, status=400)
+            return
+        if "enabled" not in doc or not isinstance(doc.get("enabled"), bool):
+            self._send_json(
+                {"ok": False, "detail": "body must be {\"enabled\": true|false}"},
+                status=400,
+            )
+            return
+        set_battery_save_manual(doc["enabled"])
+        self._send_json({"ok": True, "power": power_snapshot()})
 
 
 class Server(ThreadingHTTPServer):
@@ -994,17 +1123,38 @@ def start_http_server():
     return server
 
 
+def set_power_state(on_ac, percent, paused):
+    # Preserve battery_save_manual across pmset samples — the control panel
+    # owns that field, not the battery guard.
+    with STATE["lock"]:
+        prev = STATE["power"]
+        STATE["power"] = {
+            "on_ac": on_ac,
+            "percent": percent,
+            "paused": paused,
+            "battery_save_manual": prev.get("battery_save_manual"),
+        }
+        changed = (prev.get("on_ac") != on_ac or prev.get("paused") != paused)
+    if changed:
+        # Wake gated loops so they pick up the new cadence / hard-park promptly
+        # instead of waiting out a full idle timeout.
+        STATE["activity_event"].set()
+
+
 def battery_guard_loop():
     # Owns the HTTP server's lifecycle: fully unbinds the listening socket
     # while on battery below BATTERY_LOW_PCT (so the board sees OFFLINE
     # instead of the Mac's battery hitting 0%), and rebinds once the Mac is
-    # back on AC or the battery has recovered.
+    # back on AC or the battery has recovered. Also publishes on_ac/paused
+    # into STATE["power"] so the other loops can throttle before we hard-stop.
     server = start_http_server()
     paused = False
     while True:
         time.sleep(BATTERY_CHECK_INTERVAL_SEC)
         status = battery_status()
         if status is None:
+            # Desktop / unknown: keep serving, treat as AC for cadence.
+            set_power_state(True, None, paused)
             continue
         percent, on_ac = status
         should_pause = (not on_ac) and percent <= BATTERY_LOW_PCT
@@ -1021,6 +1171,7 @@ def battery_guard_loop():
                         f"on_ac={on_ac}), resuming HTTP server")
                 server = start_http_server()
                 paused = False
+            set_power_state(on_ac, percent, paused)
         except Exception as e:
             log_err(f"battery_guard: {type(e).__name__}: {e}")
 

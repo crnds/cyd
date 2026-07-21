@@ -13,6 +13,16 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <!-- Background + low-priority I/O: tell launchd this is a helper, not
+         interactive UI work. Helps App Nap / scheduler deprioritize us when
+         the Mac is trying to idle (the real power cost is sleep-prevention
+         from board polls; CPU itself is already tiny). -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>5</integer>
     <key>StandardOutPath</key>
     <string>/tmp/cydusage.log</string>
     <key>StandardErrorPath</key>

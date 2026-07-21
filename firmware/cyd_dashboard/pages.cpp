@@ -13,12 +13,12 @@ void flashTouchBorder(bool isRight) {
   const int T = 5;
   const uint16_t WHITE = 0xFFFF;
   if (isRight) {
-    gfx.fillRect(152, 0, 152, T, WHITE);        // top right
-    gfx.fillRect(152, 240 - T, 152, T, WHITE);  // bottom right
-    gfx.fillRect(304 - T, 0, T, 240, WHITE);    // right
+    gfx.fillRect(160, 0, 160, T, WHITE);        // top right
+    gfx.fillRect(160, 240 - T, 160, T, WHITE);  // bottom right
+    gfx.fillRect(320 - T, 0, T, 240, WHITE);    // right
   } else {
-    gfx.fillRect(0, 0, 152, T, WHITE);          // top left
-    gfx.fillRect(0, 240 - T, 152, T, WHITE);    // bottom left
+    gfx.fillRect(0, 0, 160, T, WHITE);          // top left
+    gfx.fillRect(0, 240 - T, 160, T, WHITE);    // bottom left
     gfx.fillRect(0, 0, T, 240, WHITE);          // left
   }
   delay(60);
@@ -67,9 +67,6 @@ void presentFrame(bool fullScreen) {
   }
 
   if (g == &frame) {
-    // Clear rightmost 16px (5% of 320) to black so it's always blank/padded
-    frame.fillRect(304, 0, 16, 240, 0x0000);
-
     bool offline = !STATE.haveData;
     // All destination coords carry the pixel-shift offset; LovyanGFX clips
     // pushes past the panel edge, so no bounds checks are needed. After an
@@ -80,20 +77,20 @@ void presentFrame(bool fullScreen) {
       if (frame.getColorDepth() == 16) {
         uint16_t* buf = (uint16_t*)frame.getBuffer();
         if (fullScreen) {
-          // Push left half (0-159, height 240) + right footer (160-303, rows 220-239)
+          // Push left half (0-159, height 240) + right footer (160-319, rows 220-239)
           for (int y = 0; y < 240; y++) {
             gfx.pushImage(shiftX, y + shiftY, 160, 1, buf + y * 320);
           }
           for (int y = 220; y < 240; y++) {
-            gfx.pushImage(160 + shiftX, y + shiftY, 144, 1, buf + y * 320 + 160);
+            gfx.pushImage(160 + shiftX, y + shiftY, 160, 1, buf + y * 320 + 160);
           }
         } else {
-          // Push only the dirty band of the right half (160-303) where the GIF is drawn
+          // Push only the dirty band of the right half (160-319) where the GIF is drawn
           if (gifMinY <= gifMaxY) {
             int startY = gifMinY < 0 ? 0 : gifMinY;
             int endY = gifMaxY >= 220 ? 219 : gifMaxY;
             for (int y = startY; y <= endY; y++) {
-              gfx.pushImage(160 + shiftX, y + shiftY, 144, 1, buf + y * 320 + 160);
+              gfx.pushImage(160 + shiftX, y + shiftY, 160, 1, buf + y * 320 + 160);
             }
           }
         }
@@ -106,19 +103,19 @@ void presentFrame(bool fullScreen) {
             frame.readRect(0, y, 160, 1, rowBuf);
             gfx.pushImage(shiftX, y + shiftY, 160, 1, rowBuf);
           }
-          // Push right footer (160-303, rows 220-239)
+          // Push right footer (160-319, rows 220-239)
           for (int y = 220; y < 240; y++) {
-            frame.readRect(160, y, 144, 1, rowBuf);
-            gfx.pushImage(160 + shiftX, y + shiftY, 144, 1, rowBuf);
+            frame.readRect(160, y, 160, 1, rowBuf);
+            gfx.pushImage(160 + shiftX, y + shiftY, 160, 1, rowBuf);
           }
         } else {
-          // Push only the dirty band of the right half (160-303)
+          // Push only the dirty band of the right half (160-319)
           if (gifMinY <= gifMaxY) {
             int startY = gifMinY < 0 ? 0 : gifMinY;
             int endY = gifMaxY >= 220 ? 219 : gifMaxY;
             for (int y = startY; y <= endY; y++) {
-              frame.readRect(160, y, 144, 1, rowBuf);
-              gfx.pushImage(160 + shiftX, y + shiftY, 144, 1, rowBuf);
+              frame.readRect(160, y, 160, 1, rowBuf);
+              gfx.pushImage(160 + shiftX, y + shiftY, 160, 1, rowBuf);
             }
           }
         }
@@ -143,10 +140,11 @@ void drawFooter() {
   if (!connected) g->fillCircle(14, 230, 3, COL_ACCENT);
   else if (onPhase) g->fillCircle(14, 230, 4, COL_GOOD);
 
-  for (int i = 0; i < PAGE_COUNT; i++) {
-    uint16_t c = (i == currentPage) ? COL_ACCENT : COL_BORDER;
-    g->fillCircle(DOT_START_X + i * DOT_SPACING, 230, 3, c);
-  }
+  String pageStr = String(currentPage + 1) + " / " + String(PAGE_COUNT);
+  g->setTextColor(COL_TEXT2);
+  g->setTextSize(1);
+  g->setCursor(320 - (int)pageStr.length() * 6, 226);
+  g->print(pageStr);
 
   uint32_t flashUsed, flashTotal, ramUsed;
   int romPct = flashPercent(flashUsed, flashTotal);
@@ -173,8 +171,25 @@ void drawFooter() {
   // next poll approaches (full width = fetch imminent).
   uint32_t elapsed = millis() - lastPollMs;
   if (elapsed > POLL_INTERVAL_MS) elapsed = POLL_INTERVAL_MS;
-  int lineW = (int)((float)elapsed / POLL_INTERVAL_MS * 304);
+  int lineW = (int)((float)elapsed / POLL_INTERVAL_MS * 320);
   if (lineW > 0) g->fillRect(0, 239, lineW, 1, COL_TEXT2);
+}
+
+// Small top-right corner overlay shown on every page whenever Battery Save is
+// *active* (Settings ON, or AUTO + Mac power.battery_save) -- a persistent
+// reminder that the usage-poll interval is floored at BATTERY_SAVE_POLL_SEC.
+// No-ops when inactive, so callers can invoke it unconditionally. A solid
+// backing box behind the icon mirrors drawSessionResetOverlay()'s legibility
+// treatment over cat GIF frames. BATTERY_ICON_Y0/Y1 (state.h) mirror this
+// box's y-range for gif_player.cpp's dirty-band fold-in.
+void drawBatterySaveIcon() {
+  if (!batterySaveActive()) return;
+  const int boxX = 296, boxW = 22, boxH = BATTERY_ICON_Y1 - BATTERY_ICON_Y0 + 1;
+  g->fillRect(boxX, BATTERY_ICON_Y0, boxW, boxH, COL_BG);
+  const int bodyX = 300, bodyY = 5, bodyW = 13, bodyH = 7;
+  const int nubW = 2, nubH = 3;
+  g->fillRect(bodyX, bodyY, bodyW, bodyH, COL_YELLOW);
+  g->fillRect(bodyX + bodyW, bodyY + (bodyH - nubH) / 2, nubW, nubH, COL_YELLOW);
 }
 
 static void drawLimitBlock(int y, const char* title, int percent, const char* resets, long resetsInSec) {
@@ -183,16 +198,16 @@ static void drawLimitBlock(int y, const char* title, int percent, const char* re
   g->setCursor(10, y);
   g->print(title);
 
-  int barX = 10, barY = y + 22, barW = 175, barH = 16;
-  g->fillRoundRect(barX, barY, barW, barH, 3, COL_TRACK);
+  int barX = 10, barY = y + 22, barW = 191, barH = 16;
+  g->fillRect(barX, barY, barW, barH, COL_TRACK);
   if (percent >= 0) {
     int fillW = (int)((float)min(percent, 100) / 100 * barW);
-    g->fillRoundRect(barX, barY, max(fillW, 3), barH, 3, COL_ACCENT);
+    g->fillRect(barX, barY, max(fillW, 3), barH, COL_ACCENT);
   }
 
   g->setTextColor(COL_TEXT);
   g->setTextSize(2);
-  g->setCursor(195, barY + 1);
+  g->setCursor(211, barY + 1);
   g->print(percent >= 0 ? String(percent) + "% used" : "--");
 
   g->setTextColor(COL_TEXT2);
@@ -214,12 +229,12 @@ static void drawLimitsRow(int y, const String& label, const String& right, int p
   g->setCursor(10, y);
   g->print(label);
   g->setTextColor(COL_TEXT2);
-  g->setCursor(294 - (int)right.length() * 6, y);
+  g->setCursor(320 - (int)right.length() * 6, y);
   g->print(right);
-  g->fillRoundRect(10, y + 12, 284, 8, 2, COL_TRACK);
+  g->fillRect(10, y + 12, 310, 8, COL_TRACK);
   if (percent >= 0) {
-    int fillW = (int)((float)min(percent, 100) / 100 * 284 + 0.5f);
-    g->fillRoundRect(10, y + 12, max(fillW, 3), 8, 2, COL_ACCENT);
+    int fillW = (int)((float)min(percent, 100) / 100 * 310 + 0.5f);
+    g->fillRect(10, y + 12, max(fillW, 3), 8, COL_ACCENT);
   }
 }
 
@@ -319,7 +334,7 @@ static void drawProjectsPage() {
     }
 
     int y = 22;
-    int barMaxW = 230;
+    int barMaxW = 246;
     for (int i = 0; i < shown; i++) {
       g->setTextColor(COL_TEXT);
       g->setTextSize(1);
@@ -327,8 +342,8 @@ static void drawProjectsPage() {
       g->print(STATE.projectNames[i]);
 
       int barW = (int)((float)STATE.projectTokens[i] / maxTokens * barMaxW);
-      g->fillRoundRect(10, y + 10, barMaxW, 8, 2, COL_SURFACE);
-      g->fillRoundRect(10, y + 10, max(barW, 4), 8, 2, COL_ACCENT);
+      g->fillRect(10, y + 10, barMaxW, 8, COL_SURFACE);
+      g->fillRect(10, y + 10, max(barW, 4), 8, COL_ACCENT);
 
       g->setTextColor(COL_TEXT2);
       g->setCursor(10 + barMaxW + 8, y + 11);
@@ -339,7 +354,7 @@ static void drawProjectsPage() {
   }
 
   // ── lower half: 7-day trend ──
-  g->fillRect(10, 128, 284, 1, COL_BORDER);
+  g->fillRect(10, 128, 310, 1, COL_BORDER);
   g->setTextColor(COL_TEXT);
   g->setTextSize(1);
   g->setCursor(10, 134);
@@ -351,7 +366,7 @@ static void drawProjectsPage() {
   }
 
   const char* dayLabels[7] = {"-6", "-5", "-4", "-3", "-2", "-1", "today"};
-  int chartX = 24, chartY = 150, chartH = 64, barW = 32, gap = 8;
+  int chartX = 24, chartY = 150, chartH = 64, barW = 34, gap = 8;
   for (int i = 0; i < 7; i++) {
     int barH = (int)((float)STATE.trend[i] / maxTrend * chartH);
     int bx = chartX + i * (barW + gap);
@@ -368,7 +383,7 @@ static void drawProjectsPage() {
 // from circles/rects/lines, mapped from Open-Meteo's WMO weather_code. cx,cy
 // is the center of a ~24x20px icon anchored at (x,y).
 // Scaled down (~0.65x) from the original so the weather card can shrink to
-// match the BTC card's minimum content height (see drawStatusPage).
+// the clock card's short bottom-row height (see drawStatusPage).
 static void drawWeatherIcon(int x, int y, int code) {
   if (code < 0) {
     g->setTextColor(COL_TEXT2);
@@ -435,10 +450,10 @@ static void drawWeatherIcon(int x, int y, int code) {
 // Returns the fill width in px (-1 when percent is unknown) so callers can
 // overlay effects on the filled region (the green bars' shine sweep below).
 static int drawMiniBar(int x, int y, int w, int percent, uint16_t color, uint16_t trackColor = COL_TRACK, int h = 6) {
-  g->fillRoundRect(x, y, w, h, h / 2, trackColor);
+  g->fillRect(x, y, w, h, trackColor);
   if (percent < 0) return -1;
   int fillW = max((int)((float)min(percent, 100) / 100 * w), h);
-  g->fillRoundRect(x, y, fillW, h, h / 2, color);
+  g->fillRect(x, y, fillW, h, color);
   return fillW;
 }
 
@@ -449,8 +464,8 @@ static int drawMiniBar(int x, int y, int w, int percent, uint16_t color, uint16_
 // fills just see it pass through. Twin of simulator.html's drawShineStrip.
 static const uint32_t SHINE_PERIOD_MS = 2600;
 static const int SHINE_BAND_R = 7;
-static const int SHINE_BAR_X = 12, SHINE_BAR_W = 122, SHINE_BAR_H = 4;
-static const int SHINE_BAR_Y[2] = {61, 182};  // 5h, weekly (drawLimitsCard)
+static const int SHINE_BAR_X = 12, SHINE_BAR_W = 137, SHINE_BAR_H = 4;
+static const int SHINE_BAR_Y[2] = {51, 150};  // 5h, weekly (drawLimitsCard)
 // Fill widths cached by drawLimitsCard (under stateMutex) so shineTick can
 // repaint between renders without touching STATE — same lock-free-volatile
 // pattern as loop()'s poll-progress line.
@@ -510,8 +525,15 @@ static int elapsedPercentOfWindow(long remainingSec, long windowSec) {
 }
 
 static void drawLimitsCard() {
-  g->fillRoundRect(2, 4, 142, 216, 8, COL_SURFACE);
-  g->drawRoundRect(2, 4, 142, 216, 8, COL_BORDER);
+  // Two separate cards (5h / week) with a 2px gap between them, rather than
+  // one tall card split by an internal divider line (all card-to-card gaps
+  // on this page are 2px — see drawStatusPage's comment). Card height grew
+  // by the space freed from shrinking the old 4-6px gaps down to 2px, giving
+  // the content a bit more breathing room instead of just bottom padding.
+  g->fillRect(2, 2, 157, 99, COL_SURFACE);
+  g->drawRect(2, 2, 157, 99, COL_BORDER);
+  g->fillRect(2, 103, 157, 87, COL_SURFACE);
+  g->drawRect(2, 103, 157, 87, COL_BORDER);
 
   // Tick both countdowns down locally between polls.
   long sessionRem = STATE.sessionResetsInSec;
@@ -528,16 +550,16 @@ static void drawLimitsCard() {
   // ── left card: limits ──
   String sessionPctStr = STATE.sessionPercent >= 0 ? String(STATE.sessionPercent) + "%" : "--";
   g->setTextColor(COL_ACCENT);
-  g->setTextSize(4);
-  g->setCursor(12, 13);
+  g->setTextSize(3);
+  g->setCursor(12, 11);
   g->print(sessionPctStr);
-  drawCardLabel(12 + sessionPctStr.length() * 24 + 6, 37, "5H");
+  drawCardLabel(12 + sessionPctStr.length() * 18 + 6, 27, "5H");
 
-  drawMiniBar(12, 51, 122, STATE.sessionPercent, COL_ACCENT);
+  drawMiniBar(12, 41, 137, STATE.sessionPercent, COL_ACCENT);
   // Green reset-countdown bars (and their shine) are optional via Settings
   // "Show Countdown"; when off, clear the cached fill so shineTick no-ops.
   if (cfgShowCountdown) {
-    shineFillPx[0] = drawMiniBar(12, 61, 122, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+    shineFillPx[0] = drawMiniBar(12, 51, 137, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
     drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[0], shineFillPx[0], millis());
   } else {
     shineFillPx[0] = -1;
@@ -545,27 +567,23 @@ static void drawLimitsCard() {
 
   g->setTextColor(COL_TEXT2);
   g->setTextSize(2);
-  g->setCursor(12, 75);
-  g->print("resets:");
-  g->setCursor(12, 93);
-  g->print(STATE.sessionResets[0] != '\0' ? STATE.sessionResets : "--");
+  g->setCursor(12, 59);
+  g->print(STATE.sessionResets[0] != '\0' ? String("resets ") + STATE.sessionResets : String("resets --"));
   g->setTextColor(COL_TEXT);
   g->setTextSize(2);
-  g->setCursor(12, 111);
+  g->setCursor(12, 77);
   if (sessionRem >= 0) g->print("in " + fmtCountdown(sessionRem));
-
-  g->fillRect(12, 133, 122, 1, COL_BORDER);
 
   String weekPctStr = STATE.weekPercent >= 0 ? String(STATE.weekPercent) + "%" : "--";
   g->setTextColor(COL_ACCENT);
   g->setTextSize(3);
-  g->setCursor(12, 142);
+  g->setCursor(12, 110);
   g->print(weekPctStr);
-  drawCardLabel(12 + weekPctStr.length() * 18 + 6, 158, "WEEK");
+  drawCardLabel(12 + weekPctStr.length() * 18 + 6, 126, "WEEK");
 
-  drawMiniBar(12, 172, 122, STATE.weekPercent, COL_ACCENT);
+  drawMiniBar(12, 140, 137, STATE.weekPercent, COL_ACCENT);
   if (cfgShowCountdown) {
-    shineFillPx[1] = drawMiniBar(12, 182, 122, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+    shineFillPx[1] = drawMiniBar(12, 150, 137, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
     drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[1], shineFillPx[1], millis());
   } else {
     shineFillPx[1] = -1;
@@ -575,19 +593,44 @@ static void drawLimitsCard() {
   // card's inner width, so this line must stay size1.
   g->setTextColor(COL_TEXT2);
   g->setTextSize(1);
-  g->setCursor(12, 196);
+  g->setCursor(12, 164);
   g->print(STATE.weekResets[0] != '\0' ? String("resets ") + STATE.weekResets : String("resets --"));
 
   g->setTextColor(COL_TEXT);
   g->setTextSize(1);
-  g->setCursor(12, 206);
+  g->setCursor(12, 174);
   if (weekRem >= 0) g->print("in " + fmtCountdownDHM(weekRem));
+}
+
+// BTC price card: sits directly under the week card in the left column,
+// using the same 2px-gap convention as the rest of the page (see
+// drawStatusPage's comment). Shared by drawStatusPage and
+// drawMixedPageStatic so both pages show the same in-line "BTCUSDT <price>"
+// card.
+static void drawBtcCard() {
+  g->fillRect(2, 192, 157, 26, COL_SURFACE);
+  g->drawRect(2, 192, 157, 26, COL_BORDER);
+
+  // Label + price in-line ("BTCUSDT 65,920") rather than stacked "BTC/USDT" +
+  // price, so the whole thing fits in a short card. Label stays size1
+  // (size2 wouldn't fit alongside a size2 price in the 157px card width).
+  // Vertically centered in the 26px-tall card so both lines get an even pad.
+  g->setTextColor(COL_TEXT2);
+  g->setTextSize(1);
+  g->setCursor(12, 201);
+  g->print("BTCUSDT");
+
+  g->setTextColor(COL_TEXT);
+  g->setTextSize(2);
+  g->setCursor(60, 197);
+  g->print(fmtBtc(STATE.btcPrice));
 }
 
 void drawMixedPageStatic() {
   // Clear the footer background area to prevent text bloating/overlapping
   g->fillRect(0, 220, 320, 20, COL_BG);
   drawLimitsCard();
+  drawBtcCard();
   drawFooter();
 }
 
@@ -670,20 +713,27 @@ static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int s
 }
 
 // Card layout: one tall left card = session/week limits (always accent
-// orange); the right column is Bangkok analog clock (own row) + digital
-// clock/date (row below) on top (y=4 h=162), then a bottom row of two
-// side-by-side cards = weather (y=170 w=60) and BTC (y=170 w=86), both
-// trimmed to 46px — the minimum that still fits the (now smaller)
-// weather icon + temp text, which is the taller of the two — to give the
-// clock the extra room. 4px gaps throughout.
+// orange), with a short BTC price card underneath it (y=192 h=26, using
+// the room freed up when drawLimitsCard's 5h card was trimmed to its
+// content — see drawLimitsCard's comment); the right column is Bangkok
+// analog clock (own row) + digital clock/date (row below) on top (y=2
+// h=162, full width to the screen's right edge), then a weather card
+// stretched across the same full width (y=166, w=157), given the space
+// freed by tightening every gap on this page down to a uniform 2px — every
+// card-to-card gap and the outer screen margins are 2px, and the space that
+// used to sit idle in those gaps (4-6px each) was instead added to card
+// heights so their content gets more breathing room. Left (limits/BTC) and
+// right (clock/weather) columns are still 50:50 of the 320px screen: left
+// card x=2 w=157 (edge 159), right column x=161 w=157 (edge 318), with the
+// 2px column gap between them (159-161) matching the 2px margins at the
+// screen's own edges.
 static void drawStatusPage() {
   drawLimitsCard();
-  g->fillRoundRect(150, 4, 150, 162, 8, COL_SURFACE);
-  g->drawRoundRect(150, 4, 150, 162, 8, COL_BORDER);
-  g->fillRoundRect(150, 170, 60, 46, 8, COL_SURFACE);
-  g->drawRoundRect(150, 170, 60, 46, 8, COL_BORDER);
-  g->fillRoundRect(214, 170, 86, 46, 8, COL_SURFACE);
-  g->drawRoundRect(214, 170, 86, 46, 8, COL_BORDER);
+  drawBtcCard();
+  g->fillRect(161, 2, 157, 162, COL_SURFACE);
+  g->drawRect(161, 2, 157, 162, COL_BORDER);
+  g->fillRect(161, 166, 157, 52, COL_SURFACE);
+  g->drawRect(161, 166, 157, 52, COL_BORDER);
 
   // ── right cards: Bangkok analog + digital clock/date, weather, BTC price ──
   struct tm timeinfo;
@@ -705,8 +755,9 @@ static void drawStatusPage() {
   }
 
   // Row 1: analog clock, centered on the card's full width. Radius grew
-  // 36->44 using the height freed by shrinking the weather/BTC row below.
-  const int clockCx = 225, clockCy = 56, clockR = 44;
+  // 36->44->48->51, the latest bump using the height freed by tightening
+  // the gap between the digital time and date rows below from 8px to 2px.
+  const int clockCx = 240, clockCy = 61, clockR = 51;
   if (haveTime) {
     drawAnalogClock(clockCx, clockCy, clockR, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
                      haveReset, resetHour, resetMinute);
@@ -714,31 +765,28 @@ static void drawStatusPage() {
     g->drawCircle(clockCx, clockCy, clockR, COL_TEXT);
   }
 
-  // Row 2: digital time + date, back to their original size4/size2 (the
-  // clock card is tall enough now that they no longer need to share a row).
-  g->setTextSize(4);
-  g->setCursor(160, 104);
+  // Row 2: digital time + date, both centered on the card's horizontal
+  // midline (241, matching clockCx) since their text width varies with
+  // content. Digital time dropped from size4 to size3 to free up vertical
+  // room for the bigger analog clock above; date stays size2.
+  g->setTextSize(3);
   if (haveTime) {
     char hm[8];
-    snprintf(hm, sizeof(hm), "%02d.%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    snprintf(hm, sizeof(hm), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+    int tw = (int)strlen(hm) * 6 * 3;
+    g->setCursor(240 - tw / 2, 116);
     g->setTextColor(COL_TEXT);
     g->print(hm);
-    char ss[4];
-    snprintf(ss, sizeof(ss), ".%02d", timeinfo.tm_sec);
-    g->setTextColor(COL_TEXT2);
-    g->setTextSize(1);
-    // Bottom-align the small seconds against the big "HH.MM" cell (32px
-    // tall at size4 vs. 8px at size1): x is the fixed 5-char size4 advance.
-    g->setCursor(160 + 5 * 24, 128);
-    g->print(ss);
   } else {
+    const char* hm = "--:--";
+    int tw = (int)strlen(hm) * 6 * 3;
+    g->setCursor(240 - tw / 2, 116);
     g->setTextColor(COL_TEXT2);
-    g->print("--.--");
+    g->print(hm);
   }
 
   g->setTextColor(COL_TEXT2);
   g->setTextSize(2);
-  g->setCursor(160, 144);
   if (haveTime) {
     // Year dropped: "Mon 25 Jul 2026" at size2 would overrun the 132px
     // inner width; weekday+day+month fits at 120px.
@@ -748,96 +796,101 @@ static void drawStatusPage() {
     char buf[16];
     snprintf(buf, sizeof(buf), "%s %d %s", wdays[timeinfo.tm_wday], timeinfo.tm_mday,
              mons[timeinfo.tm_mon]);
+    int tw = (int)strlen(buf) * 6 * 2;
+    g->setCursor(240 - tw / 2, 142);
     g->print(buf);
   } else {
-    g->print("--");
+    const char* buf = "--";
+    int tw = (int)strlen(buf) * 6 * 2;
+    g->setCursor(240 - tw / 2, 142);
+    g->print(buf);
   }
 
+  // 1px divider between the "now" icon+temp block and the next-3-hours
+  // forecast to its right, centered in the existing gap so it doesn't
+  // touch either side's text/icons. (No matching divider on the left —
+  // the high/low column reads fine as plain whitespace-separated numbers,
+  // and skipping it keeps this side less cluttered.) Sized with an even
+  // 6px pad above/below within the taller (52px) card, rather than just
+  // shifting the old 34px line, so it uses the extra height freed by the
+  // page-wide 2px-gap pass instead of leaving it as dead space.
+  g->fillRect(215, 172, 1, 40, COL_BORDER);
+
+  // Today's high/low, in the gap between the card's left edge and the
+  // "now" icon — no room for "H"/"L" letter prefixes at this width, so
+  // bare numbers stacked high-over-low (bright/grey, same primary-vs-
+  // secondary color convention as the rest of the UI) is what fits. x=167
+  // leaves a visible left margin (rather than sitting flush against the
+  // card border). Rows line up with the icon (top) and temp (bottom)
+  // beside them.
+  g->setTextSize(1);
+  g->setCursor(167, 173);
+  g->setTextColor(COL_TEXT);
+  g->print(STATE.weatherHigh > -900 ? String(STATE.weatherHigh) : String("--"));
+  g->setCursor(167, 198);
+  g->setTextColor(COL_TEXT2);
+  g->print(STATE.weatherLow > -900 ? String(STATE.weatherLow) : String("--"));
+
   // Weather card: icon and temp stacked (rather than side by side) since
-  // the card is only 60px wide. The smaller icon (see drawWeatherIcon) is
-  // what lets this card fit in the new 46px height with icon-top-then-temp
-  // still snug against both edges.
-  drawWeatherIcon(169, 175, STATE.weatherCode);
+  // the "now" block was originally sized for a 60px-wide card. The smaller
+  // icon (see drawWeatherIcon) is what lets this block fit in the card's
+  // height with icon-top-then-temp still snug against both edges. Both are
+  // horizontally centered between the high/low column and the divider to
+  // the right (x=197), rather than left-anchored, so the block reads as
+  // its own column instead of hugging the high/low numbers.
+  const int NOW_CENTER_X = 197;
+  drawWeatherIcon(NOW_CENTER_X - 8, 174, STATE.weatherCode);
   g->setTextColor(COL_TEXT);
   g->setTextSize(2);
-  g->setCursor(165, 195);
   // No degree glyph in the built-in ASCII font, so just suffix "C" at smaller size and grey color.
   if (STATE.weatherTempC > -900) {
-    g->print(String((int)round(STATE.weatherTempC)));
+    String tempStr = String((int)round(STATE.weatherTempC));
+    int tw = tempStr.length() * 12 + 6;  // digits at size2 + "C" at size1
+    g->setCursor(NOW_CENTER_X - tw / 2, 194);
+    g->print(tempStr);
     g->setTextSize(1);
     g->setTextColor(COL_TEXT2);
     g->print("C");
   } else {
+    g->setCursor(NOW_CENTER_X - 12, 194);  // "--" at size2 = 24px wide
     g->print("--");
   }
 
-  // BTC card: label+price pushed down to the card's bottom edge (mirroring
-  // where the weather card's temp text sits) instead of leaving a gap below
-  // a top-anchored block — this card's content is shorter than weather's.
-  drawCardLabel(224, 184, "BTC/USDT");
+  // "Next 3 hours" forecast: three distinct hourly predictions (not just a
+  // single reading further out), filling the space freed when the weather
+  // card widened to take over the row the BTC card used to share.
+  // weatherHourly[] is 1h-stepped starting at the *current* hour (index 0,
+  // already shown by the "now" block above), so indices 1..3 are the next
+  // three hours. Column layout (hour label, icon, temp) mirrors the
+  // Weather page's hourly strip (see drawWeatherPage below). Slot 0 starts
+  // close enough to the right divider (x=215) that its icon clears it by
+  // only ~5px, closing up the wide gap that used to sit between the "now"
+  // temp and the first forecast column.
+  const int NEXT_HOUR_SLOT_X = 214, NEXT_HOUR_SLOT_W = 30;
+  for (int i = 0; i < 3; i++) {
+    int idx = i + 1;
+    int sx = NEXT_HOUR_SLOT_X + i * NEXT_HOUR_SLOT_W;
+    int cx = sx + NEXT_HOUR_SLOT_W / 2;
+    bool have = STATE.weatherHourlyCount > idx;
 
-  g->setTextColor(COL_TEXT);
-  g->setTextSize(2);
-  g->setCursor(221, 196);
-  g->print(fmtBtc(STATE.btcPrice));
-}
-
-static void drawLongTrendPage() {
-  g->setTextColor(COL_TEXT);
-  g->setTextSize(2);
-  g->setCursor(10, 6);
-  g->print("30-Day Trend");
-
-  if (!STATE.sdOk) {
-    // A bare centered grey message, since this page has nothing to show
-    // without the card.
+    char hbuf[4];
+    if (have) snprintf(hbuf, sizeof(hbuf), "%02d", STATE.weatherHourly[idx].hour);
+    else snprintf(hbuf, sizeof(hbuf), "--");
     g->setTextColor(COL_TEXT2);
-    g->setTextSize(2);
-    g->setCursor(52, 110);  // centered: "SD CARD NOT FOUND" is 17 chars * 12px = 204px
-    g->print("SD CARD NOT FOUND");
-    return;
-  }
+    g->setTextSize(1);
+    g->setCursor(cx - 6, 171);
+    g->print(hbuf);
 
-  // longTrend[] only gets a row once a day rolls over (appendDailyLogIfNeeded),
-  // so on its own it stops at yesterday — append one more bar so the rightmost
-  // bar matches the "today" label. It uses last24hTokens (a rolling trailing
-  // 24h sum), not trend[6] (midnight-to-now): trend[6] is a partial total that
-  // starts near zero at midnight and only represents a full day right before
-  // rollover, which would make every other, already-complete day's bar look
-  // inconsistent with it for most of the day.
-  int64_t bars[LONG_TREND_DAYS];
-  int barCount = longTrendCount;
-  for (int i = 0; i < barCount; i++) bars[i] = longTrend[i];
-  if (barCount < LONG_TREND_DAYS) {
-    bars[barCount++] = STATE.last24hTokens;
-  } else {
-    memmove(bars, bars + 1, (LONG_TREND_DAYS - 1) * sizeof(int64_t));
-    bars[LONG_TREND_DAYS - 1] = STATE.last24hTokens;
-  }
+    drawWeatherIcon(cx - 8, 183, have ? STATE.weatherHourly[idx].code : -1);
 
-  int64_t maxTokens = 1;
-  for (int i = 0; i < barCount; i++) {
-    if (bars[i] > maxTokens) maxTokens = bars[i];
+    char tbuf[6];
+    if (have) snprintf(tbuf, sizeof(tbuf), "%dC", STATE.weatherHourly[idx].tempC);
+    else snprintf(tbuf, sizeof(tbuf), "--");
+    int tw = (int)strlen(tbuf) * 6;
+    g->setTextColor(COL_TEXT);
+    g->setCursor(cx - tw / 2, 201);
+    g->print(tbuf);
   }
-
-  int chartX = 10, chartY = 36, chartH = 148, chartW = 290;
-  int barW = 6, gap = 4;
-  int startX = chartX + chartW - barCount * (barW + gap);
-  for (int i = 0; i < barCount; i++) {
-    int barH = (int)((float)bars[i] / maxTokens * chartH);
-    int bx = startX + i * (barW + gap);
-    int by = chartY + chartH - barH;
-    g->fillRoundRect(bx, by, barW, max(barH, 2), 2, COL_ACCENT);
-  }
-
-  g->setTextColor(COL_TEXT2);
-  g->setTextSize(1);
-  g->setCursor(chartX, chartY + chartH + 6);
-  g->print("oldest");
-  g->setCursor(chartX + chartW - 30, chartY + chartH + 6);
-  g->print("today");
-  g->setCursor(chartX, chartY + chartH + 18);
-  g->print(String(longTrendCount) + " days logged, peak " + fmtTokens(maxTokens));
 }
 
 static void drawFullStatBlock(int y, const char* title, int percent, const String& sub, uint16_t color) {
@@ -846,11 +899,11 @@ static void drawFullStatBlock(int y, const char* title, int percent, const Strin
   g->setCursor(10, y);
   g->print(title);
 
-  int barX = 10, barY = y + 14, barW = 230, barH = 16;
-  g->fillRoundRect(barX, barY, barW, barH, 3, COL_TRACK);
+  int barX = 10, barY = y + 14, barW = 246, barH = 16;
+  g->fillRect(barX, barY, barW, barH, COL_TRACK);
   if (percent >= 0) {
     int fillW = (int)((float)min(percent, 100) / 100 * barW);
-    g->fillRoundRect(barX, barY, max(fillW, 3), barH, 3, color);
+    g->fillRect(barX, barY, max(fillW, 3), barH, color);
   }
 
   g->setTextColor(COL_TEXT);
@@ -898,31 +951,31 @@ static void drawDevicePage() {
 // playing cat GIF, or the no-cats placeholder) — a solid bar behind the text
 // keeps it legible over a busy GIF frame. Drawn last, right before presentFrame().
 void drawOfflineBanner() {
-  g->fillRect(0, 0, 304, 44, COL_BG);
+  g->fillRect(0, 0, 320, 44, COL_BG);
   g->setTextColor(COL_TEXT);
   g->setTextSize(5);
-  g->setCursor(47, 6);  // centered: "OFFLINE" is 7 chars * 30px = 210px; (304-210)/2 = 47
+  g->setCursor(55, 6);  // centered: "OFFLINE" is 7 chars * 30px = 210px; (320-210)/2 = 55
   g->print("OFFLINE");
 }
 
 // Weather detail overlay (status-page weather card). Card-structured landscape
 // layout per design.md — no place / HOURLY / 5-DAY word labels (space goes to
 // daily row pitch). Hero (temp · H/L · icon · condition) + hourly 6-col +
-// 5-day range bars. Content band x=10..294; full 304×240, no footer; any tap
+// 5-day range bars. Content band x=10..320; full 320×240, no footer; any tap
 // dismisses. Twin of simulator.html drawWeatherPage — lockstep.
 static void drawWeatherPage() {
   // COL_BG (not pure black): borders define structure like the rest of the UI.
   g->fillScreen(COL_BG);
 
   static const char* WDAYS[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-  const int heroRight = 286;  // card right pad (10+284-8)
+  const int heroRight = 312;  // card right pad (10+310-8)
 
   // ── Hero card ────────────────────────────────────────────
-  // (10, 4, 284, 52) — single inline band fills the card:
+  // (10, 4, 310, 52) — single inline band fills the card:
   //   icon | size5 temp | size2 condition + size2 H/L
   // Icon leads on the far left, immediately before the current temp.
-  g->fillRoundRect(10, 4, 284, 52, 8, COL_SURFACE);
-  g->drawRoundRect(10, 4, 284, 52, 8, COL_BORDER);
+  g->fillRect(10, 4, 310, 52, COL_SURFACE);
+  g->drawRect(10, 4, 310, 52, COL_BORDER);
 
   // Icon far left, vertically centered in the 52px card (~14–16px tall).
   const int iconX = 16;
@@ -1001,15 +1054,15 @@ static void drawWeatherPage() {
   }
 
   // ── Hourly (next 6) — no "HOURLY" label ──────────────────
-  g->fillRoundRect(10, 60, 284, 56, 8, COL_SURFACE);
-  g->drawRoundRect(10, 60, 284, 56, 8, COL_BORDER);
+  g->fillRect(10, 60, 310, 56, COL_SURFACE);
+  g->drawRect(10, 60, 310, 56, COL_BORDER);
 
   const int hourCount = STATE.weatherHourlyCount > 0
                           ? (int)STATE.weatherHourlyCount : WEATHER_HOURLY_N;
-  // 6 equal columns: 6×47 = 282 (+1px side pad each edge).
-  const int slotW = 47;
+  // 6 equal columns: 6×51 = 306 (+2px side pad each edge).
+  const int slotW = 51;
   for (int i = 0; i < hourCount && i < WEATHER_HOURLY_N; i++) {
-    int sx = 11 + i * slotW;
+    int sx = 12 + i * slotW;
     int cx = sx + slotW / 2;
     int code = -1;
     int temp = 0;
@@ -1051,9 +1104,9 @@ static void drawWeatherPage() {
   }
 
   // ── 5-day — no "5-DAY" label; extra height → larger dayStep ─
-  // Card (10, 122, 284, 114): freed header + section-label rows go here.
-  g->fillRoundRect(10, 122, 284, 114, 8, COL_SURFACE);
-  g->drawRoundRect(10, 122, 284, 114, 8, COL_BORDER);
+  // Card (10, 122, 310, 114): freed header + section-label rows go here.
+  g->fillRect(10, 122, 310, 114, COL_SURFACE);
+  g->drawRect(10, 122, 310, 114, COL_BORDER);
 
   int minT = 100, maxT = -100;
   for (uint8_t i = 0; i < STATE.weatherDailyCount; i++) {
@@ -1065,11 +1118,11 @@ static void drawWeatherPage() {
     maxT = 40;
   }
 
-  // Fixed columns: day 18 | icon 44 | low right@92 | bar 96..246 | high 252
+  // Fixed columns: day 18 | icon 44 | low right@92 | bar 96..272 | high 278
   // dayStep 22: 5×22 = 110 inside 114px card (was 15 in 78px).
   const int dayY0 = 126;
   const int dayStep = 22;
-  const int barX = 96, barW = 150, barH = 6;
+  const int barX = 96, barW = 176, barH = 6;
   const int dayCount = STATE.weatherDailyCount > 0
                          ? (int)STATE.weatherDailyCount : WEATHER_DAILY_N;
   for (int i = 0; i < dayCount && i < WEATHER_DAILY_N; i++) {
@@ -1106,13 +1159,13 @@ static void drawWeatherPage() {
     g->setCursor(barX - 6 - (int)strlen(lbuf) * 6, textY);
     g->print(lbuf);
 
-    g->fillRoundRect(barX, barY, barW, barH, barH / 2, COL_TRACK);
+    g->fillRect(barX, barY, barW, barH, COL_TRACK);
     if (have && maxT > minT) {
       float span = (float)(maxT - minT);
       int x0 = barX + (int)((lo - minT) / span * barW);
       int x1 = barX + (int)((hi - minT) / span * barW);
       if (x1 - x0 < barH) x1 = x0 + barH;
-      g->fillRoundRect(x0, barY, x1 - x0, barH, barH / 2, COL_ACCENT);
+      g->fillRect(x0, barY, x1 - x0, barH, COL_ACCENT);
     }
 
     g->setTextColor(COL_TEXT);
@@ -1134,6 +1187,7 @@ void render() {
   lockState();
   if (weatherPageOpen) {
     drawWeatherPage();
+    drawBatterySaveIcon();
     unlockState();
     presentFrame();
     Serial.printf("[timing] render() weather took %luus\n",
@@ -1146,10 +1200,10 @@ void render() {
     case 1: drawProjectsPage(); break;  // projects (7d) + 7-day trend combined
     case 2: drawHomePage(); break;
     case 3: drawDevicePage(); break;
-    case 4: drawLongTrendPage(); break;
-    case 5: drawLimitsPage(); break;    // /usage-style limits panel
+    case 4: drawLimitsPage(); break;    // /usage-style limits panel
   }
   drawFooter();
+  drawBatterySaveIcon();
   unlockState();
   presentFrame();
   // Baseline timing for the optimization pass that cached flashPercent()'s

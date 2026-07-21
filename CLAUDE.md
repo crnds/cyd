@@ -10,7 +10,7 @@ Display" (CYD) — a 2.8″ 320×240 landscape touch screen. Three moving parts:
 ```
 Mac laptop                                   CYD board (ESP32, on WiFi)
 server/usage_server.py  ──HTTP /api/usage──▶ firmware/cyd_dashboard/*.ino
-(reads local logs + OAuth usage endpoint)    (polls every 20s, 8 tap-to-cycle pages)
+(reads local logs + OAuth usage endpoint)    (polls every 20s, 7 tap-to-cycle pages)
 
 simulator.html = a browser stand-in for the board, fetching the same endpoint
 ```
@@ -38,11 +38,11 @@ colors, formatting, or the OFFLINE screen must be made in *both*, using the
   both, keeping the `// 0x....` comment in the simulator.
 - The page-drawing functions (`drawHomePage`, `drawProjectsPage` — which now
   also renders the 7-day trend in its lower half, `drawStatusPage`,
-  `drawDevicePage`, `drawLongTrendPage`, `drawLimitsPage` — the /usage-style
+  `drawDevicePage`, `drawLimitsPage` — the /usage-style
   limits panel (context window, 5h, weekly all/per-model, credits),
   `drawLimitBlock`, `drawFooter`,
   `drawOfflineScreen`) are near line-for-line ports of each other.
-- **Exception — page 7 (cat GIFs) is NOT a pixel-faithful twin.** On the device
+- **Exception — page 6 (cat GIFs) is NOT a pixel-faithful twin.** On the device
   it decodes and plays random GIFs from `/cats/` on the SD card frame-by-frame
   (AnimatedGIF, in the firmware's `gifTick()`), which the canvas simulator can't
   emulate. The simulator's `drawGifPage()` shows the same "CATS" title/layout as
@@ -186,7 +186,7 @@ flash storage for the scheme change to orphan.
   on core 1 does only touch + render, so a slow/hung fetch can never freeze
   the UI. **Never add a network call to `loop()`** — that reintroduces the
   multi-minute touch freezes this split was built to fix. The two cores share
-  `STATE`/`longTrend[]` through `stateMutex` (`lockState`/`unlockState`): the
+  `STATE` through `stateMutex` (`lockState`/`unlockState`): the
   fetch helpers hold it only for the brief copy of parsed results into `STATE`
   (never during the network wait), and `render()` holds it while drawing
   (which reads `STATE` String members the task may reassign) and releases
@@ -240,7 +240,7 @@ flash storage for the scheme change to orphan.
   false — without that, a real outage would just freeze the last-known
   dashboard forever instead of ever showing offline.
 - Token fields are `int64_t` (weekly totals exceed the 32-bit `long` range).
-- **Page 7 = cat GIF player** (page 8 = status + cats split). `gifTick()`
+- **Page 6 = cat GIF player** (page 7 = status + cats split). `gifTick()`
   (called from `loop()` on core 1)
   decodes at most one frame per pass via AnimatedGIF and paces itself with
   `gifNextFrameMs`, so touch stays responsive; when a GIF ends it opens another
@@ -300,7 +300,7 @@ flash storage for the scheme change to orphan.
     `touch_y_max`/`touch_offset_rotation` (physical touch calibration,
     board-specific, not exposed in the on-device Settings UI),
     `pixel_shift_min` (minutes per anti-retention orbit step, clamped 0-60,
-    0 = off), `boot_page` (0-7, which page `currentPage` starts on),
+    0 = off), `boot_page` (0-6, which page `currentPage` starts on),
     `cat_shuffle_sec` (0-300, forces a cat GIF to rotate before its natural
     end; 0 = always play to the end), `night_mode_preset` (0/1, fixed
     23:00-07:00 auto-dim to 25%), `show_countdown` (0/1, default 1 — green
@@ -313,15 +313,14 @@ flash storage for the scheme change to orphan.
   - `/last_usage.json` — last-good `/api/usage` blob; `/last_env.json` — last
     BTC/weather. Both restored at boot so the dashboard shows real (if stale)
     data and the BTC/weather tiles aren't blank while the Mac is unreachable.
-  - `/daily_log.csv` — one end-of-day token row, backs the on-screen 30-day
-    trend (`longTrend[]`). `/archive.csv` — fine-grained **one row per poll**
+  - `/archive.csv` — fine-grained **one row per poll**
     (~20s, unbounded, ~1GB/yr) for off-device analysis; NOT shown on screen.
   - `/diag_log.csv` — black-box event log (`logDiag`): boot + reset reason,
     WiFi down/recovered, self-reboot, hourly heap/uptime, one-shot low-heap.
   - `/splash.bmp` — optional 320×240 24-bit boot splash, shown ~1.5s before the
     WiFi spinner (`drawBmpFromSD`/`showBootSplash`). A self-hosted asset loaded
     from SD rather than baked into the near-full flash; absent → no splash.
-  - `/cats/*.gif` — the page-7 cat GIF library (see the GIF-player note above).
+  - `/cats/*.gif` — the page-6 cat GIF library (see the GIF-player note above).
     Prepared board-side by `prepare_cat_gifs.py` (downloads from Cataas, resizes
     to ≤320×240, thins frames, optimizes with gifsicle); absent → the cat pages
     show the "CATS" placeholder instead of playing.

@@ -18,6 +18,7 @@ JOB_LABEL = "com.corner.cydusage"
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % JOB_LABEL)
 HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server.html")
 USAGE_URL = "http://127.0.0.1:8787/api/usage"
+BATTERY_SAVE_URL = "http://127.0.0.1:8787/api/battery-save"
 LOG_OUT = "/tmp/cydusage.log"
 LOG_ERR = "/tmp/cydusage.err"
 LOG_TAIL_LINES = 40
@@ -68,9 +69,31 @@ def probe_endpoint():
             "today": doc.get("today"),
             "week": doc.get("week"),
             "active_now": doc.get("active_now"),
+            # Mac power / battery-save (from usage_server STATE["power"]).
+            "power": doc.get("power"),
         }
     except Exception as exc:
         return {"up": False, "error": str(exc)}
+
+
+def set_battery_save(enabled):
+    # Proxy to usage_server POST /api/battery-save (localhost-only there too).
+    body = json.dumps({"enabled": bool(enabled)}).encode("utf-8")
+    req = urllib.request.Request(
+        BATTERY_SAVE_URL,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            doc = json.loads(resp.read())
+        if doc.get("ok"):
+            state = "on" if enabled else "off"
+            return True, "battery saver %s" % state, doc.get("power")
+        return False, doc.get("detail") or "usage server rejected request", None
+    except Exception as exc:
+        return False, "usage server unreachable: %s" % exc, None
 
 
 def tail_file(path, n=LOG_TAIL_LINES):
@@ -143,12 +166,34 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/enable":
             ok, detail = do_enable()
-        elif self.path == "/api/disable":
-            ok, detail = do_disable()
-        else:
-            self._send(404, b"not found", "text/plain")
+            self._send_json({"ok": ok, "detail": detail})
             return
-        self._send_json({"ok": ok, "detail": detail})
+        if self.path == "/api/disable":
+            ok, detail = do_disable()
+            self._send_json({"ok": ok, "detail": detail})
+            return
+        if self.path == "/api/battery-save":
+            # Body: {"enabled": true|false}. Proxied to the usage server.
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                doc = json.loads(raw.decode("utf-8") or "{}")
+            except ValueError:
+                self._send_json({"ok": False, "detail": "invalid JSON"}, status=400)
+                return
+            if "enabled" not in doc or not isinstance(doc.get("enabled"), bool):
+                self._send_json(
+                    {"ok": False, "detail": "body must be {\"enabled\": true|false}"},
+                    status=400,
+                )
+                return
+            ok, detail, power = set_battery_save(doc["enabled"])
+            self._send_json({"ok": ok, "detail": detail, "power": power})
+            return
+        self._send(404, b"not found", "text/plain")
 
 
 class Server(ThreadingHTTPServer):

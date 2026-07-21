@@ -1,7 +1,7 @@
-// Page 7: random cat GIFs from /cats/ on the SD card, played endlessly.
+// Page 6: random cat GIFs from /cats/ on the SD card, played endlessly.
 // Decode + draw happen on the render core (core 1) in gifTick(); SD reads
 // there are guarded by sdMutex so they can't collide with the network task's
-// writes. Split out of cyd_dashboard.ino's "PAGE 6 RENDERING"/"SETTINGS"
+// writes. Split out of cyd_dashboard.ino's "PAGE RENDERING"/"SETTINGS"
 // sections.
 //
 // Everything below except the six functions declared in state.h (scanCats,
@@ -18,6 +18,15 @@ int gifMinY = 220;
 int gifMaxY = -1;
 
 uint32_t catShuffleMs = 0;  // 0 = let each GIF play to its natural end
+
+// Mixed-page (page 7) cat region bounds: starts 2px right of the usage card's
+// right edge (card is x=2 w=157, edge=159) and ends 2px short of the screen's
+// right edge (161+157=318), mirroring the 2px-gap/2px-margin convention used
+// by drawStatusPage's own left/right card columns. Previously this region
+// started at x=160 (only 1px clear of the card), which the simulator's
+// decorative placeholder border visibly overlapped.
+static const int MIXED_GIF_X0 = 161;
+static const int MIXED_GIF_W = 157;
 
 // Allocated only while a cat page is showing (see gifPlayerEnterCatMode/
 // ExitCatMode) and freed on exit — its work buffers are ~24KB, and keeping
@@ -115,11 +124,11 @@ static void GIFDraw(GIFDRAW* pDraw) {
         int clipStart = startX;
         int clipEnd = endX;
         if (mixedMode) {
-          if (clipStart < 160) clipStart = 160;
-          if (clipEnd > 304) clipEnd = 304;
+          if (clipStart < MIXED_GIF_X0) clipStart = MIXED_GIF_X0;
+          if (clipEnd > MIXED_GIF_X0 + MIXED_GIF_W) clipEnd = MIXED_GIF_X0 + MIXED_GIF_W;
         } else {
           if (clipStart < 0) clipStart = 0;
-          if (clipEnd > 304) clipEnd = 304;
+          if (clipEnd > 320) clipEnd = 320;
         }
         if (clipStart < clipEnd) {
           g->pushImage(clipStart, y, clipEnd - clipStart, 1, usTemp + (clipStart - startX));
@@ -146,11 +155,11 @@ static void GIFDraw(GIFDRAW* pDraw) {
     int clipStart = startX;
     int clipEnd = endX;
     if (mixedMode) {
-      if (clipStart < 160) clipStart = 160;
-      if (clipEnd > 304) clipEnd = 304;
+      if (clipStart < MIXED_GIF_X0) clipStart = MIXED_GIF_X0;
+      if (clipEnd > MIXED_GIF_X0 + MIXED_GIF_W) clipEnd = MIXED_GIF_X0 + MIXED_GIF_W;
     } else {
       if (clipStart < 0) clipStart = 0;
-      if (clipEnd > 304) clipEnd = 304;
+      if (clipEnd > 320) clipEnd = 320;
     }
     if (clipStart < clipEnd) {
       g->pushImage(clipStart, y, clipEnd - clipStart, 1, usTemp + (clipStart - startX));
@@ -222,32 +231,33 @@ static void drawGifPlaceholder(bool offline) {
   if (!gifPlaceholderDrawn) {
     gifPlaceholderDrawn = true;
     if (mixedMode) {
-      g->fillRect(160, 0, 160, 240, COL_BG);
+      g->fillRect(MIXED_GIF_X0, 0, MIXED_GIF_W, 240, COL_BG);
       g->setTextColor(COL_ACCENT);
       g->setTextSize(2);
-      g->setCursor(202, 92);
+      g->setCursor(215, 92);  // "CATS" = 4 chars * 12px = 48; 161 + (157-48)/2 = 215
       g->print("CATS");
       g->setTextColor(COL_TEXT2);
       g->setTextSize(1);
       const char* msg = "no GIFs";
-      g->setCursor(160 + (144 - (int)strlen(msg) * 6) / 2, 120);
+      g->setCursor(MIXED_GIF_X0 + (MIXED_GIF_W - (int)strlen(msg) * 6) / 2, 120);
       g->print(msg);
     } else {
       g->fillScreen(COL_BG);
       g->setTextColor(COL_ACCENT);
       g->setTextSize(3);
-      g->setCursor(116, 92);  // "CATS" = 4 chars * 18px = 72; (304-72)/2 = 116
+      g->setCursor(124, 92);  // "CATS" = 4 chars * 18px = 72; (320-72)/2 = 124
       g->print("CATS");
       g->setTextColor(COL_TEXT2);
       g->setTextSize(1);
       const char* msg = STATE.sdOk ? "no GIFs found in /cats/ on the SD card"
                                    : "insert an SD card with /cats/ GIFs";
-      g->setCursor((304 - (int)strlen(msg) * 6) / 2, 132);
+      g->setCursor((320 - (int)strlen(msg) * 6) / 2, 132);
       g->print(msg);
     }
   }
   if (currentPage == GIF_PAGE) drawSessionResetOverlay();
   if (offline) drawOfflineBanner();
+  drawBatterySaveIcon();
   presentFrame();
 }
 
@@ -263,11 +273,11 @@ static bool openCatAtIndex(int index, bool resetOpenedTime) {
   int w = gif->getCanvasWidth(), h = gif->getCanvasHeight();
   bool offline = !STATE.haveData;
   if (currentPage == MIXED_PAGE && !offline) {
-    gifXOffset = 160 + (144 - w) / 2;
+    gifXOffset = MIXED_GIF_X0 + (MIXED_GIF_W - w) / 2;
     gifYOffset = (220 - h) / 2;
-    g->fillRect(160, 0, 160, 240, 0x0000); // clear only the right side
+    g->fillRect(MIXED_GIF_X0, 0, MIXED_GIF_W, 240, 0x0000); // clear only the right side
   } else {
-    gifXOffset = w < 304 ? (304 - w) / 2 : 0;
+    gifXOffset = w < 320 ? (320 - w) / 2 : 0;
     gifYOffset = h < 240 ? (240 - h) / 2 : 0;
     g->fillScreen(0x0000);  // clear the sprite; first frame's lines land on top, then present
   }
@@ -322,6 +332,14 @@ void gifTick(bool offline) {
   }
   if (currentPage == GIF_PAGE) drawSessionResetOverlay();
   if (offline) drawOfflineBanner();
+  drawBatterySaveIcon();
+  if (currentPage == MIXED_PAGE && !offline) {
+    // Battery Save's corner box sits inside the GIF region but outside
+    // whatever rows this frame's GIFDraw touched — fold it into the dirty
+    // band so the icon actually reaches the panel via the partial push below.
+    if (BATTERY_ICON_Y0 < gifMinY) gifMinY = BATTERY_ICON_Y0;
+    if (BATTERY_ICON_Y1 > gifMaxY) gifMaxY = BATTERY_ICON_Y1;
+  }
   if (mixedPageDirty) {
     presentFrame(true);  // flush the static card update
     mixedPageDirty = false;

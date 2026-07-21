@@ -31,7 +31,7 @@ static const char* const BRIGHTNESS_LABELS[5] = {"0%", "25%", "50%", "75%", "100
 // from each setting's apply().
 const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT] = {
   "brightness", "poll_interval_sec", "pixel_shift_min", "boot_page", "cat_shuffle_sec",
-  "night_mode_preset", "screen_rotation", "show_countdown"
+  "night_mode_preset", "screen_rotation", "show_countdown", "battery_save"
 };
 
 void queueConfigSave(uint8_t keyId, int32_t value) {
@@ -40,10 +40,31 @@ void queueConfigSave(uint8_t keyId, int32_t value) {
   pendingConfigSave = true;
 }
 
+// Live backlight from user preference + night-mode overlay only.
+// Battery Save never touches brightness.
+void applyEffectiveBrightness() {
+  if (nightDimActive) {
+    gfx.setBrightness(NIGHT_MODE_DIM_VALUE);
+    return;
+  }
+  gfx.setBrightness((uint8_t)cfgBrightness);
+}
+
+// Live poll cadence: user's Poll Interval, floored to 2 min while Battery
+// Save is active (Settings ON, or AUTO + Mac power.battery_save). networkTask
+// only reads POLL_INTERVAL_MS.
+void applyEffectivePoll() {
+  uint32_t sec = cfgPollIntervalSec;
+  if (sec < 5) sec = 5;
+  if (sec > 3600) sec = 3600;
+  if (batterySaveActive() && sec < BATTERY_SAVE_POLL_SEC) sec = BATTERY_SAVE_POLL_SEC;
+  POLL_INTERVAL_MS = sec * 1000;
+}
+
 static int getCurrentBrightness() { return cfgBrightness; }
 static void applyBrightness(int v) {
   cfgBrightness = (uint8_t)v;
-  gfx.setBrightness(cfgBrightness);  // apply immediately
+  applyEffectiveBrightness();  // may stay dimmed under night mode
   queueConfigSave(CFGKEY_BRIGHTNESS, v);
 }
 
@@ -67,9 +88,13 @@ static const char* const FORGET_WIFI_LABELS[1] = {"FORGET WIFI"};
 // no unit conversion needed at the SD-persistence layer).
 static const int POLL_VALUES[5] = {5, 10, 20, 60, 300};
 static const char* const POLL_LABELS[5] = {"5s", "10s", "20s", "60s", "5m"};
-static int getCurrentPollInterval() { return (int)(POLL_INTERVAL_MS / 1000); }
+// Leaf shows the *user* preference, not the Battery-Save-stretched effective
+// rate — otherwise turning Battery Save on would make the Poll leaf look like
+// the user had picked 2m.
+static int getCurrentPollInterval() { return (int)cfgPollIntervalSec; }
 static void applyPollInterval(int v) {
-  POLL_INTERVAL_MS = (uint32_t)v * 1000;  // read every cycle by networkTask (core 0)
+  cfgPollIntervalSec = (uint32_t)v;
+  applyEffectivePoll();  // networkTask reads the (possibly floored) POLL_INTERVAL_MS
   queueConfigSave(CFGKEY_POLL_INTERVAL, v);
 }
 
@@ -85,13 +110,13 @@ static void applyPixelShift(int v) {
   queueConfigSave(CFGKEY_PIXEL_SHIFT, v);
 }
 
-// Boot page: which of the 8 pages currentPage starts on next boot. All 8
+// Boot page: which of the 7 pages currentPage starts on next boot. All 7
 // (including the cat/mixed pages) are valid -- render()'s switch and loop()'s
 // catMode check already handle those generically regardless of how
 // currentPage got set, no special-casing needed.
-static const int PAGE_VALUES[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-static const char* const PAGE_LABELS[8] = {
-  "STATUS", "PROJECTS", "HOME", "DEVICE", "TRENDS", "LIMITS", "CATS", "MIXED"
+static const int PAGE_VALUES[7] = {0, 1, 2, 3, 4, 5, 6};
+static const char* const PAGE_LABELS[7] = {
+  "STATUS", "PROJECTS", "HOME", "DEVICE", "LIMITS", "CATS", "MIXED"
 };
 static int getCurrentBootPage() { return cfgBootPage; }
 static void applyBootPage(int v) {
@@ -117,10 +142,26 @@ static int getCurrentNightMode() { return cfgNightModeOn ? 1 : 0; }
 static void applyNightMode(int v) {
   cfgNightModeOn = (v != 0);
   if (!cfgNightModeOn && nightDimActive) {
-    gfx.setBrightness(cfgBrightness);  // restore immediately if toggled off mid-dim
     nightDimActive = false;
+    applyEffectiveBrightness();  // restore user brightness
   }
   queueConfigSave(CFGKEY_NIGHT_MODE, v);
+}
+
+// Battery Save: stretches short usage polls to 2 min only (no backlight
+// change). OFF / ON / AUTO — AUTO follows Mac /api/usage power.battery_save
+// (control panel toggle or unplug). User's Poll Interval is preserved.
+static const int BATTERY_SAVE_VALUES[3] = {
+  BATTERY_SAVE_OFF, BATTERY_SAVE_ON, BATTERY_SAVE_AUTO
+};
+static const char* const BATTERY_SAVE_LABELS[3] = {"OFF", "ON", "AUTO"};
+static int getCurrentBatterySave() { return cfgBatterySaveMode; }
+static void applyBatterySave(int v) {
+  if (v < BATTERY_SAVE_OFF) v = BATTERY_SAVE_OFF;
+  if (v > BATTERY_SAVE_AUTO) v = BATTERY_SAVE_AUTO;
+  cfgBatterySaveMode = v;
+  applyEffectivePoll();
+  queueConfigSave(CFGKEY_BATTERY_SAVE, v);
 }
 
 // Rotation flip: 1 = normal, 3 = 180 degrees (both are landscape; ILI9341
@@ -165,7 +206,7 @@ static const SettingDef SETTINGS[] = {
     4, 1, 4, PIXEL_SHIFT_VALUES, PIXEL_SHIFT_LABELS, 2, false,
     getCurrentPixelShift, applyPixelShift },
   { "BOOT PAGE", "BOOT PAGE", "PAGE SHOWN AFTER POWER-ON", "TAP A PAGE TO APPLY",
-    3, 3, 9, PAGE_VALUES, PAGE_LABELS, 1, false,
+    4, 2, 7, PAGE_VALUES, PAGE_LABELS, 1, false,
     getCurrentBootPage, applyBootPage },
   { "RESTART", "RESTART", "", "TAP TWICE TO RESTART THE BOARD",
     1, 1, 1, ACTION_VALUES, RESTART_LABELS, 2, true,
@@ -179,6 +220,9 @@ static const SettingDef SETTINGS[] = {
   { "NIGHT MODE", "NIGHT MODE", "23:00-07:00, DIMS TO 25%", "TAP TO TOGGLE",
     2, 1, 2, NIGHT_MODE_VALUES, NIGHT_MODE_LABELS, 2, false,
     getCurrentNightMode, applyNightMode },
+  { "BATTERY SAVE", "BATTERY SAVE", "2MIN POLL; AUTO = FOLLOW MAC", "TAP A MODE TO APPLY",
+    3, 1, 3, BATTERY_SAVE_VALUES, BATTERY_SAVE_LABELS, 2, false,
+    getCurrentBatterySave, applyBatterySave },
   { "ROTATION", "ROTATION", "FOR UPSIDE-DOWN MOUNTING", "APPLIES IMMEDIATELY",
     2, 1, 2, ROTATION_VALUES, ROTATION_LABELS, 1, false,
     getCurrentRotation, applyRotation },
@@ -186,12 +230,12 @@ static const SettingDef SETTINGS[] = {
     2, 1, 2, SHOW_COUNTDOWN_VALUES, SHOW_COUNTDOWN_LABELS, 2, false,
     getCurrentShowCountdown, applyShowCountdown },
 };
-const int SETTINGS_COUNT = 10;
+const int SETTINGS_COUNT = 11;
 
 static const int SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
 static const int SET_BTN_X0 = 11, SET_BTN_Y = 100, SET_BTN_W = 54, SET_BTN_H = 56;
 static const int SET_BTN_STEP = 58, SET_BTN_STEP_Y = 62;  // STEP_Y only matters for rows>1
-static const int SET_ROW_X0 = 10, SET_ROW_Y0 = 34, SET_ROW_W = 284, SET_ROW_H = 46, SET_ROW_STEP = 52;
+static const int SET_ROW_X0 = 10, SET_ROW_Y0 = 34, SET_ROW_W = 302, SET_ROW_H = 46, SET_ROW_STEP = 52;
 // A lone action button (count==1, e.g. Restart/Forget WiFi) gets the full
 // row width instead of one narrow preset-grid cell -- "TAP AGAIN" doesn't
 // fit in a 54px-wide button, and a wide button reads better for an action
@@ -210,7 +254,7 @@ static const int SETTINGS_VIEWPORT_H = SETTINGS_VISIBLE_ROWS * SET_ROW_STEP - (S
 static const int SETTINGS_CONTENT_H = SETTINGS_COUNT * SET_ROW_STEP - (SET_ROW_STEP - SET_ROW_H);
 static const int SETTINGS_SCROLL_MAX = (SETTINGS_CONTENT_H > SETTINGS_VIEWPORT_H)
     ? (SETTINGS_CONTENT_H - SETTINGS_VIEWPORT_H) : 0;
-static const int SETTINGS_SCROLLBAR_X = 298, SETTINGS_SCROLLBAR_W = 4;
+static const int SETTINGS_SCROLLBAR_X = 316, SETTINGS_SCROLLBAR_W = 4;
 
 static void drawSettingsList() {
   g->fillScreen(COL_BG);
@@ -223,10 +267,10 @@ static void drawSettingsList() {
   // Shares the header line with "X" now (was its own textSize(3) line above
   // the rows) -- freed-up height goes to the row viewport below instead.
   // "SETTINGS" is 8 chars * 6px/char at size 1 = 48px wide; right-aligned
-  // against the 304px usable width (16px black margin reserved past that).
+  // flush against the screen's right edge.
   g->setTextColor(COL_ACCENT);
   g->setTextSize(1);
-  g->setCursor(304 - 48, 14);
+  g->setCursor(320 - 48, 14);
   g->print("SETTINGS");
 
   g->setClipRect(0, SETTINGS_VIEWPORT_Y0, 320, SETTINGS_VIEWPORT_H);

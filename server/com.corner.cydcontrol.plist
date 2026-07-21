@@ -13,6 +13,12 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>5</integer>
     <key>StandardOutPath</key>
     <string>/tmp/cydcontrol.log</string>
     <key>StandardErrorPath</key>

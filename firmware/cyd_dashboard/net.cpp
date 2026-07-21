@@ -1,6 +1,7 @@
 // WiFi/mDNS, the /api/usage poll, and its SD-backed cache/archive siblings —
 // split out of cyd_dashboard.ino's original "NETWORK" section.
 #include "state.h"
+#include <sys/time.h>  // settimeofday() — NTP fallback in applyUsageJson
 
 // ── NETWORK ────────────────────────────────────────────────
 // (Re)start the mDNS resolver whenever WiFi comes up — needed both after the
@@ -18,7 +19,7 @@ void ensureMdns() {
 static const int SPINNER_DOTS = 8;
 
 static void drawWifiSpinner(int frameNum) {
-  const int cx = 152, cy = 120, r = 24, dotR = 4;
+  const int cx = 160, cy = 120, r = 24, dotR = 4;
   g->fillScreen(COL_BG);
   for (int i = 0; i < SPINNER_DOTS; i++) {
     float angle = i * 2 * PI / SPINNER_DOTS;
@@ -136,7 +137,6 @@ static JsonDocument usageFilter() {
   f["projects"][0]["name"] = true;
   f["projects"][0]["tokens"] = true;
   f["trend"] = true;
-  f["last24h"]["tokens"] = true;
   f["limits"]["session"] = true;
   f["limits"]["week"] = true;
   f["limits"]["week_model"] = true;
@@ -146,14 +146,36 @@ static JsonDocument usageFilter() {
   f["weather"] = true;
   f["today"] = true;  // needed by appendArchiveRow's caller (fetchUsage)
   f["active_now"] = true;
+  f["epoch"] = true;  // NTP fallback — see applyUsageJson's time-sync block
+  // Mac power / battery-save (control panel + unplug). Only battery_save is
+  // acted on; on_ac/percent/paused are reserved for a future status tile.
+  f["power"]["battery_save"] = true;
   return f;
 }
 
-bool applyUsageJson(const String& payload) {
+bool applyUsageJson(const String& payload, bool fromNetwork) {
   JsonDocument doc;
   static JsonDocument filter = usageFilter();
   DeserializationError err = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
   if (err) return false;
+
+  // NTP fallback: this board has no TLS and only ever reaches the public NTP
+  // pool over plain UDP/123 at boot (see connectWifi()) — on networks that
+  // block outbound UDP to the internet (hotel/guest WiFi, some routers) that
+  // sync never lands and getLocalTime() fails forever, even though the plain
+  // HTTP poll to the Mac (this very payload) works fine over the LAN. Whenever
+  // we still don't have a wall clock, seed one from the server's epoch instead;
+  // configTime()'s TZ (GMT_OFFSET_SEC/DST_OFFSET_SEC) was already set at boot
+  // and keeps applying regardless of how time-of-day got set. Skipped once
+  // getLocalTime() succeeds so a working NTP sync is never fought/overridden.
+  struct tm haveTimeCheck;
+  if (!getLocalTime(&haveTimeCheck, 0)) {
+    long epoch = doc["epoch"] | 0L;
+    if (epoch > 0) {
+      struct timeval tv = { (time_t)epoch, 0 };
+      settimeofday(&tv, nullptr);
+    }
+  }
 
   // Parse above runs on a local doc (no shared state); take the lock only for
   // the copy into STATE below, which the render loop reads concurrently.
@@ -172,7 +194,6 @@ bool applyUsageJson(const String& payload) {
   for (int i = 0; i < 7; i++) {
     STATE.trend[i] = i < (int)trend.size() ? trend[i].as<int64_t>() : 0;
   }
-  STATE.last24hTokens = doc["last24h"]["tokens"] | (int64_t)0;
 
   if (!doc["limits"].isNull()) {
     STATE.sessionPercent = doc["limits"]["session"]["percent"] | -1;
@@ -230,6 +251,18 @@ bool applyUsageJson(const String& payload) {
 
   STATE.lastFetchOkMs = millis();
   unlockState();
+
+  // Mac battery-save flag: only from a live poll (fromNetwork). SD cache may
+  // carry a stale power.battery_save from hours ago — applying that on boot
+  // would floor the poll while the Mac is already back on AC. When AUTO mode
+  // is selected, flip serverBatterySave + recompute POLL_INTERVAL_MS.
+  if (fromNetwork && !doc["power"].isNull()) {
+    bool want = doc["power"]["battery_save"] | false;
+    if (want != serverBatterySave) {
+      serverBatterySave = want;
+      applyEffectivePoll();
+    }
+  }
   return true;
 }
 
@@ -243,7 +276,8 @@ bool loadCachedUsage() {
   if (f) f.close();
   unlockSD();
   if (!payload.length()) return false;
-  return applyUsageJson(payload);  // applyUsageJson takes stateMutex — kept outside sdMutex
+  // fromNetwork=false: do not apply power.battery_save from a stale cache.
+  return applyUsageJson(payload, false);
 }
 
 static const char* ENV_CACHE_PATH = "/last_env.json";
@@ -345,10 +379,9 @@ void loadWeatherCache() {
 
 // Fine-grained, append-only history — one row per successful poll (~20s),
 // unbounded (that's the point of the roomy card; ~1GB/year). Meant for
-// off-device analysis, not shown on screen — distinct from /daily_log.csv,
-// which keeps only one end-of-day row for the on-screen 30-day trend. Takes
-// the already-parsed doc (fetchUsage parses the payload once via
-// applyUsageJson; this used to re-deserialize the same payload a second time).
+// off-device analysis, not shown on screen. Takes the already-parsed doc
+// (fetchUsage parses the payload once via applyUsageJson; this used to
+// re-deserialize the same payload a second time).
 static void appendArchiveRow(const JsonDocument& doc) {
   if (!STATE.sdOk) return;
 
@@ -414,7 +447,7 @@ bool fetchUsage() {
   static JsonDocument filter = usageFilter();
   DeserializationError err = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
   if (err) return false;
-  if (!applyUsageJson(payload)) return false;
+  if (!applyUsageJson(payload, true)) return false;  // live poll: honor power.battery_save
 
   if (STATE.sdOk) {
     // FILE_WRITE appends on this SD library rather than truncating, so

@@ -1,5 +1,5 @@
 // Claude Code token usage dashboard for the ESP32-2432S028R (CYD).
-// Polls a local Python server for usage stats and renders 8 tap-to-cycle pages.
+// Polls a local Python server for usage stats and renders 7 tap-to-cycle pages.
 //
 // This file now holds only the display/state object definitions, setup(),
 // loop(), and networkTask() — everything else was split (2026) into
@@ -32,18 +32,13 @@ lgfx::LovyanGFX* g = &gfx;
 // Non-const: overridable from /config.json (see sd_store.cpp's
 // loadRuntimeConfig). Originally set once at boot before the two tasks
 // start; now also settable at runtime from the Settings page's Poll Interval
-// leaf (loop(), core 1), so it's volatile -- networkTask (core 0) reads it
-// every cycle (see settings.cpp's applyPollInterval).
+// leaf (loop(), core 1). cfgPollIntervalSec is the user's preference;
+// POLL_INTERVAL_MS is the effective cadence networkTask reads every cycle
+// (may be stretched by Battery Save — see applyEffectivePoll()).
+uint32_t cfgPollIntervalSec = 20;
 volatile uint32_t POLL_INTERVAL_MS = 20000;
 
 UsageState STATE;
-
-// 30-day on-device history, backed by /daily_log.csv on the SD card so it
-// survives independent of the Mac server's log retention/uptime. Kept as
-// plain globals (not in UsageState) since they're loaded once at boot and
-// shifted in place, not part of the per-poll refresh cycle.
-int64_t longTrend[LONG_TREND_DAYS];
-int longTrendCount = 0;  // valid entries, oldest at [0]; may be < LONG_TREND_DAYS early on
 
 int currentPage = 0;
 int cfgBootPage = 0;  // which page currentPage starts on; overridable via /config.json "boot_page"
@@ -74,8 +69,8 @@ bool touchWasDown = false;
 bool wifiOk = false;
 volatile bool connected = false;  // did the most recent fetch reach the server?
 
-// Guards every read/write of the shared UsageState (and longTrend[]) between
-// the render loop (core 1) and the network task (core 0). See state.h for
+// Guards every read/write of the shared UsageState between the render loop
+// (core 1) and the network task (core 0). See state.h for
 // the locking contract.
 SemaphoreHandle_t stateMutex = nullptr;
 SemaphoreHandle_t sdMutex = nullptr;
@@ -94,6 +89,11 @@ int cfgBrightness = 200;   // 0-255 panel backlight; overridable via /config.jso
 // -- nightDimActive tracks whether the dim is currently applied, so
 // applyNightMode() can restore immediately if toggled off mid-dim.
 bool cfgNightModeOn = false;
+// /config.json "battery_save": 0=OFF, 1=ON, 2=AUTO (follow Mac). Default AUTO
+// so unplugging the Mac (or the control-panel toggle) floors the board poll
+// without a Settings trip. serverBatterySave is the last live power.battery_save.
+int cfgBatterySaveMode = BATTERY_SAVE_AUTO;
+volatile bool serverBatterySave = false;
 bool cfgShowCountdown = true;  // default on; /config.json "show_countdown"
 bool nightDimActive = false;
 // Generic Settings-page persistence queue: a leaf's apply() (loop(), core 1)
@@ -165,14 +165,7 @@ void networkTask(void* param) {
         }
         wifiDownCycles = 0;
         ensureMdns();
-        lockState();
-        int64_t prevTodayTokens = STATE.trend[6];
-        unlockState();
         connected = fetchUsage();
-        struct tm nowInfo;
-        if (connected && getLocalTime(&nowInfo, 0)) {
-          appendDailyLogIfNeeded(nowInfo, prevTodayTokens);
-        }
       } else {
         if (wifiDownCycles == 0) logDiag("wifi_down");
         connected = false;
@@ -254,12 +247,11 @@ void setup() {
   if (STATE.sdOk) {
     loadRuntimeConfig();
     currentPage = cfgBootPage;  // honor the /config.json "boot_page" override
-    gfx.setBrightness(cfgBrightness);  // honor the /config.json override
-    loadLongTrendFromSD();
+    applyEffectiveBrightness();  // honor brightness (+ night mode) from /config.json
     loadEnvCache();     // show last-known BTC/weather immediately, before any live fetch
     loadWeatherCache(); // full Weather-page snapshot (hourly/daily) if present
     showBootSplash();   // optional /splash.bmp, briefly, before the WiFi spinner
-    scanCats();         // index /cats/*.gif for the page-6 player
+    scanCats();         // index /cats/*.gif for the cat GIF player page
   } else {
     Serial.println("[sd] card not found or failed to mount");
   }
@@ -309,7 +301,7 @@ void loop() {
 
   // Night mode: applies regardless of page/catMode/settings state, on its
   // own 1s timer (decoupled from the render cadence below, which is skipped
-  // in catMode/settings). Only calls setBrightness() on a transition edge.
+  // in catMode/settings). Only touches brightness on a transition edge.
   if (cfgNightModeOn) {
     static uint32_t lastNightCheckMs = 0;
     if (now - lastNightCheckMs >= 1000) {
@@ -318,11 +310,11 @@ void loop() {
       if (getLocalTime(&ti, 0)) {
         bool inWindow = (ti.tm_hour >= 23 || ti.tm_hour < 7);
         if (inWindow && !nightDimActive) {
-          gfx.setBrightness(NIGHT_MODE_DIM_VALUE);
           nightDimActive = true;
+          applyEffectiveBrightness();
         } else if (!inWindow && nightDimActive) {
-          gfx.setBrightness(cfgBrightness);
           nightDimActive = false;
+          applyEffectiveBrightness();
         }
       }
     }
@@ -385,7 +377,7 @@ void loop() {
     if (connected) {
       uint32_t elapsed = now - lastPollMs;
       if (elapsed > POLL_INTERVAL_MS) elapsed = POLL_INTERVAL_MS;
-      int w = (int)((float)elapsed / POLL_INTERVAL_MS * 304);
+      int w = (int)((float)elapsed / POLL_INTERVAL_MS * 320);
       if (w < lineW) {
         lineW = w;  // new poll cycle: the full repaint already cleared the line
       } else if (w > lineW) {
@@ -435,7 +427,7 @@ void loop() {
       weatherPageOpen = true;
       render();
     } else {
-      bool isRight = (tx >= 152);
+      bool isRight = (tx >= 160);
       if (isRight) {
         currentPage = (currentPage + 1) % PAGE_COUNT;
       } else {
