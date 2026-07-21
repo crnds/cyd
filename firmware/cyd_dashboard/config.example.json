@@ -15,10 +15,5 @@
   "boot_page": 0,
   "cat_shuffle_sec": 0,
   "night_mode_preset": 0,
-  "show_countdown": 1,
-  "btc_candle_iv_sec": 300,
-  "btc_range_sec": 86400,
-  "btc_chart_style": 0,
-  "btc_range_bar": 1,
-  "btc_price_hero": 1
+  "show_countdown": 1
 }

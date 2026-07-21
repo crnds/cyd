@@ -395,7 +395,7 @@ static void drawHomePage() {
   g->fillRect(16, 195, 2, 3, COL_TEXT);
   g->fillRect(12, 212, 2, 3, COL_TEXT);
   g->fillRect(16, 212, 2, 3, COL_TEXT);
-  g->print(" $" + fmtBtc(latestBtcPrice()));
+  g->print(" $" + fmtBtc(STATE.btcPrice));
 }
 
 // Combined page: top 4 projects (7d) in the upper half, the 7-day token trend
@@ -874,7 +874,7 @@ static void drawStatusPage() {
   g->setTextColor(COL_TEXT);
   g->setTextSize(2);
   g->setCursor(221, 196);
-  g->print(fmtBtc(latestBtcPrice()));
+  g->print(fmtBtc(STATE.btcPrice));
 }
 
 static void drawLongTrendPage() {
@@ -989,25 +989,12 @@ static void drawDevicePage() {
                      sdColor);
 }
 
-// Chart's vertical slot shifts to reclaim whichever of price-hero/range-bar
-// is hidden, so the candle box always ends at the same fixed bottom edge
-// (matches drawBtcTickerPage's footer clearance). Shared by drawBtcChart()
-// and drawBtcRangeBar() so their layouts never disagree.
-static const int BTC_CHART_BOTTOM = 212;
-static int btcChartY0() {
-  if (cfgBtcPriceHero)  return cfgBtcRangeBar ? 96 : 84;
-  return cfgBtcRangeBar ? 38 : 24;
-}
-static int btcRangeBarY0() {
-  return cfgBtcPriceHero ? 82 : 24;
-}
-
 static void drawBtcChart() {
   const int SCREEN_W      = 320;
   const int CONTENT_RIGHT = SCREEN_W - 4;  // 4px min margin (matches the left-side clamp below) so glyphs/border don't clip flush against the edge
   const int CHART_X0 = CONTENT_RIGHT - CANDLE_COUNT - 2;  // right edge lands on CONTENT_RIGHT
-  const int CHART_Y0 = btcChartY0();
-  const int CHART_H  = BTC_CHART_BOTTOM - CHART_Y0;
+  const int CHART_Y0 = 84;
+  const int CHART_H  = 128;  // y 84..212
   const uint16_t COL_GOOD_DIM = 0x1462;  // dim green (wick)
   const uint16_t COL_BAD_DIM  = 0x9124;  // dim red (wick)
 
@@ -1029,51 +1016,30 @@ static void drawBtcChart() {
   float span = rangeMax - rangeMin;
   if (span < 1.0f) span = 1.0f;  // avoid div-by-zero on a dead-flat market
 
-  auto priceToY = [&](float p) -> int {
-    float f = (p - rangeMin) / span;
-    int y = CHART_Y0 + CHART_H - 1 - (int)(f * (CHART_H - 1));
-    if (y < CHART_Y0) y = CHART_Y0;
-    if (y > CHART_Y0 + CHART_H - 1) y = CHART_Y0 + CHART_H - 1;
-    return y;
-  };
+  for (int i = 0; i < n; i++) {
+    const CandleRec& r = STATE.btcCandles[i];
+    if (r.openEpoch == 0) continue;
+    int x = CHART_X0 + i;
+    bool bull = r.c >= r.o;
 
-  if (cfgBtcChartStyle == 1) {
-    // LINE: a dim under-fill (one vertical line per candle, up to its close)
-    // topped with a bright line connecting consecutive closes -- gaps
-    // (openEpoch==0) break the connecting line rather than jumping across them.
-    int prevX = -1, prevY = 0;
-    for (int i = 0; i < n; i++) {
-      const CandleRec& r = STATE.btcCandles[i];
-      int x = CHART_X0 + i;
-      if (r.openEpoch == 0) { prevX = -1; continue; }
-      int yC = priceToY(r.c);
-      g->drawFastVLine(x, yC, CHART_Y0 + CHART_H - yC, COL_TRACK);
-      if (prevX >= 0) g->drawLine(prevX, prevY, x, yC, COL_ACCENT);
-      prevX = x;
-      prevY = yC;
-    }
-  } else {
-    // CANDLES (0) and B/W (2) share the same wick+body geometry; only the
-    // colors differ -- B/W drops the bull/bear distinction entirely.
-    for (int i = 0; i < n; i++) {
-      const CandleRec& r = STATE.btcCandles[i];
-      if (r.openEpoch == 0) continue;
-      int x = CHART_X0 + i;
-      bool bull = r.c >= r.o;
-      uint16_t wickCol = (cfgBtcChartStyle == 2) ? COL_TEXT2 : (bull ? COL_GOOD_DIM : COL_BAD_DIM);
-      uint16_t bodyCol = (cfgBtcChartStyle == 2) ? COL_TEXT  : (bull ? COL_GOOD : COL_WARN);
+    auto priceToY = [&](float p) -> int {
+      float f = (p - rangeMin) / span;
+      int y = CHART_Y0 + CHART_H - 1 - (int)(f * (CHART_H - 1));
+      if (y < CHART_Y0) y = CHART_Y0;
+      if (y > CHART_Y0 + CHART_H - 1) y = CHART_Y0 + CHART_H - 1;
+      return y;
+    };
 
-      int yH = priceToY(r.h);
-      int yL = priceToY(r.l);
-      if (yL < yH) { int tmp = yH; yH = yL; yL = tmp; }
-      g->drawFastVLine(x, yH, yL - yH + 1, wickCol);
+    int yH = priceToY(r.h);
+    int yL = priceToY(r.l);
+    if (yL < yH) { int tmp = yH; yH = yL; yL = tmp; }
+    g->drawFastVLine(x, yH, yL - yH + 1, bull ? COL_GOOD_DIM : COL_BAD_DIM);
 
-      int yO = priceToY(r.o);
-      int yC = priceToY(r.c);
-      int yTop = min(yO, yC);
-      int bodyLen = max(yO, yC) - yTop + 1;
-      g->drawFastVLine(x, yTop, bodyLen, bodyCol);
-    }
+    int yO = priceToY(r.o);
+    int yC = priceToY(r.c);
+    int yTop = min(yO, yC);
+    int bodyLen = max(yO, yC) - yTop + 1;
+    g->drawFastVLine(x, yTop, bodyLen, bull ? COL_GOOD : COL_WARN);
   }
 
   g->setTextColor(COL_TEXT2);
@@ -1084,59 +1050,17 @@ static void drawBtcChart() {
   g->print(fmtBtc(rangeMin));
 }
 
-// 24h high/low bar: "L $lo [====o====] H $hi", a thin track with a marker at
-// today's position between STATE.btcLow24h and btcHigh24h. One compact row --
-// independent of the candle-size/range settings, since it always reflects
-// Binance's 24hr window regardless of what timespan the chart above shows.
-static void drawBtcRangeBar() {
-  if (!cfgBtcRangeBar) return;
-  const int SCREEN_W      = 320;
-  const int CONTENT_RIGHT = SCREEN_W - 4;
-  const int ROW_Y = btcRangeBarY0();
-  const int BAR_H = 6;
-  const int BAR_Y = ROW_Y + 1;
-
-  g->setTextColor(COL_TEXT2);
-  g->setTextSize(1);
-  String loStr = "L" + fmtBtc(STATE.btcLow24h);
-  String hiStr = "H" + fmtBtc(STATE.btcHigh24h);
-  int loW = (int)loStr.length() * 6;
-  int hiW = (int)hiStr.length() * 6;
-
-  g->setCursor(4, ROW_Y);
-  g->print(loStr);
-
-  int barX0 = 4 + loW + 4;
-  int barX1 = CONTENT_RIGHT - hiW - 4;
-  int barW = barX1 - barX0;
-  if (barW > 0) {
-    g->fillRoundRect(barX0, BAR_Y, barW, BAR_H, 3, COL_TRACK);
-    if (STATE.btcHigh24h > 0 && STATE.btcLow24h > 0 && STATE.btcHigh24h > STATE.btcLow24h && barW > 6) {
-      float f = (latestBtcPrice() - STATE.btcLow24h) / (STATE.btcHigh24h - STATE.btcLow24h);
-      if (f < 0) f = 0;
-      if (f > 1) f = 1;
-      int markerX = barX0 + (int)(f * (barW - 6));
-      g->fillRoundRect(markerX, BAR_Y - 2, 6, BAR_H + 4, 2, COL_ACCENT);
-    }
-  }
-
-  g->setCursor(CONTENT_RIGHT - hiW, ROW_Y);
-  g->print(hiStr);
-}
-
 static void drawBtcPriceRow() {
-  if (!cfgBtcPriceHero) return;
   const int SCREEN_W      = 320;
   const int CONTENT_RIGHT = SCREEN_W - 4;  // 4px min margin (matches the left-side clamp below)
 
   g->setTextSize(4);
-  double price = latestBtcPrice();
-  if (price <= 0) {
+  if (STATE.btcPrice <= 0) {
     g->setTextColor(COL_TEXT2);
     g->setCursor(4, 34);
     g->print("$--");
   } else {
-    String priceStr = "$" + fmtBtc(price);
+    String priceStr = "$" + fmtBtc(STATE.btcPrice);
     int x = CONTENT_RIGHT - g->textWidth(priceStr);
     if (x < 4) x = 4;
     g->setTextColor(COL_TEXT);
@@ -1202,7 +1126,6 @@ static void drawBtcTickerPage() {
   g->fillCircle(CONTENT_RIGHT - 20, 12, 4, freshColor);
 
   drawBtcPriceRow();
-  drawBtcRangeBar();
   drawBtcChart();
 }
 

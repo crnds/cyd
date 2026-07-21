@@ -243,9 +243,6 @@ struct UsageState {
   float btcChangePct = NAN;
   CandleRec btcCandles[288];
   int btcCandleCount = 0;
-  float btcHigh24h = -1;     // 24h high/low (from Binance's /ticker/24hr, via the Mac)
-  float btcLow24h = -1;
-  uint32_t btcCandleIntervalSec = 300;  // width of one btcCandles[] slot, from btc_candles_meta
   float weatherTempC = -999; // Bangkok temp (from the Mac via /api/usage); -999 = unknown
   int weatherCode = -1;      // WMO weather_code (from the Mac); -1 = unknown
   // Weather page fields — same payload as the status card's temp/code, plus
@@ -270,19 +267,6 @@ struct UsageState {
 };
 // Defined in cyd_dashboard.ino.
 extern UsageState STATE;
-
-// Single source of truth for "the current BTC price" -- page 9's candle store
-// is the only thing that fetches/persists price data now, so the Status card
-// and Home page glyph read the latest candle close here instead of trusting
-// their own copy of a same-named field. Falls back to STATE.btcPrice (the
-// /ticker/24hr price, set once on first fetch) only before the first candle
-// batch has landed. No locking here -- every caller already runs inside
-// render()'s single lockState()/unlockState() span.
-inline double latestBtcPrice() {
-  return STATE.btcCandleCount > 0
-    ? STATE.btcCandles[STATE.btcCandleCount - 1].c
-    : STATE.btcPrice;
-}
 
 // 30-day on-device history, backed by /daily_log.csv on the SD card. Defined
 // in cyd_dashboard.ino; read/written from sd_store.cpp and pages.cpp.
@@ -381,17 +365,6 @@ extern int cfgTouchYMin;
 extern int cfgTouchYMax;
 extern int cfgTouchOffsetRotation;
 
-// BTC ticker page (page 9) settings. Candle size (seconds/candle) and range
-// (visible seconds) are jointly constrained to range/candleIv <= CANDLE_COUNT
-// (288) -- each setting's apply() in settings.cpp auto-adjusts the other one
-// to keep this true, mirroring btc-cyd-v2's design. Chart style: 0=candles,
-// 1=line, 2=black&white.
-extern int cfgBtcCandleIvSec;
-extern int cfgBtcRangeSec;
-extern int cfgBtcChartStyle;
-extern bool cfgBtcRangeBar;
-extern bool cfgBtcPriceHero;
-
 // Generic Settings-page persistence queue: a leaf's apply() (loop(), core 1)
 // mutates its live global directly, then queues the /config.json key/value
 // here; networkTask (core 0) drains it so the SD write never happens on the
@@ -406,9 +379,7 @@ extern volatile bool pendingForgetWifi;
 // sd_store.cpp's saveIntConfigToSD and settings.cpp's queueConfigSave).
 enum ConfigKeyId {
   CFGKEY_BRIGHTNESS = 0, CFGKEY_POLL_INTERVAL, CFGKEY_PIXEL_SHIFT, CFGKEY_BOOT_PAGE,
-  CFGKEY_CAT_SHUFFLE, CFGKEY_NIGHT_MODE, CFGKEY_ROTATION, CFGKEY_SHOW_COUNTDOWN,
-  CFGKEY_BTC_CANDLE_IV, CFGKEY_BTC_RANGE, CFGKEY_BTC_CHART_STYLE, CFGKEY_BTC_RANGE_BAR,
-  CFGKEY_BTC_PRICE_HERO, CFGKEY_COUNT
+  CFGKEY_CAT_SHUFFLE, CFGKEY_NIGHT_MODE, CFGKEY_ROTATION, CFGKEY_SHOW_COUNTDOWN, CFGKEY_COUNT
 };
 extern const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT];
 
@@ -432,7 +403,6 @@ bool fetchUsage();
 bool loadCachedUsage();
 void loadEnvCache();
 void loadWeatherCache();
-void loadBtcCandleCache();
 bool applyUsageJson(const String& payload);
 // Set false by networkTask() (cyd_dashboard.ino) on WiFi loss, so ensureMdns()
 // re-initializes once WiFi returns.

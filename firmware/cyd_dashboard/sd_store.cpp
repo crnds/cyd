@@ -59,30 +59,6 @@ void loadRuntimeConfig() {
   if (!doc["show_countdown"].isNull()) {
     cfgShowCountdown = doc["show_countdown"].as<int>() != 0;
   }
-  if (!doc["btc_candle_iv_sec"].isNull()) {
-    int v = doc["btc_candle_iv_sec"].as<int>();
-    if (v == 300 || v == 900 || v == 3600 || v == 14400) cfgBtcCandleIvSec = v;
-  }
-  if (!doc["btc_range_sec"].isNull()) {
-    int v = doc["btc_range_sec"].as<int>();
-    if (v == 43200 || v == 86400 || v == 604800) cfgBtcRangeSec = v;
-  }
-  if (!doc["btc_chart_style"].isNull()) {
-    cfgBtcChartStyle = constrain(doc["btc_chart_style"].as<int>(), 0, 2);
-  }
-  if (!doc["btc_range_bar"].isNull()) {
-    cfgBtcRangeBar = doc["btc_range_bar"].as<int>() != 0;
-  }
-  if (!doc["btc_price_hero"].isNull()) {
-    cfgBtcPriceHero = doc["btc_price_hero"].as<int>() != 0;
-  }
-  // Self-heal the range/candleIv<=CANDLE_COUNT invariant (see settings.cpp's
-  // applyBtcCandleIv/applyBtcRange comment) in case the two keys were last
-  // persisted from the same apply() call, where only one save could be
-  // queued at a time.
-  if (cfgBtcRangeSec / cfgBtcCandleIvSec > CANDLE_COUNT) {
-    cfgBtcRangeSec = cfgBtcCandleIvSec * CANDLE_COUNT;
-  }
   Serial.println("[config] loaded overrides from /config.json");
 }
 
