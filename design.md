@@ -4,12 +4,12 @@
 |---|---|
 | **Title** | CYD Claude Code Token-Usage Dashboard — System Design |
 | **Author** | CYD project maintainers |
-| **Date** | 2026-07-20 |
+| **Date** | 2026-07-25 |
 | **Status** | Accepted (as-built) |
 | **Scope** | End-to-end architecture **and** on-device visual design system (as-built) |
 | **Primary sources** | `CLAUDE.md`, `README.md`, `server/`, `firmware/cyd_dashboard/` (`state.h`, `pages.cpp`, `settings.cpp`, `format.cpp`), `simulator.html` |
-| **Workspace** | `/Users/eunitembam3/cyd` |
-| **Branch context** | `feat/sd-cats-and-market-proxy` (SD cat GIFs + Mac-side market proxy) |
+| **Workspace** | `/Users/dusitn/cyd` |
+| **Branch context** | `feat/sd-cats-and-market-proxy` (7 pages after long-trend + BTC-ticker removals; battery save) |
 
 ---
 
@@ -18,7 +18,7 @@
 This document describes the **as-built architecture** of a personal, always-on desk dashboard that shows live Claude Code usage on an ESP32-2432S028R “Cheap Yellow Display” (CYD): a 2.8″ 320×240 landscape resistive-touch panel. The system has three cooperating parts:
 
 1. **Mac usage server** (`server/usage_server.py`) — stdlib Python process that tails `~/.claude/projects/*/*.jsonl`, reads plan limits from Anthropic’s OAuth usage endpoint via Keychain credentials, proxies BTC (Binance) and Bangkok weather (Open-Meteo / optional WeatherAPI), and serves a single JSON contract at `GET /api/usage` on port **8787**.
-2. **ESP32 firmware** (`firmware/cyd_dashboard/`) — Arduino sketch that joins home WiFi, discovers the Mac by Bonjour name, polls `/api/usage` every ~20s over **plain HTTP**, and renders **8 touch-cycled pages** plus offline cats, settings, and a first-boot AP portal.
+2. **ESP32 firmware** (`firmware/cyd_dashboard/`) — Arduino sketch that joins home WiFi, discovers the Mac by Bonjour name, polls `/api/usage` every ~20s over **plain HTTP** (floored to ≥120s when Battery Save is active), and renders **7 touch-cycled pages** plus offline cats, settings, weather overlay, and a first-boot AP portal.
 3. **Browser simulator** (`simulator.html`) — pixel-faithful stand-in for the board UI against the same endpoint (except real GIF playback).
 
 A separate **control panel** (`server/control_server.py` + `server.html` on **127.0.0.1:8788**) can load/unload the usage LaunchAgent without exposing launchctl to the LAN.
@@ -51,8 +51,10 @@ Cloud dashboards and phones break the “desk glance” habit; running a second 
 | Board reachability of Mac | mDNS `.local` host, not fixed IP |
 | Board HTTPS | None — Mac proxies market data into `/api/usage` |
 | Mac sleep on battery | `battery_guard_loop` closes the listening socket when battery ≤50% on battery power |
+| Mac still serving on battery | Stretched scan/limits/market cadences + `power.battery_save` for board AUTO mode |
 | Offline UX | Cat GIFs + large “OFFLINE” banner (not a frozen last frame forever) |
 | First setup without reflash | SoftAP captive portal → `/config.json` on SD |
+| Page set | 7 pages — no 30-day long-trend page, no BTC candlestick ticker |
 
 ### Pain points the architecture already addresses
 
@@ -179,18 +181,19 @@ flowchart TB
   SH --> FMT["format.cpp"]
 ```
 
-### Display pages (8)
+### Display pages (7) — `PAGE_COUNT = 7`
 
 | Index | Function | Content |
 |---|---|---|
-| 0 | `drawStatusPage` | Analog clock, 5h/week mini bars (shine sweep), countdown wedge, BTC tile, weather card (`WEATHER_HIT_*` 150–210×170–216; tap → weather overlay) |
+| 0 | `drawStatusPage` | Analog clock, 5h/week mini bars (shine sweep), countdown wedge, BTC tile, weather card (`WEATHER_HIT_*` 161–318×166–218; tap → weather overlay) |
 | 1 | `drawProjectsPage` | Top projects (7d) + 7-day token trend chart |
 | 2 | `drawHomePage` | Large session + week limit blocks + BTC line |
 | 3 | `drawDevicePage` | Board stats (flash, RAM, SD, WiFi, CPU duty proxy) |
-| 4 | `drawLongTrendPage` | 30-day on-device history from `/daily_log.csv` |
-| 5 | `drawLimitsPage` | Context, 5h, weekly all/per-model, credits (`/usage`-style) |
-| 6 | GIF_PAGE | Full-screen random cats from SD `/cats/*.gif`; firmware-only `drawSessionResetOverlay()` (session % + reset time, bottom-left, textSize 2) when limits known |
-| 7 | MIXED_PAGE | Split layout + partial `pushImage` (see geometry below) |
+| 4 | `drawLimitsPage` | Context, 5h, weekly all/per-model, credits (`/usage`-style) |
+| 5 | `GIF_PAGE` | Full-screen random cats from SD `/cats/*.gif`; firmware-only `drawSessionResetOverlay()` (session % + reset time, bottom-left, textSize 2) when limits known |
+| 6 | `MIXED_PAGE` | Split layout + partial `pushImage` (see geometry below) |
+
+**Removed (do not reintroduce without a design update):** 30-day `drawLongTrendPage` / `/daily_log.csv`, and the BTC candlestick ticker page (candles / chart styles / range bar).
 
 **MIXED_PAGE geometry** (`presentFrame` / `gifTick` in `pages.cpp` + `gif_player.cpp`):
 
@@ -257,7 +260,7 @@ sequenceDiagram
 
 | Mutex | Protects | Holders | Nesting |
 |---|---|---|---|
-| `stateMutex` | `STATE`, `longTrend[]` during cross-core access | `applyUsageJson` (internal brief copy); `networkTask` for tiny reads (e.g. `prevTodayTokens`); `render()` while drawing | Non-recursive; draw helpers must not re-lock |
+| `stateMutex` | `STATE` during cross-core access | `applyUsageJson` (internal brief copy); `networkTask` for tiny reads (e.g. `prevTodayTokens`); `render()` while drawing | Non-recursive; draw helpers must not re-lock |
 | `sdMutex` | HSPI/SD bus | `networkTask` (writes inside `fetchUsage` / config save), GIF player on core 1 (reads) | Only allowed nest: **`sdMutex` → `stateMutex`** (e.g. `appendArchiveRow` / `saveEnvCache` under `fetchUsage`). Never take `sdMutex` while holding `stateMutex` (would block `render`) |
 
 **Cross-core visibility without `stateMutex` (volatile / direction matters):**
@@ -310,12 +313,12 @@ stateDiagram-v2
 
 **Background threads (all daemon):**
 
-| Loop | Cadence | Responsibility |
+| Loop | Cadence (AC / on-battery still serving) | Responsibility |
 |---|---|---|
-| `scan_loop` | 15s | Tail jsonl → buckets → `compute_aggregates` |
-| `limits_loop` | 120s (+429 backoff 10–30 min clamp) | OAuth `/api/oauth/usage` snapshot |
-| `market_loop` | BTC ~10s, weather 10 min | Binance + weather providers |
-| `battery_guard_loop` | 60s | Owns HTTP server lifecycle |
+| `scan_loop` | 15s / 30s | Tail jsonl → buckets → `compute_aggregates` |
+| `limits_loop` | 120s / 300s (+429 backoff 10–30 min clamp) | OAuth `/api/oauth/usage` snapshot |
+| `market_loop` | BTC 60s/180s, weather 10 min/30 min | Binance + weather providers |
+| `battery_guard_loop` | 60s | Owns HTTP server lifecycle; unbinds ≤50% on battery |
 
 `activity_gated_loop` parks scan/limits/market work when no client has polled in **180s** (`is_client_active`). The **first iteration always runs** so cold start is populated before any board connects; afterward idle stretches wait on `activity_event` (set by each `/api/usage` GET, timeout 60s). This saves Mac CPU, Keychain reads, and Anthropic/Binance quota when the board and simulator are off — and is why `limits.age_sec` can grow large if nothing is polling (not only on 429).
 
@@ -334,30 +337,38 @@ stateDiagram-v2
 - Token never written to disk or included in `/api/usage`
 - Expired `expiresAt` → skip request (CLI refreshes credentials)
 
-**Battery guard:**
+**Battery guard (unbind listener):**
 
 - `pmset -g batt`; if not on AC and percent ≤ `BATTERY_LOW_PCT` (50%): `server.shutdown()` + `server_close()` so macOS can idle-sleep
 - Board falls into existing offline/cats path
 - Rebind on AC or recovery above threshold
 
+**Battery-save cadences (socket still up):**
+
+- `power.battery_save` effective flag: manual override (`POST /api/battery-save` with `enabled: true|false|null`) or auto (`not on_ac`)
+- While save is on and the server still serves: slower scan/limits/market intervals (table above)
+- Board Settings Battery Save OFF/ON/AUTO: AUTO follows live `power.battery_save` only (never SD-cached); when active, floors poll to ≥ `BATTERY_SAVE_POLL_SEC` (120s)
+- Small battery-save icon drawn on dashboard pages while active
+
 ### Control plane
 
 ```
 Browser ──► 127.0.0.1:8788 ──► control_server.py
-                                 ├── GET /            → server.html
-                                 ├── GET /api/status  → launchd + probe + log tails
-                                 ├── POST /api/enable → launchctl bootstrap usage job
-                                 └── POST /api/disable→ launchctl bootout usage job
+                                 ├── GET /                 → server.html
+                                 ├── GET /api/status       → launchd + probe + log tails + power
+                                 ├── POST /api/enable      → launchctl bootstrap usage job
+                                 ├── POST /api/disable     → launchctl bootout usage job
+                                 └── POST /api/battery-save→ proxy to usage :8787
 ```
 
-**Must remain localhost-bound** — enable/disable execute `launchctl`.
+**Must remain localhost-bound** — enable/disable execute `launchctl`; battery-save is also localhost-only on the usage server.
 
 ### Simulator contract
 
 - `gfx` canvas emulates LovyanGFX: **`print()` advances 6px per character at text size 1** (×size) — browser natural metrics would break overflow prediction.
 - Colors: firmware RGB565 (e.g. `COL_ACCENT = 0xFB08`) ↔ simulator RGB888 (`rgb(255,97,66)`) with `// 0x....` comments.
 - Page functions are near line-for-line ports of `pages.cpp`.
-- **Exception:** page 6/7 GIF playback is firmware-only; simulator shows placeholder + note matching `drawGifPlaceholder`.
+- **Exception:** pages 6–7 (`GIF_PAGE` / `MIXED_PAGE`) GIF playback is firmware-only; simulator shows placeholder + note matching `drawGifPlaceholder`.
 - Headless check: Playwright screenshot of `.device` (see Commands in `CLAUDE.md`).
 
 ### First-boot AP setup
@@ -374,18 +385,19 @@ Note: compiled `WIFI_SSID` in `config.h` always wins over SD for WiFi so reflash
 
 ### Hidden settings area
 
-Table-driven `SettingDef SETTINGS[]` (10 entries) with function pointers (no `std::function`/vtable — flash scarce):
+Table-driven `SettingDef SETTINGS[]` (**11** entries, drag-to-scroll list — not paginated) with function pointers (no `std::function`/vtable — flash scarce):
 
 | Setting | Persistence |
 |---|---|
 | Brightness | `brightness` via generic queue |
-| Poll Interval | `poll_interval_sec` (UI presets 5s–5m only; SD clamp 5–3600s) |
+| Poll Interval | `poll_interval_sec` (UI presets 5s–5m only; SD clamp 5–3600s; effective poll may be floored by Battery Save) |
 | Pixel Shift | `pixel_shift_min` |
-| Boot Page | `boot_page` |
+| Boot Page | `boot_page` (0–6) |
 | Restart | destructive confirm-arm (~4s) |
 | Forget WiFi | `pendingForgetWifi` → erase strings on SD → restart |
 | Cat Shuffle | `cat_shuffle_sec` |
 | Night Mode | `night_mode_preset` (23:00–07:00 → 25% dim) |
+| Battery Save | `battery_save` 0/1/2 = OFF/ON/AUTO |
 | Rotation | `screen_rotation` 1/3 live (touch tracks LovyanGFX convert) |
 | Show Countdown | `show_countdown` |
 
@@ -674,20 +686,16 @@ Use these as the checklist when editing UI — both sides must match.
 
 - Title size2; four `drawFullStatBlock` stacks (CPU, flash, RAM, SD) with BLUE/WARN threshold at 80%.
 
-**Page 4 — 30-day trend**
-
-- Title size2; bars 6px wide, gap 4, chartH 148; empty state centered “SD CARD NOT FOUND”.
-
-**Page 5 — Limits (`/usage` style)**
+**Page 4 — Limits (`/usage` style)**
 
 - Title size1; rows every **+40** y with label/right size1 and bar 284×8.
 
-**Page 6 — Cats**
+**Page 5 — Cats (`GIF_PAGE`)**
 
 - Full GIF; optional session overlay bottom-left size2; no standard footer while catMode.
 - Offline: `drawOfflineBanner` bar 0,0,304,44 + size5 “OFFLINE”.
 
-**Page 7 — Mixed**
+**Page 6 — Mixed (`MIXED_PAGE`)**
 
 - Left limits card; right GIF 160–303; footer band y≥220; partial push discipline.
 
@@ -715,8 +723,9 @@ Range bars: track `COL_TRACK`, fill `COL_ACCENT`, min pill width = bar height. E
 | Null market fields | Weather/BTC `"--"` |
 | Null limits percent | Bars empty; `"--"` text; mini bars skip fill |
 | No projects / zero trend | Empty lists / flat chart baseline |
-| No SD | Long-trend message; device SD row “SD CARD NOT FOUND”; cats placeholder “CATS” |
+| No SD | Device SD row “SD CARD NOT FOUND”; cats placeholder “CATS” |
 | Offline | Cats (or placeholder) + OFFLINE banner — **not** dimmed last dashboard forever |
+| Battery Save active | Small battery icon overlay; poll progress stretches with floored interval |
 | Cached / disconnected | Static amber pulse; still show last-good numbers until fail-cycle offline |
 
 ### Simulator chrome (host page only)
@@ -760,29 +769,21 @@ Bound on `0.0.0.0:8787`. Single path; all other paths 404. CORS `Access-Control-
 ```json
 {
   "generated_at": "2026-07-20T10:00:00+00:00",
+  "epoch": 0,
   "today":   { "tokens": 0, "cost": 0.0 },
-  "last5h":  { "tokens": 0, "cost": 0.0 },
-  "last24h": { "tokens": 0, "cost": 0.0 },
   "week":    { "tokens": 0, "cost": 0.0 },
   "active_now": false,
-  "last_activity_sec": null,
   "projects": [{ "name": "repo", "tokens": 0 }],
-  "models":   [{ "name": "sonnet", "tokens": 0, "cost": 0.0, "percent": 0 }],
   "trend": [0, 0, 0, 0, 0, 0, 0],
   "limits": {
-    "tz": "Asia/Bangkok",
-    "fetched_at_epoch": 0.0,
-    "age_sec": 0,
     "session": {
       "percent": 0,
       "resets": "14:30",
-      "resets_at_epoch": 0.0,
       "resets_in_sec": 0
     },
     "week": {
       "percent": 0,
       "resets": "Jul 27, 00:00",
-      "resets_at_epoch": 0.0,
       "resets_in_sec": 0
     },
     "week_model": {
@@ -799,11 +800,18 @@ Bound on `0.0.0.0:8787`. Single path; all other paths 404. CORS `Access-Control-
     "tempC": 32.1,
     "code": 0,
     "condition": "Clear",
-    "place": "Bangkok",
     "high": 34,
     "low": 27,
     "hourly": [{ "h": 17, "tempC": 32, "code": 0 }],
     "daily":  [{ "wd": 0, "high": 34, "low": 27, "code": 0 }]
+  },
+  "power": {
+    "on_ac": true,
+    "percent": 82,
+    "paused": false,
+    "battery_save": false,
+    "battery_save_manual": null,
+    "source": "auto"
   },
   "clients": [{ "ip": "192.168.1.50", "last_seen_sec": 12 }]
 }
@@ -837,12 +845,16 @@ f["limits"]["week_model"] = true;
 f["limits"]["credits"] = true;
 f["context"] = true;
 f["btc"] = true;
-f["weather"] = true;             // tempC, code, condition, place, high/low, hourly[], daily[]
+f["weather"] = true;             // tempC, code, condition, high/low, hourly[], daily[]
+f["power"]["battery_save"] = true; // board AUTO battery-save (live polls only)
 f["today"] = true;               // tokens + cost — required by appendArchiveRow, not only UI
 f["active_now"] = true;          // archive column
 ```
 
-Dropped (not copied into the board’s parse pool): e.g. `clients`, `generated_at`, `last_activity_sec`, `last5h`, `week` token totals, `models[]`. Archive depends on **`today` + `active_now`** plus STATE fields filled from limits/btc/weather.
+Not in the public contract (removed): `last5h`, `models[]`, `last_activity_sec`, `btc.changePct`,
+`limits.tz` / `fetched_at_epoch` / `age_sec` / nested `resets_at_epoch` (epochs stay server-side only).
+Dropped by the board filter: e.g. `clients`, `generated_at`, `week` token totals. Archive depends on
+**`today` + `active_now`** plus STATE fields filled from limits/btc/weather.
 
 ### Control API (`127.0.0.1:8788`)
 
@@ -854,6 +866,7 @@ Contract source: `control_server.py` `Handler.do_GET` / `do_POST`.
 | GET | `/api/status` | See nested shape below |
 | POST | `/api/enable` | `launchctl bootstrap` usage job → `{ok, detail}` |
 | POST | `/api/disable` | `launchctl bootout` usage job → `{ok, detail}` |
+| POST | `/api/battery-save` | Proxy to usage server: body `{"enabled": true\|false\|null}` (`null` = reset to auto) |
 
 **`GET /api/status` shape:**
 
@@ -869,7 +882,8 @@ Contract source: `control_server.py` `Handler.do_GET` / `do_POST`.
     "clients": [],
     "today": { "tokens": 0, "cost": 0.0 },
     "week": { "tokens": 0, "cost": 0.0 },
-    "active_now": false
+    "active_now": false,
+    "power": { "on_ac": true, "percent": 82, "paused": false, "battery_save": false, "battery_save_manual": null, "source": "auto" }
   },
   "logs": { "out": ["...last lines..."], "err": ["..."] }
 }
@@ -919,30 +933,32 @@ Any field rename/add used on-screen requires coordinated edits in:
 | `offsets` | `path → byte offset` | Per-file tail cursor |
 | `buckets` | `bucket_epoch → {(project,model) → {tokens,cost}}` | 5 min width, 8d retention |
 | `seen` | `(msg_id, request_id) → ts` | Stream dedupe |
-| `last_ts` | datetime | `active_now` / `last_activity_sec` |
+| `last_ts` | datetime | `active_now` |
 | `aggregates` | precomputed rollup | Refreshed each scan, not per HTTP |
 | `clients` | `ip → last_seen` | 24h retention |
 | `limits` | OAuth snapshot | Last-good kept on failure |
 | `context` | `{tokens, ts}` | Newest event prompt size |
-| `btc` / `weather` | market snapshots | Last-good kept |
+| `btc` / `weather` | market snapshots | Last-good kept; weather includes hourly/daily |
+| `power` | `on_ac`, `percent`, `paused`, `battery_save_manual` | Guard + battery-save; exposed via `power_snapshot()` |
 
 ### Firmware `UsageState` (`state.h`)
 
-Hot string fields use fixed `char[]` buffers (not Arduino `String`) to avoid heap fragmentation across weeks of 20s reassignment. Token fields are `int64_t` (weekly totals exceed 32-bit).
+Hot string fields use fixed `char[]` buffers (not Arduino `String`) to avoid heap fragmentation across weeks of 20s reassignment. Token fields are `int64_t` (weekly totals exceed 32-bit). No `longTrend[]` — 30-day on-device history was removed.
 
 ### SD card layout (all optional)
 
 | Path | Purpose | Writer |
 |---|---|---|
-| `/config.json` | Runtime overrides | AP setup, settings queue, `saveIntConfigToSD` |
-| `/last_usage.json` | Last `/api/usage` body | `fetchUsage` |
+| `/config.json` | Runtime overrides (incl. `battery_save`) | AP setup, settings queue, `saveIntConfigToSD` |
+| `/last_usage.json` | Last `/api/usage` body | `fetchUsage` (power flags not applied from cache) |
 | `/last_env.json` | BTC + temp + code | `saveEnvCache` |
-| `/weather.json` | Full weather snapshot | `saveWeatherCache` |
-| `/daily_log.csv` | End-of-day tokens → 30d trend | `appendDailyLogIfNeeded` |
+| `/weather.json` | Full weather snapshot (hourly/daily) | `saveWeatherCache` |
 | `/archive.csv` | One row per poll (~1GB/yr) off-device analysis | `appendArchiveRow` |
 | `/diag_log.csv` | Boot/WiFi/heap black box | `logDiag` |
 | `/splash.bmp` | Optional 320×240 24-bit boot art | User-supplied |
 | `/cats/*.gif` | Cat library (max 120 indexed) | `prepare_cat_gifs.py` → user copy |
+
+**Removed path:** `/daily_log.csv` (was end-of-day tokens for the deleted 30-day trend page).
 
 Missing files are never errors — features degrade gracefully.
 
@@ -1052,6 +1068,8 @@ No formal DB migrations. JSON/CSV files are additive; clients treat missing keys
 20. **Classic GFX font + fixed 6×8 metrics only** — no custom typefaces; layout is character-budget arithmetic; simulator must emulate advance width, not use browser text metrics.
 21. **Border-defined dark UI with orange/green/warn channels** — `COL_SURFACE == COL_BG`; accent for selection/primary metrics, green for live/OK/countdown, rose for destructive and ≥80% resource bars. Full token table in Visual Design System.
 22. **Large half-screen page taps + hidden settings** — primary nav is left/right halves (resistive-friendly); Settings is a secret pulse hit-box so a desk ornament is not accidental-reconfigureable.
+23. **Seven dashboard pages only** — status, projects+7d trend, home, device, limits, cats, mixed. No 30-day SD trend page; no BTC candlestick ticker (price remains a tile/row via Mac proxy).
+24. **Battery Save is dual-sided** — Mac stretches background work + exposes `power.battery_save`; board AUTO mode floors poll ≥120s from **live** polls only (never SD cache). Guard unbind at ≤50% battery remains separate.
 
 ---
 
@@ -1170,11 +1188,11 @@ This system is already deployed as a personal appliance. Operational “rollout�
 
 1. **Should `/api/usage` grow auth?** e.g. shared secret header for untrusted WiFi guests — currently **Key Decision 19** (trust-LAN, no auth; never port-forward). Revisit only if deployment leaves trusted home WiFi.
 2. **Multi-timezone / multi-city weather** — night mode and weather are Bangkok-centric; generalize or keep intentional?
-3. **`models[]` on-device UI** — server already returns today’s cost split; firmware currently does not surface a dedicated models page (limits/home use OAuth windows instead). Worth a page?
+3. **`models[]` on-device UI** — removed from `/api/usage` until a real page needs it (re-add with firmware+simulator in the same PR).
 4. **Archive retention policy on SD** — unbounded by design; should Settings expose truncate/export?
 5. **Simulator GIF fidelity** — keep placeholder forever, or optional browser GIF strip?
 6. **GT911 capacitive boards** — document a second pin profile, or officially single-variant?
-7. **Control server path hardcoding** — plists embed absolute `/Users/eunitembam3/cyd/...`; packaging for other machines needs a install step (README copy) — automate?
+7. **Control server path hardcoding** — plists embed absolute install paths (machine-specific); packaging for other machines needs an install step (README copy) — automate?
 
 ---
 
@@ -1182,19 +1200,19 @@ This system is already deployed as a personal appliance. Operational “rollout�
 
 | Doc / artifact | Path |
 |---|---|
-| Agent guidance (invariants, commands) | `/Users/eunitembam3/cyd/CLAUDE.md` |
-| User setup guide | `/Users/eunitembam3/cyd/README.md` |
-| Usage server | `/Users/eunitembam3/cyd/server/usage_server.py` |
-| Control server | `/Users/eunitembam3/cyd/server/control_server.py` |
-| LaunchAgents (repo copies) | `/Users/eunitembam3/cyd/server/com.corner.cydusage.plist`, `com.corner.cydcontrol.plist` |
-| Firmware | `/Users/eunitembam3/cyd/firmware/cyd_dashboard/` |
-| Simulator | `/Users/eunitembam3/cyd/simulator.html` |
+| Agent guidance (invariants, commands) | `CLAUDE.md` (repo root) |
+| User setup guide | `README.md` |
+| Usage server | `server/usage_server.py` |
+| Control server | `server/control_server.py` |
+| LaunchAgents (repo copies) | `server/com.corner.cydusage.plist`, `com.corner.cydcontrol.plist` |
+| Firmware | `firmware/cyd_dashboard/` |
+| Simulator | `simulator.html` |
 | Visual design system (this doc) | § [Visual Design System (UI)](#visual-design-system-ui) |
 | Color tokens | `firmware/cyd_dashboard/state.h` (`COL_*`) + `simulator.html` RGB888 mirrors |
 | Layout / draw | `firmware/cyd_dashboard/pages.cpp`, `settings.cpp` |
 | Number formats | `firmware/cyd_dashboard/format.cpp` |
-| Control UI | `/Users/eunitembam3/cyd/server.html` (host chrome — not panel design system) |
-| Cat pipeline | `/Users/eunitembam3/cyd/prepare_cat_gifs.py` |
+| Control UI | `server.html` (host chrome — not panel design system) |
+| Cat pipeline | `prepare_cat_gifs.py` |
 | Config examples | `config.example.h`, `config.example.json` |
 | Anthropic OAuth usage | `https://api.anthropic.com/api/oauth/usage` |
 | Binance ticker | `https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT` |
@@ -1251,7 +1269,7 @@ Ordered as if rebuilding/extending from core outward. Each PR is independently r
 - **Title:** `server: jsonl tail, bucketed aggregates, GET /api/usage`
 - **Files/components:** `server/usage_server.py` (scan/dedupe/buckets/`compute_aggregates`/`build_report`/`Handler`), README API section
 - **Dependencies:** none
-- **Description:** Standalone stdlib HTTP server exposing today/last5h/last24h/week/projects/trend/active_now/models from `~/.claude` logs. Python 3.9-safe. No OAuth/market yet.
+- **Description:** Standalone stdlib HTTP server exposing today/week/projects/trend/active_now from `~/.claude` logs. Python 3.9-safe. No OAuth/market yet.
 - **Done when:** `/usr/bin/python3` serves JSON; stream rewrite does not double-count; buckets prune at 8 days.
 
 ### PR 2 — OAuth limits + Keychain integration
@@ -1259,7 +1277,7 @@ Ordered as if rebuilding/extending from core outward. Each PR is independently r
 - **Title:** `server: OAuth /usage limits via Keychain`
 - **Files/components:** `usage_server.py` (`oauth_token`, `fetch_limits`, `limits_loop`, `limits` object with session/week/week_model/credits)
 - **Dependencies:** PR 1
-- **Description:** Background refresh of plan windows; last-good on failure; request-time `resets_in_sec` (session/week only) + `age_sec`; 429 backoff clamp 600–1800s.
+- **Description:** Background refresh of plan windows; last-good on failure; request-time `resets_in_sec` (session/week only; internal epochs stripped from public JSON); 429 backoff clamp 600–1800s.
 - **Done when:** `curl` shows non-null `limits` with Keychain allow; expired token skips without thrashing; 429 backs off without multi-hour freeze of displayed percent beyond clamp.
 
 ### PR 3 — Launchd packaging + battery guard + activity gating
@@ -1294,20 +1312,20 @@ Ordered as if rebuilding/extending from core outward. Each PR is independently r
 - **Description:** Poll contract unlocked across HTTP; sticky `haveData`; fail-cycle offline flag (cats UI comes later); WiFi reconnect + restart-after-timeout. No mutex across `http.GET`.
 - **Done when:** board or serial logs show successful parse against PR1 server; failed poll increments fail counter; `huge_app` compile clean.
 
-### PR 7 — Dashboard pages 0–5 **and** simulator parity (single merge unit)
+### PR 7 — Dashboard pages 0–4 **and** simulator parity (single merge unit)
 
-- **Title:** `firmware+simulator: pages 0–5 dashboard UI (parity lockstep)`
-- **Files/components:** `pages.cpp` (`drawStatusPage`, `drawProjectsPage`, `drawHomePage`, `drawDevicePage`, `drawLongTrendPage` stub without SD history, `drawLimitsPage`, `render`, footer, progress line, **pixel-shift orbit**, **shine bars**, **hourly flash**, **session countdown wedge** / `show_countdown` behavior), **`simulator.html`** (same coordinates, RGB565↔888, 6px font metrics, offline checkbox, page cycle)
+- **Title:** `firmware+simulator: pages 0–4 dashboard UI (parity lockstep)`
+- **Files/components:** `pages.cpp` (`drawStatusPage`, `drawProjectsPage`, `drawHomePage`, `drawDevicePage`, `drawLimitsPage`, `render`, footer, progress line, **pixel-shift orbit**, **shine bars**, **hourly flash**, **session countdown wedge** / `show_countdown` behavior), **`simulator.html`** (same coordinates, RGB565↔888, 6px font metrics, offline checkbox, page cycle)
 - **Dependencies:** PR 6; **PR 2 required for non-placeholder limits UI** (session/week/credits rows show real OAuth data). Without PR 2, limits rows stay at “--” / −1 — not an acceptable Done state for this PR.
-- **Description:** Full non-cat UI using `UsageState` in firmware **and** canvas twin in one PR. Enforces Key Decision 5 — no standalone “firmware pages without simulator” landable slice.
-- **Done when:** Playwright screenshot of pages 0–5 clean of `pageerror`; visual parity checklist (clock, bars, shine, wedge, footer dots); `curl` limits non-null; `huge_app` compile.
+- **Description:** Full non-cat UI using `UsageState` in firmware **and** canvas twin in one PR. Enforces Key Decision 5 — no standalone “firmware pages without simulator” landable slice. (Historical note: an earlier 30-day long-trend page was removed; do not re-add in this PR.)
+- **Done when:** Playwright screenshot of pages 0–4 clean of `pageerror`; visual parity checklist (clock, bars, shine, wedge, footer); `curl` limits non-null; `huge_app` compile.
 
-### PR 8 — SD subsystem: config, caches, daily log, archive, diagnostics
+### PR 8 — SD subsystem: config, caches, archive, diagnostics
 
-- **Title:** `firmware: SD store for config, caches, 30d trend, archive, diag`
+- **Title:** `firmware: SD store for config, caches, archive, diag`
 - **Files/components:** `sd_store.cpp`, `net.cpp` (cache + **`/archive.csv`** per-poll writes + env/weather cache hooks as available), `pins.h` HSPI, `config.example.json`
 - **Dependencies:** PR 6
-- **Description:** `loadRuntimeConfig` (poll clamp 5–3600), `/last_usage.json`, `/daily_log.csv` → `longTrend`, `/diag_log.csv`, **`/archive.csv`** (one row per successful poll for off-device analysis), `sdMutex` discipline (nest only sd→state).
+- **Description:** `loadRuntimeConfig` (poll clamp 5–3600), `/last_usage.json`, `/diag_log.csv`, **`/archive.csv`** (one row per successful poll for off-device analysis), `sdMutex` discipline (nest only sd→state). No `/daily_log.csv`.
 - **Done when:** boot restores last usage from card; archive grows one row per poll; diag logs boot reason; `huge_app` compile.
 
 ### PR 9 — Market proxy (BTC + weather) Mac → JSON → tiles + simulator
@@ -1323,7 +1341,7 @@ Ordered as if rebuilding/extending from core outward. Each PR is independently r
 - **Title:** `firmware: AnimatedGIF cats, mixed page, offline banner presentation`
 - **Files/components:** `gif_player.cpp` (`drawSessionResetOverlay`, mixed geometry), `prepare_cat_gifs.py`, `pages.cpp` mixed static / partial push, `loop` catMode, **simulator placeholder only** (parity for placeholder layout, not real GIF decode)
 - **Dependencies:** PR 8 (SD `/cats/`); fail-cycle offline **flag** already from PR 6 — this PR supplies the **cat presentation** when offline
-- **Description:** Scan `/cats/` (max 120), frame-paced decode on core 1 under `sdMutex`, page 6 full cats + session overlay, page 7 left limits / right GIF / footer band y≥220. Offline forces cat mode + OFFLINE banner (not “cats invent offline detection”).
+- **Description:** Scan `/cats/` (max 120), frame-paced decode on core 1 under `sdMutex`, page 5 (`GIF_PAGE`) full cats + session overlay, page 6 (`MIXED_PAGE`) left limits / right GIF / footer band y≥220. Offline forces cat mode + OFFLINE banner (not “cats invent offline detection”).
 - **Done when:** cats play with SD library; offline after 3 fails shows banner over cats; mixed partial push does not clobber left card; simulator shows placeholder note; `huge_app` compile.
 
 ### PR 11 — First-boot AP setup portal
@@ -1339,7 +1357,7 @@ Ordered as if rebuilding/extending from core outward. Each PR is independently r
 - **Title:** `firmware: hidden table-driven settings + confirm-arm`
 - **Files/components:** `settings.cpp`, `cyd_dashboard.ino` touch routing, generic config queue in `networkTask`
 - **Dependencies:** PR 8, PR 10 (cat shuffle), PR 7
-- **Description:** Pulse-dot hit target, drag-scroll list / leaf UI, brightness/poll presets/shift/boot/night/rotation/countdown/forget/restart; core-1 apply + core-0 SD drain.
+- **Description:** Pulse-dot hit target, drag-scroll list / leaf UI, brightness/poll presets/shift/boot/night/battery-save/rotation/countdown/forget/restart; core-1 apply + core-0 SD drain.
 - **Done when:** each setting mutates live + persists across reboot via `/config.json`; destructive rows need two taps within ~4s; `huge_app` compile.
 
 ### PR 13 — Operability polish & docs lock-in
@@ -1347,15 +1365,15 @@ Ordered as if rebuilding/extending from core outward. Each PR is independently r
 - **Title:** `docs+ops: CLAUDE.md invariants, flash FQBN, limits cadence sync`
 - **Files/components:** `CLAUDE.md`, `README.md`, `design.md` (architecture + **Visual Design System**), compile/flash notes
 - **Dependencies:** PRs 1–12 as applicable
-- **Description:** Codify dual-core/TLS/parity rules, huge_app + 115200, control panel install, cat prep workflow. **Explicitly sync `CLAUDE.md` OAuth refresh interval to 120s** (not stale 60s) and settings as drag-scroll list (not “paginated”). Point contributors at the Visual Design System for colors/fonts/spacing/hit targets. Treat as onboarding checkpoint.
-- **Done when:** docs match code for limits interval, mutex rules, PR parity process, and UI tokens; new contributor can follow README + this PR plan without contradictions.
+- **Description:** Codify dual-core/TLS/parity rules, huge_app + 115200, control panel install, cat prep workflow. **Keep OAuth refresh at 120s AC / 300s battery**, settings as drag-scroll list, **7-page map**, and battery-save dual-side docs in lockstep with code. Point contributors at the Visual Design System for colors/fonts/spacing/hit targets. Treat as onboarding checkpoint.
+- **Done when:** docs match code for limits interval, page count, mutex rules, PR parity process, and UI tokens; new contributor can follow README + this PR plan without contradictions.
 
 ### Future PR templates (post-baseline)
 
 | Suggested title | Depends on | Intent |
 |---|---|---|
 | `feat: optional shared-secret for /api/usage` | PR 1, PR 6 | Hardened WiFi (see Open Question / KD 19) |
-| `feat: models cost-split page` | PR 7 | Surface existing `models[]` (firmware+simulator same PR) |
+| `feat: models cost-split page` | PR 1, PR 7 | Re-add `models[]` to `build_report` + draw it (firmware+simulator same PR) |
 | `feat: SD archive rotate/export setting` | PR 8, PR 12 | Manage 1GB/yr growth |
 | `feat: multi-city weather config` | PR 9 | Lift Bangkok hardcode |
 | `chore: parameterized LaunchAgent install script` | PR 3/4 | Multi-machine paths |
@@ -1386,5 +1404,5 @@ flowchart TB
 
 ---
 
-*End of design document. This captures the system as implemented on 2026-07-20; feature work should update this document when invariants or the `/api/usage` contract change.*
+*End of design document. This captures the system as implemented on 2026-07-25 (7 pages, battery save, no long-trend/BTC-ticker pages); feature work should update this document when invariants or the `/api/usage` contract change.*
 

@@ -6,9 +6,10 @@ A little always-on desk display that shows your live Claude Code usage:
   progress bar with the exact reset time (same numbers as `/usage` in
   Claude Code).
 - **Current week** — same thing for your weekly limit.
-- Plus four more pages you can flip through by tapping the screen:
-  session/week limits with a per-model cost breakdown, top projects,
-  a live BTC/USDT price, and a 7-day usage chart.
+- Plus more pages you can flip through by tapping the screen: top projects
+  with a 7-day usage chart, a full `/usage`-style limits panel (context,
+  credits, per-model week), device stats, optional cat GIFs from an SD
+  card, and ambient Bangkok weather + BTC price on the home status page.
 
 It runs on a **2.8″ ESP32 touch display** (nicknamed the "Cheap Yellow
 Display" or CYD, model **ESP32-2432S028R**, ~$10 on AliExpress). Your Mac
@@ -234,27 +235,34 @@ If the whole screen just says **OFFLINE** instead, see Troubleshooting below.
 Unplug it from the Mac and plug it into **any USB phone charger**
 anywhere in WiFi range. It reconnects and runs 24/7 on its own. (Your Mac
 must be switched on and awake for the display to work — whenever it can't
-reach the Mac, the screen shows a plain **OFFLINE** message, and returns to
-the dashboard automatically within about 20 seconds of the Mac coming back.)
+reach the Mac, the screen shows cat GIFs (or a placeholder) with an
+**OFFLINE** banner, and returns to the dashboard on the next successful
+poll after the Mac comes back.)
 
 ---
 
 ## Using it
 
-Tap anywhere on the screen to flip between five pages:
+Tap the **right half** of the screen to go forward, the **left half** to
+go back, across seven pages:
 
 | Page | Shows |
 |---|---|
-| **1. Limits & Weather** (default) | Session % + reset time, week % + reset time — same numbers as `/usage` in Claude Code — plus a Bangkok clock, current weather, and the BTC/USDT price. The reset-countdown bars have a looping light sweep across them (a subtle 2.6s animation). |
-| **2. Top Projects** | Your 5 most token-hungry projects over the last 7 days |
-| **3. Home** | A compact view of the same session/week limit bars with the same light sweep, plus the BTC/USDT price |
-| **4. 7-Day Trend** | Bar chart of daily token usage this week |
-| **5. Device Stats** | CPU duty cycle, flash usage, and static RAM usage on the board itself |
+| **1. Status** (default) | Bangkok clock, session/week mini bars with a looping light sweep on the countdown, weather card (tap for a multi-hour / multi-day overlay), and BTC/USDT price |
+| **2. Projects + 7-day trend** | Your most token-hungry projects over the last 7 days, plus a daily token bar chart |
+| **3. Home** | Large session + week limit blocks (same light sweep) with BTC price |
+| **4. Device Stats** | CPU duty cycle, flash, RAM, and SD status on the board itself |
+| **5. Limits** | Full `/usage`-style panel: context window, 5h, weekly, per-model week, credits |
+| **6. Cats** | Random cat GIFs from the SD card (`/cats/`), if present |
+| **7. Mixed** | Limits card on the left, cats on the right |
 
 The bottom edge shows the WiFi status, how fresh the data is
-("updated 5s ago"), and which page you're on (the dots). If the board
-can't reach your Mac, all of that is replaced by a plain **OFFLINE**
-screen until the connection comes back.
+("updated 5s ago"), and which page you're on. Tap the small connection
+pulse in the footer corner to open **Settings** (brightness, poll rate,
+battery save, night mode, and more). If the board can't reach your Mac
+for about a minute of failed polls, the screen switches to cat GIFs (or
+the cats placeholder) with a large **OFFLINE** banner until the
+connection comes back.
 
 ---
 
@@ -266,6 +274,9 @@ live status page that answers "is everything working?" at a glance:
 - **RUNNING / STOPPED** pill and a one-click **Enable / Disable server**
   button (disabling makes the board show OFFLINE; enabling brings it back
   within one 20-second poll — nothing to do on the board itself).
+- **Battery save** — force on, force off, or reset to auto (follow AC power).
+  When save is active, the Mac slows its background work and the board (in
+  AUTO) floors its poll interval to about 2 minutes.
 - **Board heartbeat** — the board's IP and how many seconds ago it last
   fetched data. "alive" in green means the board is polling normally.
 - **Diagnostics checklist** — six pass/fail checks (launchd job, process,
@@ -285,8 +296,9 @@ cannot reach it, because it has the power to stop and start the server.
 
 **The whole screen just says OFFLINE**
 - This is normal and expected whenever your Mac is **asleep or off** —
-  the board simply waits, and the dashboard comes back on its own within
-  about 20 seconds of the Mac waking up. You don't need to do anything.
+  the board shows cats + an OFFLINE banner, and the dashboard comes back
+  on the next successful poll after the Mac wakes up. You don't need to
+  do anything.
 - If it stays OFFLINE even when the Mac is awake, work through:
 - Is the helper running? (Test on the Mac with
   `curl http://localhost:8787/api/usage` in Terminal. If Part 1 Step 1.5
@@ -304,7 +316,8 @@ cannot reach it, because it has the power to stop and start the server.
 **Usage percentages show "--"**
 - The helper couldn't read your Claude Code login from the keychain yet.
   If a keychain popup appeared, make sure you clicked **Always Allow**
-  (Step 1.2). The helper retries every minute, so it usually fixes itself.
+  (Step 1.2). The helper retries about every two minutes on AC, so it
+  usually fixes itself.
 - The token counts and dollar totals below still work even when this shows
   "--", since those come from your local logs rather than the login.
 
@@ -356,7 +369,7 @@ other).
   with an approximate price table by model family
   (in `usage_server.py`) — useful for comparing days, not for billing.
 - **The light sweep on the countdown bars** — that looping shine gradient
-  across the green bars on pages 1 and 3 — is pure polish. It's a subtle
+  across the green bars on the Status and Home pages — is pure polish. It's a subtle
   visual indicator that the board is alive and animating smoothly, running
   in parallel with the 20-second data updates.
 - **Privacy:** the helper serves data to any device on your home network

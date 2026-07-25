@@ -230,7 +230,7 @@ static const SettingDef SETTINGS[] = {
     2, 1, 2, SHOW_COUNTDOWN_VALUES, SHOW_COUNTDOWN_LABELS, 2, false,
     getCurrentShowCountdown, applyShowCountdown },
 };
-const int SETTINGS_COUNT = 11;
+static const int SETTINGS_COUNT = 11;
 
 static const int SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
 static const int SET_BTN_X0 = 11, SET_BTN_Y = 100, SET_BTN_W = 54, SET_BTN_H = 56;

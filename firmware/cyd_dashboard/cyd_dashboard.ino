@@ -66,7 +66,6 @@ bool shiftDirty = false;  // set on step; the mixed page's partial pushes need o
 // "how busy is the loop", not a real scheduler-level CPU% figure.
 float cpuPercentAvg = 0;
 bool touchWasDown = false;
-bool wifiOk = false;
 volatile bool connected = false;  // did the most recent fetch reach the server?
 
 // Guards every read/write of the shared UsageState between the render loop
@@ -394,7 +393,7 @@ void loop() {
       lineW = 0;
     }
 
-    // Same treatment for the shine sweep on page 1's green countdown bars:
+    // Same treatment for the shine sweep on status/mixed green countdown bars:
     // top up the band every pass so it glides instead of stepping at 1Hz.
     shineTick(now);
   }

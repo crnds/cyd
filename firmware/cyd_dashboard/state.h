@@ -170,9 +170,6 @@ const uint16_t COL_TRACK = 0x5ACB;   // neutral grey bar track
 const uint16_t COL_TRACK_BLACK = 0x0000; // pure-black bar track (reset-countdown bars)
 const uint16_t COL_BLUE = 0x3C1E;    // device-stats bar chart accent
 const uint16_t COL_YELLOW = 0xFFE0;  // yellow for sun/lightning icons
-// Weather page background — pure black (same as other pages' near-black COL_BG
-// family). Used only by drawWeatherPage.
-const uint16_t COL_WEATHER_BG = 0x0000;
 // Weather card hit-box on the status page (page 0): matches the full card
 // drawn at fillRect(161,166,157,52) (pages.cpp). Tap opens the Weather
 // overlay (mirrors settings' PULSE_HIT_* pattern).
@@ -232,16 +229,14 @@ struct UsageState {
   int creditsPercent = -1;
   uint32_t lastFetchOkMs = 0;
   double btcPrice = -1;      // BTC/USDT (from the Mac via /api/usage); -1 = unknown
-  float btcChangePct = NAN;
   float weatherTempC = -999; // Bangkok temp (from the Mac via /api/usage); -999 = unknown
   int weatherCode = -1;      // WMO weather_code (from the Mac); -1 = unknown
   // Weather page fields — same payload as the status card's temp/code, plus
-  // today's H/L, a short condition label, place name, next 6h, and next 5d.
+  // today's H/L, a short condition label, next 6h, and next 5d.
   // -999 / -1 / empty mean "not received yet" (show "--" / hide row).
   int weatherHigh = -999;
   int weatherLow = -999;
   char weatherCondition[20] = "";
-  char weatherPlace[16] = "Bangkok";
   WeatherHour weatherHourly[WEATHER_HOURLY_N];
   uint8_t weatherHourlyCount = 0;
   WeatherDay weatherDaily[WEATHER_DAILY_N];
@@ -292,14 +287,9 @@ extern int shiftX, shiftY;
 extern uint32_t lastShiftMs;
 extern bool shiftDirty;
 
-// CPU load estimate, WiFi/connection status.
+// CPU load estimate + touch edge tracking.
 extern float cpuPercentAvg;
 extern bool touchWasDown;
-// Set in net.cpp's connectWifi()/fetchUsage() (core 0 once networkTask is
-// running); audited for cross-core reads and found to have none — nothing
-// else in the firmware currently reads wifiOk, so it doesn't need volatile.
-// Left as a plain bool rather than force-adding the keyword without a reason.
-extern bool wifiOk;
 // Did the most recent fetch reach the server? Written by networkTask() (core
 // 0), read by drawFooter()/loop()'s progress line (core 1) with no lock --
 // volatile for the same cross-core-visibility reason as STATE.haveData.
@@ -440,7 +430,6 @@ void gifPlayerResetForPageChange(); // force a fresh random GIF on the next tick
 
 // ── SETTINGS (settings.cpp) ────────────────────────────────
 void renderSettings();
-const extern int SETTINGS_COUNT;
 void queueConfigSave(uint8_t keyId, int32_t value);
 // Recompute live backlight (night mode) / poll cadence (battery save). Call
 // after any of those inputs change (and once after loadRuntimeConfig).

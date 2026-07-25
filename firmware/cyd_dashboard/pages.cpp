@@ -5,6 +5,11 @@
 // here without updating the simulator too. Split out of cyd_dashboard.ino.
 #include "state.h"
 
+// Shared by status-page digital date and weather overlay daily rows.
+static const char* const WDAY_ABBR[7] = {
+  "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+};
+
 // Touch feedback: flash a 5px white border on the left or right part of the screen
 // for one frame, straight to the panel over the already-pushed frame, then re-push
 // the clean frame to clear it. Drawn on `gfx` (not `g`) so it overlays the
@@ -192,6 +197,28 @@ void drawBatterySaveIcon() {
   g->fillRect(bodyX + bodyW, bodyY + (bodyH - nubH) / 2, nubW, nubH, COL_YELLOW);
 }
 
+// Percent track+fill. minFillPx is the smallest non-zero fill (3 for thick
+// bars so a 1% reading is still visible; h for thin mini-bars so a full-height
+// stub shows). Returns fill width or -1 when percent is unknown.
+static int drawPercentBar(int x, int y, int w, int h, int percent,
+                          uint16_t color, uint16_t trackColor = COL_TRACK,
+                          int minFillPx = 3) {
+  g->fillRect(x, y, w, h, trackColor);
+  if (percent < 0) return -1;
+  int fillW = (int)((float)min(percent, 100) / 100 * w + 0.5f);
+  if (fillW < minFillPx) fillW = minFillPx;
+  g->fillRect(x, y, fillW, h, color);
+  return fillW;
+}
+
+// Live countdown: tick the last server-provided remaining-seconds down by
+// wall time since lastFetchOkMs. Shared by Home / status / limits card.
+static long liveResetsInSec(long baseSec) {
+  if (baseSec < 0) return -1;
+  long rem = baseSec - (long)((millis() - STATE.lastFetchOkMs) / 1000);
+  return rem < 0 ? 0 : rem;
+}
+
 static void drawLimitBlock(int y, const char* title, int percent, const char* resets, long resetsInSec) {
   g->setTextColor(COL_TEXT);
   g->setTextSize(1);
@@ -199,11 +226,7 @@ static void drawLimitBlock(int y, const char* title, int percent, const char* re
   g->print(title);
 
   int barX = 10, barY = y + 22, barW = 191, barH = 16;
-  g->fillRect(barX, barY, barW, barH, COL_TRACK);
-  if (percent >= 0) {
-    int fillW = (int)((float)min(percent, 100) / 100 * barW);
-    g->fillRect(barX, barY, max(fillW, 3), barH, COL_ACCENT);
-  }
+  drawPercentBar(barX, barY, barW, barH, percent, COL_ACCENT);
 
   g->setTextColor(COL_TEXT);
   g->setTextSize(2);
@@ -231,11 +254,7 @@ static void drawLimitsRow(int y, const String& label, const String& right, int p
   g->setTextColor(COL_TEXT2);
   g->setCursor(320 - (int)right.length() * 6, y);
   g->print(right);
-  g->fillRect(10, y + 12, 310, 8, COL_TRACK);
-  if (percent >= 0) {
-    int fillW = (int)((float)min(percent, 100) / 100 * 310 + 0.5f);
-    g->fillRect(10, y + 12, max(fillW, 3), 8, COL_ACCENT);
-  }
+  drawPercentBar(10, y + 12, 310, 8, percent, COL_ACCENT);
 }
 
 // "Resets Jul 16, 04:59  58%" — or bare "58%", or "--" when unknown.
@@ -247,10 +266,9 @@ static String limitRowText(int percent, const char* resets) {
   return s;
 }
 
-// Page 6: the Claude Code /usage panel — context window, 5-hour limit,
-// weekly (all models), weekly per-model (hidden when the server sends null,
-// e.g. if the per-model limit is ever discontinued), usage credits. Rows
-// shift up when a row is absent.
+// Limits page (index 4): Claude Code /usage panel — context window, 5-hour
+// limit, weekly (all models), weekly per-model (hidden when the server sends
+// null), usage credits. Rows shift up when a row is absent.
 static void drawLimitsPage() {
   g->setTextColor(COL_TEXT);
   g->setTextSize(1);
@@ -286,12 +304,7 @@ static void drawLimitsPage() {
 }
 
 static void drawHomePage() {
-  // Tick the session countdown down locally between polls.
-  long sessionRem = STATE.sessionResetsInSec;
-  if (sessionRem >= 0) {
-    sessionRem -= (long)((millis() - STATE.lastFetchOkMs) / 1000);
-    if (sessionRem < 0) sessionRem = 0;
-  }
+  long sessionRem = liveResetsInSec(STATE.sessionResetsInSec);
   // Week has no countdown suffix here: its "Resets <date>" string is already
   // close to the line's pixel budget (see drawLimitsCard's size1 note below),
   // so appending " (HHh:MMm)" would overflow the 320px screen.
@@ -446,22 +459,18 @@ static void drawWeatherIcon(int x, int y, int code) {
   g->fillRoundRect(cx - 9, cy - 2, 19, 9, 4, COL_TEXT2);
 }
 
-// Thin inset progress bar: near-black track recessed into a surface card.
-// Returns the fill width in px (-1 when percent is unknown) so callers can
-// overlay effects on the filled region (the green bars' shine sweep below).
-static int drawMiniBar(int x, int y, int w, int percent, uint16_t color, uint16_t trackColor = COL_TRACK, int h = 6) {
-  g->fillRect(x, y, w, h, trackColor);
-  if (percent < 0) return -1;
-  int fillW = max((int)((float)min(percent, 100) / 100 * w), h);
-  g->fillRect(x, y, fillW, h, color);
-  return fillW;
+// Thin inset progress bar (min fill = bar height so a stub is full-height).
+// Returns fill width (-1 when unknown) for shine-sweep overlays.
+static int drawMiniBar(int x, int y, int w, int percent, uint16_t color,
+                       uint16_t trackColor = COL_TRACK, int h = 6) {
+  return drawPercentBar(x, y, w, h, percent, color, trackColor, h);
 }
 
 // ── SHINE SWEEP ────────────────────────────────────────────
 // Looping light band swept across the green reset-countdown bars' fill in
-// drawLimitsCard (pages 1 and 8). The band crosses the full 122px track at
-// constant speed but is only painted over the filled interior, so short
-// fills just see it pass through. Twin of simulator.html's drawShineStrip.
+// drawLimitsCard (status page 0 + MIXED_PAGE). The band crosses the full
+// track at constant speed but is only painted over the filled interior.
+// Twin of simulator.html's drawShineStrip.
 static const uint32_t SHINE_PERIOD_MS = 2600;
 static const int SHINE_BAND_R = 7;
 static const int SHINE_BAR_X = 12, SHINE_BAR_W = 137, SHINE_BAR_H = 4;
@@ -535,17 +544,8 @@ static void drawLimitsCard() {
   g->fillRect(2, 103, 157, 87, COL_SURFACE);
   g->drawRect(2, 103, 157, 87, COL_BORDER);
 
-  // Tick both countdowns down locally between polls.
-  long sessionRem = STATE.sessionResetsInSec;
-  if (sessionRem >= 0) {
-    sessionRem -= (long)((millis() - STATE.lastFetchOkMs) / 1000);
-    if (sessionRem < 0) sessionRem = 0;
-  }
-  long weekRem = STATE.weekResetsInSec;
-  if (weekRem >= 0) {
-    weekRem -= (long)((millis() - STATE.lastFetchOkMs) / 1000);
-    if (weekRem < 0) weekRem = 0;
-  }
+  long sessionRem = liveResetsInSec(STATE.sessionResetsInSec);
+  long weekRem = liveResetsInSec(STATE.weekResetsInSec);
 
   // ── left card: limits ──
   String sessionPctStr = STATE.sessionPercent >= 0 ? String(STATE.sessionPercent) + "%" : "--";
@@ -739,13 +739,7 @@ static void drawStatusPage() {
   struct tm timeinfo;
   bool haveTime = getLocalTime(&timeinfo, 0);
 
-  // Tick the session countdown down locally between polls, same as
-  // drawLimitsCard/drawHomePage, to find the wall-clock time it resets at.
-  long sessionRem = STATE.sessionResetsInSec;
-  if (sessionRem >= 0) {
-    sessionRem -= (long)((millis() - STATE.lastFetchOkMs) / 1000);
-    if (sessionRem < 0) sessionRem = 0;
-  }
+  long sessionRem = liveResetsInSec(STATE.sessionResetsInSec);
   bool haveReset = haveTime && sessionRem >= 0;
   int resetHour = 0, resetMinute = 0;
   if (haveReset) {
@@ -790,11 +784,10 @@ static void drawStatusPage() {
   if (haveTime) {
     // Year dropped: "Mon 25 Jul 2026" at size2 would overrun the 132px
     // inner width; weekday+day+month fits at 120px.
-    static const char* wdays[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     static const char* mons[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
     char buf[16];
-    snprintf(buf, sizeof(buf), "%s %d %s", wdays[timeinfo.tm_wday], timeinfo.tm_mday,
+    snprintf(buf, sizeof(buf), "%s %d %s", WDAY_ABBR[timeinfo.tm_wday], timeinfo.tm_mday,
              mons[timeinfo.tm_mon]);
     int tw = (int)strlen(buf) * 6 * 2;
     g->setCursor(240 - tw / 2, 142);
@@ -900,11 +893,7 @@ static void drawFullStatBlock(int y, const char* title, int percent, const Strin
   g->print(title);
 
   int barX = 10, barY = y + 14, barW = 246, barH = 16;
-  g->fillRect(barX, barY, barW, barH, COL_TRACK);
-  if (percent >= 0) {
-    int fillW = (int)((float)min(percent, 100) / 100 * barW);
-    g->fillRect(barX, barY, max(fillW, 3), barH, color);
-  }
+  drawPercentBar(barX, barY, barW, barH, percent, color);
 
   g->setTextColor(COL_TEXT);
   g->setTextSize(2);
@@ -916,6 +905,8 @@ static void drawFullStatBlock(int y, const char* title, int percent, const Strin
   g->setCursor(10, barY + 20);
   g->print(sub);
 }
+
+
 
 static void drawDevicePage() {
   g->setTextColor(COL_TEXT);
@@ -967,7 +958,6 @@ static void drawWeatherPage() {
   // COL_BG (not pure black): borders define structure like the rest of the UI.
   g->fillScreen(COL_BG);
 
-  static const char* WDAYS[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
   const int heroRight = 312;  // card right pad (10+310-8)
 
   // ── Hero card ────────────────────────────────────────────
@@ -1141,7 +1131,7 @@ static void drawWeatherPage() {
     g->setTextSize(1);
     g->setTextColor(i == 0 ? COL_ACCENT : COL_TEXT);
     g->setCursor(18, textY);
-    if (have && wd >= 0 && wd < 7) g->print(WDAYS[wd]);
+    if (have && wd >= 0 && wd < 7) g->print(WDAY_ABBR[wd]);
     else g->print("---");
 
     drawWeatherIcon(44, iconY, code);

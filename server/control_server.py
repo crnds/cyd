@@ -66,9 +66,6 @@ def probe_endpoint():
             "generated_at": doc.get("generated_at"),
             "limits_ok": doc.get("limits") is not None,
             "clients": doc.get("clients") or [],
-            "today": doc.get("today"),
-            "week": doc.get("week"),
-            "active_now": doc.get("active_now"),
             # Mac power / battery-save (from usage_server STATE["power"]).
             "power": doc.get("power"),
         }
@@ -91,7 +88,12 @@ def set_battery_save(enabled):
         with urllib.request.urlopen(req, timeout=3) as resp:
             doc = json.loads(resp.read())
         if doc.get("ok"):
-            state = "on" if enabled else "off"
+            if enabled is True:
+                state = "on"
+            elif enabled is False:
+                state = "off"
+            else:
+                state = "cleared (auto)"
             return True, "battery saver %s" % state, doc.get("power")
         return False, doc.get("detail") or "usage server rejected request", None
     except Exception as exc:

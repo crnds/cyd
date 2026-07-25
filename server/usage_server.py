@@ -47,12 +47,12 @@ STATE = {
     "offsets": {},      # file path -> byte offset already consumed
     "buckets": {},      # bucket_epoch -> {(project, model): {tokens, cost}}
     "seen": {},         # (message_id, request_id) -> ts, dedupes streamed rewrites
-    "last_ts": None,    # exact ts of the newest ingested event (active_now/last_activity_sec)
+    "last_ts": None,    # exact ts of the newest ingested event (active_now)
     "aggregates": None, # cached output of compute_aggregates(), refreshed once per scan
     "clients": {},      # client ip -> last request ts, shows who is polling us
     "limits": None,     # latest plan-limit snapshot from the OAuth usage endpoint
     "context": None,    # {tokens, ts} — newest assistant event's context size
-    "btc": None,        # {price, changePct} from Binance — fetched here so the board needs no TLS
+    "btc": None,        # {price} from Binance — fetched here so the board needs no TLS
     # Bangkok weather for the status card + Weather page: current + next-6h
     # hourly + next-5d daily, fetched here so the board needs no TLS.
     "weather": None,
@@ -118,10 +118,9 @@ def power_snapshot():
     }
 
 
-def is_on_battery():
-    # Low-power cadences (BTC/weather/scan/limits). Named for historical
-    # reasons; now also honors a manual battery_save override from the
-    # control panel, not only physical AC state.
+def battery_save_active():
+    # Low-power cadences (scan/limits/market). True when the Mac is on
+    # battery (auto) or when the control panel forced battery-save on.
     return power_snapshot()["battery_save"]
 
 
@@ -191,7 +190,6 @@ WEATHER_URL = (
     "&daily=weather_code,temperature_2m_max,temperature_2m_min"
     "&timezone=Asia%2FBangkok&forecast_days=6"
 )
-WEATHER_PLACE = "Bangkok"
 # 60s is plenty for a 320px tile — the old 10s cadence was ~8640 HTTPS/day
 # of radio/TLS work that never changed what the board could usefully show.
 # On battery: stretch further (3 min BTC / 30 min weather) so the Mac isn't
@@ -369,7 +367,7 @@ def fetch_limits():
 
 
 def limits_interval():
-    return LIMITS_INTERVAL_BATTERY_SEC if is_on_battery() else LIMITS_INTERVAL_SEC
+    return LIMITS_INTERVAL_BATTERY_SEC if battery_save_active() else LIMITS_INTERVAL_SEC
 
 
 def limits_loop():
@@ -426,8 +424,9 @@ def fetch_btc():
     with urllib.request.urlopen(req, timeout=8) as resp:
         doc = json.loads(resp.read())
     price = float(doc.get("lastPrice") or 0)
-    change_pct = float(doc.get("priceChangePercent") or 0)
-    return {"price": price, "changePct": change_pct} if price > 0 else None
+    # Price only — changePct was never drawn on board/sim; omit to keep the
+    # /api/usage payload lean (24hr endpoint still used for lastPrice).
+    return {"price": price} if price > 0 else None
 
 
 def load_weather_api_key():
@@ -512,11 +511,11 @@ def _iso_wday(date_str):
 
 def weather_payload(temp_c, code, high=None, low=None, hourly=None, daily=None):
     # Shared shape for both providers — the board/simulator contract.
+    # place is fixed Bangkok (hardcoded locale); not drawn on device.
     out = {
         "tempC": temp_c,
         "code": code if code is not None else -1,
         "condition": wmo_condition(code if code is not None else -1),
-        "place": WEATHER_PLACE,
         "high": high if high is not None else None,
         "low": low if low is not None else None,
         "hourly": hourly or [],
@@ -662,7 +661,7 @@ def fetch_weather():
 
 
 def market_intervals():
-    if is_on_battery():
+    if battery_save_active():
         return BTC_INTERVAL_BATTERY_SEC, WEATHER_INTERVAL_BATTERY_SEC
     return BTC_INTERVAL_SEC, WEATHER_INTERVAL_SEC
 
@@ -883,10 +882,10 @@ def maybe_log_stats():
 
 def compute_aggregates():
     # Rolls the bucketed state up into everything build_report() needs that
-    # doesn't have to be fresh on every single request (today/last5h/week
-    # totals, top projects, per-model cost split, 7-day trend). Called
-    # once per scan cycle (~15s) instead of once per HTTP request, so it's
-    # decoupled from how many clients are polling.
+    # doesn't have to be fresh on every single request (today/week totals,
+    # top projects, 7-day trend). Called once per scan cycle (~15s) instead
+    # of once per HTTP request. last5h / models[] were dropped — no board,
+    # simulator, or control-panel consumer.
     now = datetime.now(timezone.utc)
     local_today = datetime.now().astimezone().date()
 
@@ -894,13 +893,10 @@ def compute_aggregates():
         buckets = list(STATE["buckets"].items())
 
     today_tokens = today_cost = 0
-    last5h_tokens = last5h_cost = 0
     week_tokens = week_cost = 0
     project_totals = {}
-    model_totals = {}
     day_totals = {}
 
-    five_h_ago = now - timedelta(hours=5)
     seven_d_ago = now - timedelta(days=7)
 
     for bucket_epoch, dims in buckets:
@@ -912,14 +908,6 @@ def compute_aggregates():
         if local_date == local_today:
             today_tokens += bucket_tokens
             today_cost += bucket_cost
-            for (_project, model), v in dims.items():
-                mt = model_totals.setdefault(model, {"tokens": 0, "cost": 0.0})
-                mt["tokens"] += v["tokens"]
-                mt["cost"] += v["cost"]
-
-        if bucket_dt >= five_h_ago:
-            last5h_tokens += bucket_tokens
-            last5h_cost += bucket_cost
 
         if bucket_dt >= seven_d_ago:
             week_tokens += bucket_tokens
@@ -930,19 +918,6 @@ def compute_aggregates():
 
     top_projects = sorted(project_totals.items(), key=lambda kv: kv[1], reverse=True)[:5]
 
-    # Today's cost split by model family, biggest spender first. Percent is
-    # share of today's estimated cost (not tokens) so cheap-model bulk usage
-    # doesn't drown out what actually costs money.
-    models = []
-    for name, mt in sorted(model_totals.items(), key=lambda kv: kv[1]["cost"], reverse=True)[:4]:
-        pct = round(mt["cost"] / today_cost * 100) if today_cost > 0 else 0
-        models.append({
-            "name": name,
-            "tokens": mt["tokens"],
-            "cost": round(mt["cost"], 4),
-            "percent": pct,
-        })
-
     trend = []
     for i in range(6, -1, -1):
         d = local_today - timedelta(days=i)
@@ -950,10 +925,8 @@ def compute_aggregates():
 
     aggregates = {
         "today": {"tokens": today_tokens, "cost": round(today_cost, 4)},
-        "last5h": {"tokens": last5h_tokens, "cost": round(last5h_cost, 4)},
         "week": {"tokens": week_tokens, "cost": round(week_cost, 4)},
         "projects": [{"name": name, "tokens": tokens} for name, tokens in top_projects],
-        "models": models,
         "trend": trend,
     }
     with STATE["lock"]:
@@ -963,7 +936,7 @@ def compute_aggregates():
 def scan_interval():
     # On battery, scan half as often — jsonl tails are cheap, but glob +
     # recompute every 15s is pure waste when the Mac is trying to idle.
-    return SCAN_INTERVAL_BATTERY_SEC if is_on_battery() else SCAN_INTERVAL_SEC
+    return SCAN_INTERVAL_BATTERY_SEC if battery_save_active() else SCAN_INTERVAL_SEC
 
 
 def scan_loop():
@@ -985,9 +958,9 @@ def build_report():
 
     with STATE["lock"]:
         agg = STATE["aggregates"] or {
-            "today": {"tokens": 0, "cost": 0.0}, "last5h": {"tokens": 0, "cost": 0.0},
+            "today": {"tokens": 0, "cost": 0.0},
             "week": {"tokens": 0, "cost": 0.0},
-            "projects": [], "models": [], "trend": [0] * 7,
+            "projects": [], "trend": [0] * 7,
         }
         ctx = STATE["context"]
         last_ts = STATE["last_ts"]
@@ -998,50 +971,46 @@ def build_report():
         STATE["clients"] = {ip: ts for ip, ts in STATE["clients"].items() if ts >= cutoff_client}
         client_snapshot = list(STATE["clients"].items())
 
+    # active_now is archive-only on the board (not drawn); kept for SD CSV.
     active_now = last_ts is not None and (now - last_ts).total_seconds() <= ACTIVE_WINDOW_SEC
-    last_activity_sec = int((now - last_ts).total_seconds()) if last_ts else None
 
     clients = [
         {"ip": ip, "last_seen_sec": int((now - ts).total_seconds())}
         for ip, ts in sorted(client_snapshot, key=lambda kv: kv[1], reverse=True)
     ]
 
-    # Countdown to the session reset and snapshot age, computed at request
-    # time (not when the limits snapshot was fetched) so they stay accurate
-    # between OAuth refreshes. Mutate per-request copies only — the snapshot
-    # in STATE["limits"] must stay pristine.
+    # Countdown to the session reset, computed at request time so it stays
+    # accurate between OAuth refreshes. Mutate per-request copies only —
+    # STATE["limits"] stays pristine with internal epochs.
     if limits:
         limits = dict(limits)
-        if limits.get("fetched_at_epoch"):
-            limits["age_sec"] = max(0, int(time.time() - limits["fetched_at_epoch"]))
+        limits.pop("fetched_at_epoch", None)
+        limits.pop("tz", None)  # never read by board/sim/control panel
         for key in ("session", "week", "week_model"):
             win = limits.get(key) or {}
-            if not win.get("resets_at_epoch"):
+            if not isinstance(win, dict):
                 continue
             win = dict(win)
-            remaining = int(win["resets_at_epoch"] - time.time())
-            if remaining <= 0:
-                # The window this snapshot describes has already ended; the
-                # OAuth loop may not have a fresh one yet (nulled resets_at
-                # until new activity, or a 429 backoff). Serve it as reset
-                # rather than a stale percent stuck past its own reset time.
-                win["percent"] = 0
-                win["resets"] = ""
-                remaining = 0
-            if key in ("session", "week"):
-                win["resets_in_sec"] = remaining
+            epoch = win.pop("resets_at_epoch", None)
+            if epoch:
+                remaining = int(epoch - time.time())
+                if remaining <= 0:
+                    # Window ended; OAuth loop may not have a fresh snapshot
+                    # yet. Serve reset rather than a stale percent.
+                    win["percent"] = 0
+                    win["resets"] = ""
+                    remaining = 0
+                if key in ("session", "week"):
+                    win["resets_in_sec"] = remaining
             limits[key] = win
 
     return {
         "generated_at": now.isoformat(),
         "epoch": int(now.timestamp()),
         "today": agg["today"],
-        "last5h": agg["last5h"],
         "week": agg["week"],
         "active_now": active_now,
-        "last_activity_sec": last_activity_sec,
         "projects": agg["projects"],
-        "models": agg["models"],
         "trend": agg["trend"],
         "limits": limits,
         "context": ({"tokens": ctx["tokens"],

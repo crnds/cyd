@@ -36,18 +36,21 @@ colors, formatting, or the OFFLINE screen must be made in *both*, using the
   hex (e.g. `COL_ACCENT = 0xFB08`), the simulator uses the **RGB888**
   equivalent (`rgb(255,97,66)`). When changing a color, convert and update
   both, keeping the `// 0x....` comment in the simulator.
-- The page-drawing functions (`drawHomePage`, `drawProjectsPage` — which now
-  also renders the 7-day trend in its lower half, `drawStatusPage`,
-  `drawDevicePage`, `drawLimitsPage` — the /usage-style
-  limits panel (context window, 5h, weekly all/per-model, credits),
-  `drawLimitBlock`, `drawFooter`,
-  `drawOfflineScreen`) are near line-for-line ports of each other.
-- **Exception — page 6 (cat GIFs) is NOT a pixel-faithful twin.** On the device
+- The page-drawing functions (`drawStatusPage`, `drawProjectsPage` — projects
+  + 7-day trend in its lower half, `drawHomePage`, `drawDevicePage`,
+  `drawLimitsPage` — the /usage-style limits panel (context window, 5h,
+  weekly all/per-model, credits), `drawLimitBlock`, `drawFooter`, weather
+  overlay, offline) are near line-for-line ports of each other.
+- **7 pages (0–6):** status, projects+trend, home limits, device, limits,
+  cats (`GIF_PAGE=5`), mixed status+cats (`MIXED_PAGE=6`). There is **no**
+  separate 30-day long-trend page and **no** BTC candlestick ticker page.
+- **Exception — cat GIF playback is NOT a pixel-faithful twin.** On the device
   it decodes and plays random GIFs from `/cats/` on the SD card frame-by-frame
   (AnimatedGIF, in the firmware's `gifTick()`), which the canvas simulator can't
-  emulate. The simulator's `drawGifPage()` shows the same "CATS" title/layout as
-  the firmware's no-cats placeholder (`drawGifPlaceholder`) plus a note. Only
-  the placeholder state is kept in parity; the actual playback is firmware-only.
+  emulate. The simulator's `drawGifPage()` / mixed placeholder shows the same
+  "CATS" title/layout as the firmware's no-cats placeholder
+  (`drawGifPlaceholder`) plus a note. Only the placeholder state is kept in
+  parity; the actual playback is firmware-only.
 
 After any UI change, verify the simulator with a headless screenshot (see
 Commands) — this is the closest thing to visual regression testing here,
@@ -73,9 +76,9 @@ pages; `#sim-offline` / `#mock-data` checkboxes exercise those states.
 arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app firmware/cyd_dashboard
 ```
 Requires: `esp32:esp32` core + `LovyanGFX`, `ArduinoJson`, and `AnimatedGIF`
-(the page-6 cat player) libs (`WebServer`/`DNSServer`, used by the first-boot
-AP setup portal, ship with the core, as does ESPmDNS). A `config.h` must
-exist (copy `config.example.h`); it's gitignored.
+(the cat player on pages 6–7) libs (`WebServer`/`DNSServer`, used by the
+first-boot AP setup portal, ship with the core, as does ESPmDNS). A
+`config.h` must exist (copy `config.example.h`); it's gitignored.
 
 **Flash size is 4MB on this board, partitioned as `huge_app` (3MB
 app/1MB SPIFFS, no OTA)** — confirmed against the physical board, not just
@@ -110,24 +113,25 @@ flash storage for the scheme change to orphan.
   **`/usr/bin/python3`, which is 3.9.6** — keep the code 3.9-compatible
   (notably: `datetime.fromisoformat` can't parse a trailing `Z`, hence the
   `.replace("Z","+00:00")`). Test with `/usr/bin/python3`, not just Homebrew.
-- **Three data sources:**
-  1. `~/.claude/projects/*/*.jsonl` — token counts, tailed incrementally by
-     byte offset. Streamed assistant messages are written multiple times with
+- **Data sources / background loops** (each parks after ~180s with no client
+  polls via `activity_gated_loop`; first iteration always runs):
+  1. `scan_loop` (~15s AC / ~30s on battery) — tails
+     `~/.claude/projects/*/*.jsonl` by byte offset into 5-min buckets (8-day
+     retention). Streamed assistant messages are written multiple times with
      identical usage, so events are **deduped on `(message.id, requestId)`,
      keep-first**. Without this, totals roughly double.
-  2. `api.anthropic.com/api/oauth/usage` — the real `/usage` session/week
-     percentages + reset times. The OAuth token is read at request time by
-     shelling out to `/usr/bin/security` (Keychain); it is never written to
-     disk or included in responses. A background thread refreshes this every
-     60s and keeps the last good snapshot on failure.
+  2. `limits_loop` (~120s AC / ~300s on battery) — OAuth
+     `api.anthropic.com/api/oauth/usage` session/week percents + reset times.
+     Token is read via `/usr/bin/security` (Keychain); never written to disk
+     or included in responses. Last-good snapshot kept on failure; 429 backoff
+     clamped 10–30 min.
   3. `/etc/localtime` symlink — local timezone name for reset-time display.
-  4. **BTC (Binance) + Bangkok weather (Open-Meteo)** — fetched by a background
-     `market_loop` (BTC ~10s, weather 10 min), last-good kept on failure. Done
-     Mac-side ON PURPOSE: the CYD has no PSRAM, and its 154KB framebuffer leaves
-     too little contiguous heap for an mbedTLS handshake, so the board could not
-     fetch these HTTPS endpoints itself (TCP 443 connected but the TLS buffer
-     alloc failed). Proxying them through this plain-HTTP endpoint keeps all TLS
-     off the board — the firmware has no `WiFiClientSecure` at all now.
+  4. `market_loop` — **BTC (Binance, ~60s AC / ~180s battery)** + **Bangkok
+     weather (Open-Meteo or optional WeatherAPI, ~10 min AC / ~30 min
+     battery)**; last-good kept on failure. Done Mac-side ON PURPOSE: the CYD
+     has no PSRAM, and its 154KB framebuffer leaves too little contiguous heap
+     for an mbedTLS handshake. Proxying keeps all TLS off the board — the
+     firmware has no `WiFiClientSecure` at all.
 - **`battery_guard_loop` owns the HTTP server's lifecycle** (`start_http_server`
   binds/unbinds it, `main()` no longer calls `serve_forever()` directly). The
   CYD's ~20s poll cadence gives macOS no long-enough idle gap to ever commit to
@@ -139,26 +143,36 @@ flash storage for the scheme change to orphan.
   back to its existing OFFLINE/cat-mode handling. Rebinds once back on AC or
   recovered above the threshold. Harmless on AC (own charger keeps the Mac
   awake anyway) — this only matters when it's briefly run on battery.
+- **Battery-save cadences (separate from the guard):** while the socket is
+  still up but the Mac is unplugged (or the control panel forces save on),
+  `power.battery_save` is true and background intervals stretch as above.
+  Manual override via `POST /api/battery-save` with JSON
+  `{"enabled": true|false|null}` (`null` = reset to auto). Control panel
+  proxies the same endpoint. On the board, Settings **Battery Save**
+  OFF/ON/AUTO floors the usage poll to ≥120s when active (AUTO follows
+  `power.battery_save` from live polls only — never from SD cache).
 - **Endpoint `GET /api/usage`** returns one JSON blob. Both clients parse it,
   so it's a contract — changing a field name means editing the firmware and
-  simulator too. Current keys: `today`/`last5h`/`week` (`{tokens,cost}`),
-  `active_now`, `last_activity_sec`, `projects[{name,tokens}]`,
-  `models[{name,tokens,cost,percent}]` (today's cost split by model family,
-  top 4 by cost, percent = share of today's estimated cost), `trend[7]`,
-  `limits{tz,fetched_at_epoch,age_sec,session{percent,resets,resets_at_epoch,resets_in_sec},week{percent,resets,resets_at_epoch,resets_in_sec},week_model,credits}`
-  (null if the keychain read hasn't succeeded; `resets_in_sec` and `age_sec`
-  are computed at request time so they stay fresh between OAuth refreshes —
-  a large `age_sec` means the snapshot is stale, e.g. the loop is in a 429
-  backoff, which is clamped to 30 min even when Retry-After is longer;
-  `week_model{name,percent,resets}` is the per-model weekly limit from the
-  OAuth response's `limits[]` array — null whenever no `weekly_scoped` entry
-  exists, and clients must hide the row then; `credits{used,limit,percent}`
-  is the extra-usage spend in dollars, null when disabled),
-  `context{tokens,percent}` (the newest jsonl event's prompt size = the
-  current session's context window, percent of a hardcoded 200K; null until
-  the first log scan), `btc{price}` / `weather{tempC,code}` (null until the
-  first market fetch), `clients[{ip,last_seen_sec}]`, `generated_at`.
-- Dollar costs are **estimates** from a hardcoded per-model price table.
+  simulator too. Current keys: `today`/`week` (`{tokens,cost}` — `today` also
+  feeds the board's SD `/archive.csv`), `active_now` (archive-only on board),
+  `projects[{name,tokens}]`, `trend[7]`,
+  `limits{session{percent,resets,resets_in_sec},week{percent,resets,resets_in_sec},week_model,credits}`
+  (null if the keychain read hasn't succeeded; `resets_in_sec` is computed at
+  request time so countdowns stay fresh between OAuth refreshes; internal
+  epochs/`tz`/`age_sec` are not exposed; 429 backoff is clamped to 30 min;
+  `week_model{name,percent,resets}` is the per-model weekly limit — null when
+  no `weekly_scoped` entry exists and clients must hide the row;
+  `credits{used,limit,percent}` is extra-usage spend in dollars, null when
+  disabled), `context{tokens,percent}` (newest jsonl prompt size as context
+  window, percent of a hardcoded 200K; null until first log scan),
+  `btc{price}` / `weather{tempC,code,condition,high,low,hourly[],daily[]}`
+  (null until the first market fetch; weather feeds the status tile + full
+  weather overlay), `power{on_ac,percent,paused,battery_save,battery_save_manual,source}`,
+  `clients[{ip,last_seen_sec}]`, `generated_at`, `epoch`.
+  **Not in the contract:** `last5h`, `models[]`, `last_activity_sec`,
+  `btc.changePct` (removed — no on-device consumer).
+- Dollar costs are **estimates** from a hardcoded per-model price table
+  (opus/sonnet/haiku/fable).
 - Remote (non-localhost) requests are logged one line each to stdout —
   `tail -f /tmp/cydusage.log` is a live heartbeat of the board's polling.
 
@@ -166,8 +180,10 @@ flash storage for the scheme change to orphan.
 
 - A second launchd job (`com.corner.cydcontrol.plist`) serving
   `http://127.0.0.1:8788/` — a status page (`server.html`) plus
-  `GET /api/status` and `POST /api/enable|/api/disable`, which shell out to
-  `launchctl bootstrap`/`bootout` on the `com.corner.cydusage` job.
+  `GET /api/status`, `POST /api/enable|/api/disable` (launchctl
+  bootstrap/bootout on `com.corner.cydusage`), and
+  `POST /api/battery-save` (proxies to the usage server's localhost
+  battery-save override so the panel can force/clear save mode).
 - **Localhost-bound on purpose** (it can execute launchctl) — never bind it
   to `0.0.0.0`.
 - It's deliberately a separate process/port so the page stays up while the
@@ -231,57 +247,53 @@ flash storage for the scheme change to orphan.
   simulator-parity rule — it's a boot-time-only, firmware-only screen, same
   exception as the cat GIF playback.
 - **Offline = the cat GIFs + an "OFFLINE" banner**, not a dimmed dashboard.
-  `loop()` computes `catMode = (currentPage == GIF_PAGE) || offline`, so cats
-  play on *any* page whenever offline, and `gifTick(offline)` overlays
-  `drawOfflineBanner()` (textSize 5, top-center) on top of the frame. `STATE.haveData`
-  is otherwise sticky-true once any fetch or SD cache load succeeds, so
-  `fetchFailCycles`/`OFFLINE_AFTER_CYCLES` (~1 min of consecutive failed polls,
-  WiFi down or WiFi up but the Mac unreachable) is what forces it back to
-  false — without that, a real outage would just freeze the last-known
-  dashboard forever instead of ever showing offline.
+  `loop()` computes
+  `catMode = (currentPage == GIF_PAGE) || (currentPage == MIXED_PAGE) || offline`,
+  so cats play on the cat pages and on *any* page whenever offline, and
+  `gifTick(offline)` overlays `drawOfflineBanner()` (textSize 5, top-center)
+  on top of the frame. `STATE.haveData` is otherwise sticky-true once any
+  fetch or SD cache load succeeds, so `fetchFailCycles`/`OFFLINE_AFTER_CYCLES`
+  (~1 min of consecutive failed polls at default 20s, longer under Battery
+  Save) is what forces it back to false — without that, a real outage would
+  just freeze the last-known dashboard forever instead of ever showing offline.
 - Token fields are `int64_t` (weekly totals exceed the 32-bit `long` range).
-- **Page 6 = cat GIF player** (page 7 = status + cats split). `gifTick()`
-  (called from `loop()` on core 1)
-  decodes at most one frame per pass via AnimatedGIF and paces itself with
-  `gifNextFrameMs`, so touch stays responsive; when a GIF ends it opens another
-  at random from `catFiles[]` (scanned once at boot by `scanCats()`) — endless.
-  `render()` early-returns for `GIF_PAGE`/`MIXED_PAGE`; `loop()` skips the
-  footer/progress
-  line whenever `catMode` is active (a cat page, or offline on any page) so the
-  cats own the whole screen. This is the one deliberate break from the
-  firmware/simulator parity rule.
+- **Page map (`PAGE_COUNT = 7`):** 0 status (clock + mini bars + weather/BTC
+  tiles; tap weather → overlay), 1 projects + 7-day trend, 2 home large
+  limits, 3 device stats, 4 /usage-style limits panel, 5 `GIF_PAGE` full-screen
+  cats, 6 `MIXED_PAGE` left limits / right GIF. `gifTick()` (called from
+  `loop()` on core 1) decodes at most one frame per pass via AnimatedGIF and
+  paces itself with `gifNextFrameMs`, so touch stays responsive; when a GIF
+  ends it opens another at random from `catFiles[]` (scanned once at boot by
+  `scanCats()`) — endless. `render()` early-returns for `GIF_PAGE`/
+  `MIXED_PAGE`; `loop()` skips the footer/progress line whenever `catMode` is
+  active so the cats own the whole screen (mixed keeps a footer band at
+  y≥220). This is the one deliberate break from the firmware/simulator parity
+  rule (placeholders only in the sim).
 - **Hidden Settings area** (`settingsScreen`: `SET_OFF`/`SET_LIST`/`SET_LEAF`).
   Tapping an invisible hit-box over the footer's connection-status pulse dot
   (`PULSE_HIT_*`, only live on non-cat/non-offline pages) opens `SET_LIST`, a
-  paginated list of setting names (10 settings, scrollable); tapping a row
+  **drag-to-scroll** list of setting names (**11** settings); tapping a row
   opens `SET_LEAF`, a generic value-picker button grid for that one setting.
   Both screens, and every setting, are driven by one data table (`SettingDef
   SETTINGS[]`, plain function pointers — no `std::function`/virtual dispatch,
   flash is scarce here) rather than a hand-copied page per setting: adding a
   setting is a label + a small `values[]`/`valueLabels[]` array + a short
-  `getCurrent()`/`apply()` pair. Most settings (Brightness, Poll Interval,
-  Pixel Shift, Boot Page, Cat Shuffle, Night Mode, Rotation) persist through
-  one generic queue (`pendingConfigSave`/`pendingConfigKeyId`/
-  `pendingConfigValue` → `saveIntConfigToSD()`, drained by `networkTask` on
-  core 0 so the SD write never happens on the render core) since they're all
-  plain-int config values; Forget WiFi is the one exception (erases two
-  *string* keys) and gets its own small SD function. Destructive rows
-  (`destructive: true`, e.g. Restart, Forget WiFi) share one two-tap
-  **confirm-arm** mechanic (`confirmArmedRow`/`confirmArmedMs`, ~4s window)
-  rather than a modal dialog — the whole area is `settingsScreen`/
-  `loop()`-driven, not modal. `loop()`'s `if (settingsScreen != SET_OFF)
-  {...} else if (catMode) {...} else {...}` gate means nothing redraws
-  periodically while Settings is open — every repaint is triggered
-  explicitly from the touch handler. **Rotation applies live, no restart** —
-  confirmed by reading LovyanGFX's `Panel_Device::convertRawXY()`/
-  `setCalibrate()`: the touch affine transform is built once from
-  `panel_width`/`panel_height` and the touch `x_min`/`x_max`/`y_min`/`y_max`
-  (all rotation-independent), while a separate per-touch-read step recomputes
-  `r = (panel_rotation + touch.offset_rotation) & 3` and swaps/flips the
-  already-transformed point accordingly — so touch automatically tracks any
-  `setRotation()` change with the calibration values completely untouched;
-  no dedicated multi-key save function needed, just the existing
-  `screen_rotation` key through the generic queue.
+  `getCurrent()`/`apply()` pair. Int settings (Brightness, Poll Interval,
+  Pixel Shift, Boot Page, Cat Shuffle, Night Mode, Battery Save, Rotation,
+  Show Countdown) persist through one generic queue
+  (`pendingConfigSave`/`pendingConfigKeyId`/`pendingConfigValue` →
+  `saveIntConfigToSD()`, drained by `networkTask` on core 0 so the SD write
+  never happens on the render core). Forget WiFi is the string-key exception
+  and gets its own small SD function. Destructive rows (`destructive: true`,
+  e.g. Restart, Forget WiFi) share one two-tap **confirm-arm** mechanic
+  (`confirmArmedRow`/`confirmArmedMs`, ~4s window) rather than a modal dialog
+  — the whole area is `settingsScreen`/`loop()`-driven, not modal. `loop()`'s
+  `if (settingsScreen != SET_OFF) {...} else if (catMode) {...} else {...}`
+  gate means nothing redraws periodically while Settings is open — every
+  repaint is triggered explicitly from the touch handler. **Rotation applies
+  live, no restart** — LovyanGFX recomputes touch rotation on each read from
+  `panel_rotation + touch.offset_rotation`, so calibration stays untouched;
+  just the existing `screen_rotation` key through the generic queue.
 - **`sdMutex` — the second lock.** The cat pages are the only code that reads the SD
   card from the render core (core 1); all other SD I/O is on `networkTask`
   (core 0). `sdMutex` (via `lockSD`/`unlockSD`) serializes the HSPI/SD bus
@@ -294,36 +306,41 @@ flash storage for the scheme change to orphan.
   I/O runs on `networkTask` (core 0) — never add SD access to `loop()`:
   - `/config.json` — runtime overrides for the compiled `config.h`
     (`loadRuntimeConfig`): `wifi_ssid`, `wifi_password`, `server_host`,
-    `server_port`, `brightness` (0-255), `poll_interval_sec` (clamped 5-3600),
-    `screen_rotation` (1 normal / 3 flipped 180° — see the Settings area's
-    Rotation note above), `touch_x_min`/`touch_x_max`/`touch_y_min`/
-    `touch_y_max`/`touch_offset_rotation` (physical touch calibration,
-    board-specific, not exposed in the on-device Settings UI),
+    `server_port`, `brightness` (0-255), `poll_interval_sec` (clamped 5-3600;
+    Battery Save may floor the *effective* poll to ≥120s without changing
+    this preference), `screen_rotation` (1 normal / 3 flipped 180° — see the
+    Settings area's Rotation note above), `touch_x_min`/`touch_x_max`/
+    `touch_y_min`/`touch_y_max`/`touch_offset_rotation` (physical touch
+    calibration, board-specific, not exposed in the on-device Settings UI),
     `pixel_shift_min` (minutes per anti-retention orbit step, clamped 0-60,
     0 = off), `boot_page` (0-6, which page `currentPage` starts on),
     `cat_shuffle_sec` (0-300, forces a cat GIF to rotate before its natural
     end; 0 = always play to the end), `night_mode_preset` (0/1, fixed
     23:00-07:00 auto-dim to 25%), `show_countdown` (0/1, default 1 — green
     reset bars under 5h/week + analog clock timer wedge; green reset hand
-    always stays). All of these except `wifi_ssid`/
-    `wifi_password`/`server_host`/`server_port`/the touch calibration keys
-    are also settable at runtime from the on-device Settings area (see
-    above) — lets a set-once board be retuned without reflashing or pulling
-    the SD card.
-  - `/last_usage.json` — last-good `/api/usage` blob; `/last_env.json` — last
-    BTC/weather. Both restored at boot so the dashboard shows real (if stale)
-    data and the BTC/weather tiles aren't blank while the Mac is unreachable.
+    always stays), `battery_save` (0=OFF / 1=ON / 2=AUTO, default AUTO).
+    All of these except `wifi_ssid`/`wifi_password`/`server_host`/
+    `server_port`/the touch calibration keys are also settable at runtime
+    from the on-device Settings area — lets a set-once board be retuned
+    without reflashing or pulling the SD card.
+  - `/last_usage.json` — last-good `/api/usage` blob (restored at boot; power
+    flags from cache are **not** applied so a stale `battery_save` cannot
+    floor polls after reboot).
+  - `/last_env.json` — last BTC price + temp/code for cold-boot tiles.
+  - `/weather.json` — full weather snapshot (hourly/daily) for the weather
+    overlay after reboot without the Mac.
   - `/archive.csv` — fine-grained **one row per poll**
     (~20s, unbounded, ~1GB/yr) for off-device analysis; NOT shown on screen.
+    There is **no** `/daily_log.csv` / 30-day on-device trend anymore.
   - `/diag_log.csv` — black-box event log (`logDiag`): boot + reset reason,
     WiFi down/recovered, self-reboot, hourly heap/uptime, one-shot low-heap.
   - `/splash.bmp` — optional 320×240 24-bit boot splash, shown ~1.5s before the
     WiFi spinner (`drawBmpFromSD`/`showBootSplash`). A self-hosted asset loaded
     from SD rather than baked into the near-full flash; absent → no splash.
-  - `/cats/*.gif` — the page-6 cat GIF library (see the GIF-player note above).
-    Prepared board-side by `prepare_cat_gifs.py` (downloads from Cataas, resizes
-    to ≤320×240, thins frames, optimizes with gifsicle); absent → the cat pages
-    show the "CATS" placeholder instead of playing.
+  - `/cats/*.gif` — the cat GIF library for pages 6–7 (see the GIF-player note
+    above). Prepared board-side by `prepare_cat_gifs.py` (downloads from
+    Cataas, resizes to ≤320×240, thins frames, optimizes with gifsicle);
+    absent → the cat pages show the "CATS" placeholder instead of playing.
 
 ## Conventions
 

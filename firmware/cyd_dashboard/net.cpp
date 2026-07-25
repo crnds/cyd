@@ -42,8 +42,7 @@ void connectWifi() {
     drawWifiSpinner(frameNum++);
     delay(100);
   }
-  wifiOk = WiFi.status() == WL_CONNECTED;
-  if (wifiOk) {
+  if (WiFi.status() == WL_CONNECTED) {
     ensureMdns();
     configTime(GMT_OFFSET_SEC, DST_OFFSET_SEC, "pool.ntp.org", "time.nist.gov");
   }
@@ -93,13 +92,6 @@ static void applyWeatherDoc(JsonObjectConst w) {
       STATE.weatherCondition[sizeof(STATE.weatherCondition) - 1] = '\0';
     }
   }
-  if (w["place"].is<const char*>()) {
-    const char* p = w["place"].as<const char*>();
-    if (p) {
-      strncpy(STATE.weatherPlace, p, sizeof(STATE.weatherPlace) - 1);
-      STATE.weatherPlace[sizeof(STATE.weatherPlace) - 1] = '\0';
-    }
-  }
   if (w["hourly"].is<JsonArrayConst>()) {
     JsonArrayConst arr = w["hourly"].as<JsonArrayConst>();
     uint8_t n = 0;
@@ -130,8 +122,7 @@ static void applyWeatherDoc(JsonObjectConst w) {
 // Parses one /api/usage payload into STATE. Shared by a live fetch and a
 // cached-on-SD read, so a stale card-backed copy renders identically to a
 // fresh one. Uses an ArduinoJson filter so only the keys the board actually
-// reads (not e.g. "clients"/"generated_at"/"last_activity_sec") get copied
-// into the parsed JsonDocument's memory pool.
+// reads (not e.g. "clients"/"generated_at") get copied into the pool.
 static JsonDocument usageFilter() {
   JsonDocument f;
   f["projects"][0]["name"] = true;
@@ -144,21 +135,18 @@ static JsonDocument usageFilter() {
   f["context"] = true;
   f["btc"] = true;
   f["weather"] = true;
-  f["today"] = true;  // needed by appendArchiveRow's caller (fetchUsage)
+  f["today"] = true;  // needed by appendArchiveRow (fetchUsage)
   f["active_now"] = true;
-  f["epoch"] = true;  // NTP fallback — see applyUsageJson's time-sync block
-  // Mac power / battery-save (control panel + unplug). Only battery_save is
-  // acted on; on_ac/percent/paused are reserved for a future status tile.
+  f["epoch"] = true;  // NTP fallback — see applyUsageDoc's time-sync block
+  // Mac power / battery-save. Only battery_save is acted on.
   f["power"]["battery_save"] = true;
   return f;
 }
 
-bool applyUsageJson(const String& payload, bool fromNetwork) {
-  JsonDocument doc;
-  static JsonDocument filter = usageFilter();
-  DeserializationError err = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
-  if (err) return false;
-
+// Apply an already-parsed (filtered) document into STATE. fetchUsage parses
+// once and reuses the doc for archive; loadCachedUsage goes through
+// applyUsageJson which deserializes then calls this.
+static bool applyUsageDoc(JsonDocument& doc, bool fromNetwork) {
   // NTP fallback: this board has no TLS and only ever reaches the public NTP
   // pool over plain UDP/123 at boot (see connectWifi()) — on networks that
   // block outbound UDP to the internet (hotel/guest WiFi, some routers) that
@@ -234,7 +222,6 @@ bool applyUsageJson(const String& payload, bool fromNetwork) {
   if (!doc["btc"].isNull()) {
     double p = doc["btc"]["price"] | -1.0;
     if (p > 0) STATE.btcPrice = p;
-    STATE.btcChangePct = doc["btc"]["changePct"] | STATE.btcChangePct;
   }
   if (!doc["weather"].isNull()) {
     applyWeatherDoc(doc["weather"].as<JsonObjectConst>());
@@ -255,6 +242,14 @@ bool applyUsageJson(const String& payload, bool fromNetwork) {
     }
   }
   return true;
+}
+
+bool applyUsageJson(const String& payload, bool fromNetwork) {
+  JsonDocument doc;
+  static JsonDocument filter = usageFilter();
+  DeserializationError err = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+  if (err) return false;
+  return applyUsageDoc(doc, fromNetwork);
 }
 
 // Reads the last-good cached response written by fetchUsage() below, so the
@@ -282,14 +277,13 @@ static void saveEnvCache() {
   if (!STATE.sdOk) return;
   lockState();
   double btc = STATE.btcPrice;
-  float changePct = STATE.btcChangePct;
   float tempC = STATE.weatherTempC;
   int code = STATE.weatherCode;
   unlockState();
   SD.remove(ENV_CACHE_PATH);  // FILE_WRITE appends here; remove for a clean overwrite
   File f = SD.open(ENV_CACHE_PATH, FILE_WRITE);
   if (f) {
-    f.printf("{\"btc\":%.2f,\"changePct\":%.2f,\"tempC\":%.1f,\"code\":%d}", btc, changePct, tempC, code);
+    f.printf("{\"btc\":%.2f,\"tempC\":%.1f,\"code\":%d}", btc, tempC, code);
     f.close();
   }
 }
@@ -303,7 +297,6 @@ void loadEnvCache() {
   if (deserializeJson(doc, payload)) return;
   lockState();
   STATE.btcPrice = doc["btc"] | STATE.btcPrice;
-  STATE.btcChangePct = doc["changePct"] | STATE.btcChangePct;
   STATE.weatherTempC = doc["tempC"] | STATE.weatherTempC;
   STATE.weatherCode = doc["code"] | STATE.weatherCode;
   unlockState();
@@ -326,7 +319,6 @@ static void saveWeatherCache() {
   if (STATE.weatherHigh > -900) doc["high"] = STATE.weatherHigh;
   if (STATE.weatherLow > -900) doc["low"] = STATE.weatherLow;
   doc["condition"] = STATE.weatherCondition;
-  doc["place"] = STATE.weatherPlace;
   JsonArray hourly = doc["hourly"].to<JsonArray>();
   for (uint8_t i = 0; i < STATE.weatherHourlyCount; i++) {
     JsonObject h = hourly.add<JsonObject>();
@@ -407,10 +399,8 @@ static void appendArchiveRow(const JsonDocument& doc) {
 bool fetchUsage() {
   uint32_t startUs = micros();  // diagnostic timing only, see comment at the end of this function
   if (WiFi.status() != WL_CONNECTED) {
-    wifiOk = false;
     return false;
   }
-  wifiOk = true;
 
   if (!serverIpResolved && !resolveServer()) {
     return false;  // Mac not announcing itself yet (likely still asleep)
@@ -431,14 +421,13 @@ bool fetchUsage() {
   String payload = http.getString();
   http.end();
 
-  // Parsed once here (filtered) and reused below for the archive row, rather
-  // than applyUsageJson() and appendArchiveRow() each deserializing their own
-  // copy of the same payload.
+  // Single filtered parse: applyUsageDoc copies into STATE; appendArchiveRow
+  // reuses the same doc for today/active_now (no second deserialize).
   JsonDocument doc;
   static JsonDocument filter = usageFilter();
   DeserializationError err = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
   if (err) return false;
-  if (!applyUsageJson(payload, true)) return false;  // live poll: honor power.battery_save
+  if (!applyUsageDoc(doc, true)) return false;  // live poll: honor power.battery_save
 
   if (STATE.sdOk) {
     // FILE_WRITE appends on this SD library rather than truncating, so

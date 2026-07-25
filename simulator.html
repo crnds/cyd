@@ -205,7 +205,7 @@ pre {
       <div class="status-line">
         <span id="conn-status"><span class="dot bad"></span>not connected</span>
         <span id="fetch-status">no fetch yet</span>
-        <span id="page-status">page 1/6</span>
+        <span id="page-status">page 1/7</span>
       </div>
     </div>
 
@@ -239,8 +239,6 @@ let SHIFT_STEP_MS = 180000;  // firmware default; /config.json pixel_shift_min *
 // the firmware's fetchFailCycles/OFFLINE_AFTER_CYCLES.
 const OFFLINE_AFTER_CYCLES = 3;
 const LAST_USAGE_KEY = 'cyddashboard_v1_lastusage';
-
-const STALE_AFTER_SEC = 60;
 
 // Invisible hit-box around the footer's connection-status dot (14,230) --
 // clicking it opens the hidden Settings page, mirrors the firmware's
@@ -420,7 +418,7 @@ function applyPollInterval(v) {
 function getCurrentPixelShift() { return SHIFT_STEP_MS / 60000; }
 function applyPixelShift(v) { SHIFT_STEP_MS = v * 60000; }
 
-// Boot page: all 8 pages (including cats/mixed) are valid -- drawScreenContent()
+// Boot page: all 7 pages (including cats/mixed) are valid -- drawScreenContent()
 // already dispatches generically off STATE.currentPage regardless of how it
 // was set, no special-casing needed here either.
 function getCurrentBootPage() { return STATE.cfgBootPage; }
@@ -524,7 +522,7 @@ const COL_WARN    = 'rgb(255,24,49)';   // 0xF8C6
 const COL_TRACK   = 'rgb(90,89,90)';    // 0x5ACB neutral grey track
 const COL_TRACK_BLACK = 'rgb(0,0,0)';   // 0x0000 pure-black track (reset-countdown bars)
 // Weather page background — pure black. 0x0000. Reserved; weather overlay uses COL_BG.
-const COL_WEATHER_BG = 'rgb(0,0,0)';
+
 
 // ── STATE (mirroring the firmware UsageState struct) ──────
 const STATE = {
@@ -550,20 +548,17 @@ const STATE = {
   btcPrice: -1,           // BTC/USDT; -1 = not received yet. Arrives inside /api/usage
                           // (fetched by the Mac), same as the firmware -- not fetched
                           // directly from Binance here (see applyData()).
-  btcChangePct: NaN,
   weatherTempC: -999,     // Bangkok current temp; -999 = not received yet (see above)
   weatherCode: -1,        // WMO weather_code; -1 = not received yet (see above)
   weatherHigh: -999,
   weatherLow: -999,
   weatherCondition: '',
-  weatherPlace: 'Bangkok',
   weatherHourly: [],      // [{h, tempC, code}] next 6 hours
   weatherDaily: [],       // [{wd, high, low, code}] next 5 days
   weatherPageOpen: false, // Weather overlay (tap status-page weather card)
   // simulator-only
   lastPollMs: 0,          // when the last poll cycle started (progress line)
   currentPage: 0,
-  wifiOk: false,
   connected: false,     // did the most recent fetch reach the server?
   fetchFailCycles: 0,   // consecutive failed polls; mirrors the firmware's counter
   pollTimer: null,
@@ -816,6 +811,24 @@ function drawBatterySaveIcon() {
   gfx.fillRect(bodyX + bodyW, bodyY + Math.floor((bodyH - nubH) / 2), nubW, nubH, COL_YELLOW);
 }
 
+// Percent track+fill. minFillPx is the smallest non-zero fill (3 for thick
+// bars; h for thin mini-bars). Returns fill width or -1 when unknown.
+function drawPercentBar(x, y, w, h, percent, color, trackColor = COL_TRACK, minFillPx = 3) {
+  gfx.fillRect(x, y, w, h, trackColor);
+  if (percent < 0) return -1;
+  let fillW = Math.round(Math.min(percent, 100) / 100 * w);
+  if (fillW < minFillPx) fillW = minFillPx;
+  gfx.fillRect(x, y, fillW, h, color);
+  return fillW;
+}
+
+// Live countdown: tick last server remaining-seconds by wall time since lastFetchOkMs.
+function liveResetsInSec(baseSec) {
+  if (baseSec < 0) return -1;
+  let rem = baseSec - Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
+  return rem < 0 ? 0 : rem;
+}
+
 function drawLimitBlock(y, title, percent, resets, resetsInSec) {
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(1);
@@ -823,11 +836,7 @@ function drawLimitBlock(y, title, percent, resets, resetsInSec) {
   gfx.print(title);
 
   const barX = 10, barY = y + 22, barW = 191, barH = 16;
-  gfx.fillRect(barX, barY, barW, barH, COL_TRACK);
-  if (percent >= 0) {
-    const fillW = Math.round(Math.min(percent, 100) / 100 * barW);
-    gfx.fillRect(barX, barY, Math.max(fillW, 3), barH, COL_ACCENT);
-  }
+  drawPercentBar(barX, barY, barW, barH, percent, COL_ACCENT);
 
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(2);
@@ -854,11 +863,7 @@ function drawLimitsRow(y, label, right, percent) {
   gfx.setTextColor(COL_TEXT2);
   gfx.setCursor(320 - right.length * 6, y);
   gfx.print(right);
-  gfx.fillRect(10, y + 12, 310, 8, COL_TRACK);
-  if (percent >= 0) {
-    const fillW = Math.round(Math.min(percent, 100) / 100 * 310);
-    gfx.fillRect(10, y + 12, Math.max(fillW, 3), 8, COL_ACCENT);
-  }
+  drawPercentBar(10, y + 12, 310, 8, percent, COL_ACCENT);
 }
 
 // "Resets Jul 16, 04:59  58%" — or bare "58%", or "--" when unknown.
@@ -867,9 +872,8 @@ function limitRowText(percent, resets) {
   return (resets ? 'Resets ' + resets + '  ' : '') + percent + '%';
 }
 
-// Page 6: the Claude Code /usage panel — context window, 5-hour limit,
-// weekly (all models), weekly per-model (hidden when the server sends null),
-// usage credits. Rows shift up when a row is absent.
+// Limits page (index 4): Claude Code /usage panel — context, 5h, weekly,
+// weekly per-model (hidden when null), credits. Rows shift up when absent.
 function drawLimitsPage() {
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(1);
@@ -900,12 +904,7 @@ function drawLimitsPage() {
 }
 
 function drawHomePage() {
-  // Tick the session countdown down locally between polls.
-  let sessionRem = STATE.sessionResetsInSec;
-  if (sessionRem >= 0) {
-    sessionRem -= Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
-    if (sessionRem < 0) sessionRem = 0;
-  }
+  const sessionRem = liveResetsInSec(STATE.sessionResetsInSec);
   // Week has no countdown suffix here: its "Resets <date>" string is already
   // close to the line's pixel budget (see drawLimitsCard's size1 note below),
   // so appending " (HHh:MMm)" would overflow the 320px screen.
@@ -1056,24 +1055,15 @@ function drawWeatherIcon(x, y, code) {
   gfx.fillRoundRect(cx - 9, cy - 2, 19, 9, 4, COL_TEXT2);
 }
 
-// Thin inset progress bar: near-black track recessed into a surface card.
-// Returns the fill width in px (-1 when percent is unknown) so callers can
-// overlay effects on the filled region (the green bars' shine sweep below).
+// Thin inset progress bar (min fill = bar height). Returns fill width for shine.
 function drawMiniBar(x, y, w, percent, color, trackColor = COL_TRACK, h = 6) {
-  gfx.fillRect(x, y, w, h, trackColor);
-  if (percent < 0) return -1;
-  const fillW = Math.max(Math.round(Math.min(percent, 100) / 100 * w), h);
-  gfx.fillRect(x, y, fillW, h, color);
-  return fillW;
+  return drawPercentBar(x, y, w, h, percent, color, trackColor, h);
 }
 
 // ── SHINE SWEEP ────────────────────────────────────────────
-// Looping light band swept across the green reset-countdown bars' fill in
-// drawLimitsCard (pages 1 and 8). The band crosses the full 122px track at
-// constant speed but is only painted over the filled interior, so short
-// fills just see it pass through. Twin of pages.cpp's drawShineStrip; the
-// 20fps tick() makes it glide with no extra timer (the firmware instead
-// tops it up between 1Hz renders via shineTick()).
+// Looping light band on status/mixed green reset-countdown bars. Twin of
+// pages.cpp's drawShineStrip; the 20fps tick() makes it glide (firmware
+// tops up between 1Hz renders via shineTick()).
 const SHINE_PERIOD_MS = 2600;
 const SHINE_BAND_R = 7;
 const SHINE_BAR_W = 137, SHINE_BAR_H = 4;
@@ -1128,17 +1118,8 @@ function drawLimitsCard() {
   gfx.fillRect(2, 103, 157, 87, COL_SURFACE);
   gfx.drawRect(2, 103, 157, 87, COL_BORDER);
 
-  // Tick both countdowns down locally between polls.
-  let sessionRem = STATE.sessionResetsInSec;
-  if (sessionRem >= 0) {
-    sessionRem -= Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
-    if (sessionRem < 0) sessionRem = 0;
-  }
-  let weekRem = STATE.weekResetsInSec;
-  if (weekRem >= 0) {
-    weekRem -= Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
-    if (weekRem < 0) weekRem = 0;
-  }
+  let sessionRem = liveResetsInSec(STATE.sessionResetsInSec);
+  let weekRem = liveResetsInSec(STATE.weekResetsInSec);
 
   // ── left card: limits ──
   const sessionPctStr = STATE.sessionPercent >= 0 ? STATE.sessionPercent + '%' : '--';
@@ -1303,13 +1284,7 @@ function drawStatusPage() {
   // ── right cards: Bangkok analog + digital clock/date, weather, BTC price ──
   const bkk = bangkokParts();
 
-  // Tick the session countdown down locally between polls, same as
-  // drawLimitsCard, to find the wall-clock time it resets at.
-  let sessionRem = STATE.sessionResetsInSec;
-  if (sessionRem >= 0) {
-    sessionRem -= Math.floor((performance.now() - STATE.lastFetchOkMs) / 1000);
-    if (sessionRem < 0) sessionRem = 0;
-  }
+  const sessionRem = liveResetsInSec(STATE.sessionResetsInSec);
   const haveReset = !!bkk && sessionRem >= 0;
   let resetHour = 0, resetMinute = 0;
   if (haveReset) {
@@ -1620,11 +1595,7 @@ function drawFullStatBlock(y, title, percent, sub, color) {
   gfx.print(title);
 
   const barX = 10, barY = y + 14, barW = 246, barH = 16;
-  gfx.fillRect(barX, barY, barW, barH, COL_TRACK);
-  if (percent >= 0) {
-    const fillW = Math.round(Math.min(percent, 100) / 100 * barW);
-    gfx.fillRect(barX, barY, Math.max(fillW, 3), barH, color);
-  }
+  drawPercentBar(barX, barY, barW, barH, percent, color);
 
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(2);
@@ -1665,9 +1636,9 @@ function drawDevicePage() {
                      sdColor);
 }
 
-// "OFFLINE" banner overlaid on top of whatever page 8 is already showing —
-// mirrors the firmware's drawOfflineBanner(). A solid bar behind the text
-// keeps it legible over a busy GIF frame on the real device.
+// "OFFLINE" banner overlaid on cats / current page — mirrors the firmware's
+// drawOfflineBanner(). A solid bar behind the text keeps it legible over a
+// busy GIF frame on the real device.
 function drawOfflineBanner() {
   gfx.fillRect(0, 0, 320, 44, COL_BG);
   gfx.setTextColor(COL_TEXT);
@@ -2019,10 +1990,8 @@ function drawScreenContent() {
 // ── DATA LOADING ──────────────────────────────────────────
 const MOCK = {
   today: { tokens: 2573012, cost: 2.31 },
-  last5h: { tokens: 1807153, cost: 1.68 },
   week: { tokens: 351668302, cost: 228.27 },
   active_now: true,
-  last_activity_sec: 12,
   projects: [
     { name: 'ampypay-eunite', tokens: 178178755 },
     { name: 'org-chart', tokens: 145575128 },
@@ -2032,17 +2001,16 @@ const MOCK = {
   ],
   trend: [118891173, 158279627, 0, 0, 55363947, 17326402, 2573012],
   limits: {
-    tz: 'Asia/Bangkok',
     session: { percent: 27, resets: '03:19', resets_in_sec: 5400 },
     week: { percent: 86, resets: 'Jul 9, 04:59', resets_in_sec: 302400 },
     week_model: { name: 'Fable', percent: 58, resets: 'Jul 16, 04:59' },  // set null to test the hidden row
     credits: { used: 0.41, limit: 10.0, percent: 4 },
   },
   context: { tokens: 80000, percent: 40 },
-  btc: { price: 109432, changePct: 2.45 },
+  btc: { price: 109432 },
   weather: {
     tempC: 34, code: 3, high: 35, low: 26,
-    condition: 'Overcast', place: 'Bangkok',
+    condition: 'Overcast',
     hourly: [
       { h: 17, tempC: 34, code: 3 },
       { h: 18, tempC: 33, code: 2 },
@@ -2059,6 +2027,7 @@ const MOCK = {
       { wd: 5, high: 32, low: 25, code: 51 },
     ],
   },
+  power: { on_ac: true, percent: 82, paused: false, battery_save: false, battery_save_manual: null, source: 'auto' },
 };
 
 // Mirrors the firmware's SD-backed /last_usage.json cache, using
@@ -2114,7 +2083,6 @@ function applyData(doc) {
   // applyUsageJson; keeps the last value when a field is absent.
   if (doc.btc && doc.btc.price > 0) {
     STATE.btcPrice = doc.btc.price;
-    STATE.btcChangePct = doc.btc.changePct ?? STATE.btcChangePct;
   }
   if (doc.weather) applyWeatherData(doc.weather);
   // Live poll only (applyData is only called from a real/mock fetch, not
@@ -2139,7 +2107,6 @@ function applyWeatherData(w) {
   if (w.high != null) STATE.weatherHigh = Math.round(w.high);
   if (w.low != null) STATE.weatherLow = Math.round(w.low);
   if (w.condition != null) STATE.weatherCondition = w.condition;
-  if (w.place != null) STATE.weatherPlace = w.place;
   if (Array.isArray(w.hourly)) {
     STATE.weatherHourly = w.hourly.slice(0, WEATHER_HOURLY_N).map(h => ({
       h: h.h ?? -1, tempC: Math.round(h.tempC ?? 0), code: h.code ?? -1,
@@ -2164,7 +2131,6 @@ function saveWeatherCache() {
       high: STATE.weatherHigh > -900 ? STATE.weatherHigh : null,
       low: STATE.weatherLow > -900 ? STATE.weatherLow : null,
       condition: STATE.weatherCondition,
-      place: STATE.weatherPlace,
       hourly: STATE.weatherHourly,
       daily: STATE.weatherDaily,
     }));
@@ -2229,7 +2195,6 @@ async function fetchUsage() {
     saveLastUsageCache(MOCK);
     STATE.haveData = true;
     STATE.fetchFailCycles = 0;
-    STATE.wifiOk = true;
     STATE.connected = true;
     setConn(true, 'mock data');
     log('applied mock data', 'ok');
@@ -2237,7 +2202,6 @@ async function fetchUsage() {
     return;
   }
   if (offline) {
-    STATE.wifiOk = false;
     STATE.connected = false;
     markFetchFailed();
     setConn(false, 'simulated offline');
@@ -2257,13 +2221,11 @@ async function fetchUsage() {
     saveLastUsageCache(doc);
     STATE.haveData = true;
     STATE.fetchFailCycles = 0;
-    STATE.wifiOk = true;
     STATE.connected = true;
     setConn(true, 'ok, ' + new Date().toLocaleTimeString());
     log('fetched ' + fmtTokens(doc.today?.tokens ?? 0) + ' today / ' +
         fmtTokens(doc.week?.tokens ?? 0) + ' week', 'ok');
   } catch (err) {
-    STATE.wifiOk = false;
     STATE.connected = false;
     markFetchFailed();
     setConn(false, err.name === 'AbortError' ? 'timeout (5s)' : err.message);
