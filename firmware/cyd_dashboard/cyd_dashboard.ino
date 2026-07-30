@@ -447,8 +447,9 @@ void loop() {
       // Any tap dismisses the Device Stats overlay, same as Weather.
       devicePageOpen = false;
       render();
-    } else if (!catMode && tx >= PULSE_HIT_X0 && tx < PULSE_HIT_X1 &&
-               ty >= PULSE_HIT_Y0 && ty < PULSE_HIT_Y1) {
+    } else if (!catMode && tx >= SETTINGS_HIT_X0 && tx < SETTINGS_HIT_X1 &&
+               ty >= SETTINGS_HIT_Y0 && ty < SETTINGS_HIT_Y1) {
+      // Tap the footer's settings gear icon → open Settings list.
       settingsScreen = SET_LIST;
       settingsScrollOffset = 0;
       settingsListDragBegin(tx, ty);  // seed drag state fresh -- this is a real new gesture

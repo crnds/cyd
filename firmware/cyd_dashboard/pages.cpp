@@ -157,6 +157,24 @@ static void drawWifiIcon() {
   g->fillRect(26, 226, 2, 7, c);
 }
 
+// Footer settings gear, bottom-right corner (SETTINGS_HIT_* in state.h is
+// its tap target). A hub disc with a punched-out center + 8 short spokes --
+// same circle/drawWideLine vocabulary as drawWeatherIcon's sun glyph, just
+// smaller and gray so it reads as UI chrome rather than a page icon.
+static void drawSettingsIcon() {
+  const int cx = 299, cy = 230;
+  g->fillCircle(cx, cy, 3, COL_TEXT2);
+  g->fillCircle(cx, cy, 1, COL_BG);
+  g->drawWideLine(cx, cy - 6, cx, cy - 4, 1.0f, COL_TEXT2);
+  g->drawWideLine(cx, cy + 4, cx, cy + 6, 1.0f, COL_TEXT2);
+  g->drawWideLine(cx - 6, cy, cx - 4, cy, 1.0f, COL_TEXT2);
+  g->drawWideLine(cx + 4, cy, cx + 6, cy, 1.0f, COL_TEXT2);
+  g->drawWideLine(cx - 4, cy - 4, cx - 3, cy - 3, 1.0f, COL_TEXT2);
+  g->drawWideLine(cx + 3, cy + 3, cx + 4, cy + 4, 1.0f, COL_TEXT2);
+  g->drawWideLine(cx - 4, cy + 4, cx - 3, cy + 3, 1.0f, COL_TEXT2);
+  g->drawWideLine(cx + 3, cy - 3, cx + 4, cy - 4, 1.0f, COL_TEXT2);
+}
+
 // ── DRAWING HELPERS ────────────────────────────────────────
 void drawFooter() {
   // Status dot: server reachability only, gated on wifiOk so it stays blank
@@ -173,12 +191,14 @@ void drawFooter() {
     else if (onPhase) g->fillCircle(14, 230, 4, COL_GOOD);
   }
   drawWifiIcon();
+  drawSettingsIcon();
 
   String pageStr = String(currentPage + 1) + " / " + String(PAGE_COUNT);
   g->setTextColor(COL_TEXT2);
   g->setTextSize(1);
-  // Keep the page label 8px from the panel edge (4px before the screen gutter).
-  g->setCursor(320 - FOOTER_RIGHT_PADDING - (int)pageStr.length() * 6, 226);
+  // Right-aligned just left of the settings gear (SETTINGS_HIT_X0), not the
+  // panel edge, so the two never overlap.
+  g->setCursor(SETTINGS_HIT_X0 - FOOTER_RIGHT_PADDING - (int)pageStr.length() * 6, 226);
   g->print(pageStr);
 
   uint32_t flashUsed, flashTotal, ramUsed;

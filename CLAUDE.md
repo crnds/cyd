@@ -272,11 +272,12 @@ flash storage for the scheme change to orphan.
   active so the cats own the whole screen (mixed keeps a footer band at
   y≥220). This is the one deliberate break from the firmware/simulator parity
   rule (placeholders only in the sim).
-- **Hidden Settings area** (`settingsScreen`: `SET_OFF`/`SET_LIST`/`SET_LEAF`).
-  Tapping an invisible hit-box over the footer's connection-status pulse dot
-  (`PULSE_HIT_*`, only live on non-cat/non-offline pages) opens `SET_LIST`, a
-  **drag-to-scroll** list of setting names (**11** settings); tapping a row
-  opens `SET_LEAF`, a generic value-picker button grid for that one setting.
+- **Settings area** (`settingsScreen`: `SET_OFF`/`SET_LIST`/`SET_LEAF`).
+  Tapping the footer's settings gear icon (bottom-right corner,
+  `SETTINGS_HIT_*`/`drawSettingsIcon()`, only live on non-cat/non-offline
+  pages) opens `SET_LIST`, a **drag-to-scroll** list of setting names
+  (**11** settings); tapping a row opens `SET_LEAF`, a generic value-picker
+  button grid for that one setting.
   Both screens, and every setting, are driven by one data table (`SettingDef
   SETTINGS[]`, plain function pointers — no `std::function`/virtual dispatch,
   flash is scarce here) rather than a hand-copied page per setting: adding a

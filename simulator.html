@@ -241,11 +241,6 @@ let SHIFT_STEP_MS = 180000;  // firmware default; flash "pixel_shift_min" * 6000
 const OFFLINE_AFTER_CYCLES = 3;
 const LAST_USAGE_KEY = 'cyddashboard_v1_lastusage';
 
-// Invisible hit-box around the footer's connection-status dot (14,230) --
-// clicking it opens the hidden Settings page, mirrors the firmware's
-// PULSE_HIT_X0/X1/Y0/Y1.
-const PULSE_HIT_X0 = 0, PULSE_HIT_X1 = 40, PULSE_HIT_Y0 = 214, PULSE_HIT_Y1 = 240;
-
 // Weather card hit-box on the status page (page 0): matches the full card
 // drawn at fillRect(161,166,157,52). Tap opens the Weather overlay —
 // mirrors the firmware's WEATHER_HIT_*.
@@ -253,9 +248,15 @@ const WEATHER_HIT_X0 = 161, WEATHER_HIT_X1 = 318;
 const WEATHER_HIT_Y0 = 166, WEATHER_HIT_Y1 = 218;
 
 // Footer CPU/ROM/RAM stats hit-box -- tap opens the Device Stats overlay.
-// Mirrors the firmware's DEVICE_HIT_*; x0 starts right where PULSE_HIT ends.
+// Mirrors the firmware's DEVICE_HIT_*.
 const DEVICE_HIT_X0 = 40, DEVICE_HIT_X1 = 210;
 const DEVICE_HIT_Y0 = 214, DEVICE_HIT_Y1 = 240;
+
+// Footer settings gear icon, bottom-right corner -- tap opens the Settings
+// list. Mirrors the firmware's SETTINGS_HIT_*; replaces the old invisible
+// hit-box that used to sit over the connection-status pulse dot.
+const SETTINGS_HIT_X0 = 282, SETTINGS_HIT_X1 = 316;
+const SETTINGS_HIT_Y0 = 219, SETTINGS_HIT_Y1 = 240;
 const WEATHER_HOURLY_N = 6;
 const WEATHER_DAILY_N = 5;
 const LAST_WEATHER_KEY = 'cyddashboard_v1_weather';
@@ -771,6 +772,24 @@ function drawWifiIcon() {
   gfx.fillRect(26, 226, 2, 7, c);
 }
 
+// Footer settings gear, bottom-right corner (SETTINGS_HIT_* is its tap
+// target). Twin of pages.cpp's drawSettingsIcon() -- a hub disc with a
+// punched-out center + 8 short spokes, same vocabulary as the weather
+// sun glyph, just smaller and gray so it reads as UI chrome.
+function drawSettingsIcon() {
+  const cx = 299, cy = 230;
+  gfx.fillCircle(cx, cy, 3, COL_TEXT2);
+  gfx.fillCircle(cx, cy, 1, COL_BG);
+  gfx.drawWideLine(cx, cy - 6, cx, cy - 4, 1.0, COL_TEXT2);
+  gfx.drawWideLine(cx, cy + 4, cx, cy + 6, 1.0, COL_TEXT2);
+  gfx.drawWideLine(cx - 6, cy, cx - 4, cy, 1.0, COL_TEXT2);
+  gfx.drawWideLine(cx + 4, cy, cx + 6, cy, 1.0, COL_TEXT2);
+  gfx.drawWideLine(cx - 4, cy - 4, cx - 3, cy - 3, 1.0, COL_TEXT2);
+  gfx.drawWideLine(cx + 3, cy + 3, cx + 4, cy + 4, 1.0, COL_TEXT2);
+  gfx.drawWideLine(cx - 4, cy + 4, cx - 3, cy + 3, 1.0, COL_TEXT2);
+  gfx.drawWideLine(cx + 3, cy - 3, cx + 4, cy - 4, 1.0, COL_TEXT2);
+}
+
 // ── PAGE DRAWING (line-for-line port of the .ino) ─────────
 function drawFooter() {
   // Status dot: server reachability only, gated on STATE.wifiOk so it stays
@@ -786,11 +805,14 @@ function drawFooter() {
     else if (onPhase) gfx.fillCircle(14, 230, 4, COL_GOOD);
   }
   drawWifiIcon();
+  drawSettingsIcon();
 
   const pageStr = (STATE.currentPage + 1) + ' / ' + PAGE_COUNT;
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(1);
-  gfx.setCursor(320 - FOOTER_RIGHT_PADDING - pageStr.length * 6, 226);
+  // Right-aligned just left of the settings gear (SETTINGS_HIT_X0), not the
+  // panel edge, so the two never overlap.
+  gfx.setCursor(SETTINGS_HIT_X0 - FOOTER_RIGHT_PADDING - pageStr.length * 6, 226);
   gfx.print(pageStr);
 
   const romPct = Math.round(FLASH_USED_BYTES / FLASH_TOTAL_BYTES * 100);
@@ -1763,7 +1785,7 @@ function drawMixedPage(offline) {
   gfx.print(note);
 }
 
-// ── SETTINGS (hidden: click the footer's pulse dot to enter) ─────────────
+// ── SETTINGS (click the footer's gear icon to enter) ──────────────────────
 // Near-line-for-line port of the firmware's drawSettingsList()/
 // drawSettingsLeaf() -- a generic scrollable list of setting names drilling
 // into a generic value-picker grid, driven by the SETTINGS[] table above
@@ -2465,7 +2487,9 @@ canvas.addEventListener('click', (event) => {
     return;
   }
 
-  if (!catMode && tx >= PULSE_HIT_X0 && tx < PULSE_HIT_X1 && ty >= PULSE_HIT_Y0 && ty < PULSE_HIT_Y1) {
+  if (!catMode && tx >= SETTINGS_HIT_X0 && tx < SETTINGS_HIT_X1 &&
+      ty >= SETTINGS_HIT_Y0 && ty < SETTINGS_HIT_Y1) {
+    // Tap the footer's settings gear icon → open Settings list.
     STATE.settingsScreen = 'list';
     STATE.settingsScrollOffset = 0;
     render();

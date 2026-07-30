@@ -1,4 +1,4 @@
-// Hidden Settings area (tap the footer's pulse dot to enter). A generic
+// Settings area (tap the footer's gear icon to enter). A generic
 // two-screen system: SET_LIST is a scrollable list of setting names
 // (drawSettingsList), SET_LEAF is a value-picker grid for whichever one is
 // open (drawSettingsLeaf). Every setting is one SettingDef row -- a label, a
@@ -433,7 +433,7 @@ static int32_t dragTotalMoveY = 0;  // cumulative |dy| this gesture, px
 static const int32_t DRAG_TAP_PX = 8;  // below this total movement, treat release as a tap
 // dragActive itself is declared above handleSettingsTouch(), which also needs
 // it. Without it, a touch that transitions INTO SET_LIST by some other path
-// (the pulse-dot tap, or BACK from a leaf) would fall through to Move/End
+// (the settings-gear tap, or BACK from a leaf) would fall through to Move/End
 // using whatever dragLastX/Y a previous, unrelated gesture left behind -- see
 // the callers below for how each transition sets this correctly.
 

@@ -146,8 +146,6 @@ const int PAGE_COUNT = 5;
 const int GIF_PAGE = 3;    // 4th page (0-indexed): random cat GIFs from /cats/ on SD
 const int MIXED_PAGE = 4;  // 5th page: status + cats split
 
-const int PULSE_HIT_X0 = 0, PULSE_HIT_X1 = 40, PULSE_HIT_Y0 = 214, PULSE_HIT_Y1 = 240;
-
 // Total DRAM available to globals+heap on this ESP32 variant/partition
 // scheme — a fixed board constant (matches "Maximum is 327680 bytes" in the
 // arduino-cli compile report), not something that changes per build.
@@ -174,16 +172,21 @@ const uint16_t COL_BLUE = 0x3C1E;    // device-stats bar chart accent
 const uint16_t COL_YELLOW = 0xFFE0;  // yellow for sun/lightning icons
 // Weather card hit-box on the status page (page 0): matches the full card
 // drawn at fillRect(161,166,157,52) (pages.cpp). Tap opens the Weather
-// overlay (mirrors settings' PULSE_HIT_* pattern).
+// overlay (mirrors the footer hit-box pattern below).
 const int WEATHER_HIT_X0 = 161, WEATHER_HIT_X1 = 318;
 const int WEATHER_HIT_Y0 = 166, WEATHER_HIT_Y1 = 218;
 
 // Footer CPU/ROM/RAM stats hit-box (drawFooter()'s "CPU x%  ROM x%  RAM x%"
-// line, x0 picked to start right where the PULSE_HIT zone ends so the two
-// don't compete). Tap opens the Device Stats overlay (mirrors weatherPageOpen's
+// line). Tap opens the Device Stats overlay (mirrors weatherPageOpen's
 // pattern) -- Device Stats is no longer one of the swiped PAGE_COUNT pages.
 const int DEVICE_HIT_X0 = 40, DEVICE_HIT_X1 = 210;
 const int DEVICE_HIT_Y0 = 214, DEVICE_HIT_Y1 = 240;
+
+// Footer settings gear icon (drawSettingsIcon() in pages.cpp), bottom-right
+// corner. Tap opens the Settings list (SET_LIST) -- replaces the old
+// invisible hit-box that used to sit over the connection-status pulse dot.
+const int SETTINGS_HIT_X0 = 282, SETTINGS_HIT_X1 = 316;
+const int SETTINGS_HIT_Y0 = 219, SETTINGS_HIT_Y1 = 240;
 
 // Battery Save top-right corner overlay: y-range of drawBatterySaveIcon()'s
 // backing box (pages.cpp), needed by gif_player.cpp to fold the icon's rows
