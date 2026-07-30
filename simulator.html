@@ -767,9 +767,9 @@ function fmtGB(bytes) { return (bytes / (1024 ** 3)).toFixed(1) + 'GB'; }
 // and a server outage read as two distinct signals instead of one amber dot.
 function drawWifiIcon() {
   const c = STATE.wifiOk ? COL_GOOD : COL_WARN;
-  gfx.fillRect(20, 230, 2, 3, c);
-  gfx.fillRect(23, 228, 2, 5, c);
-  gfx.fillRect(26, 226, 2, 7, c);
+  gfx.fillRect(22, 230, 2, 3, c);
+  gfx.fillRect(25, 228, 2, 5, c);
+  gfx.fillRect(28, 226, 2, 7, c);
 }
 
 // Footer settings gear, bottom-right corner (SETTINGS_HIT_* is its tap
@@ -820,8 +820,10 @@ function drawFooter() {
   const cpuPct = Math.round(STATE.cpuPercentAvg);
   
   gfx.setTextSize(1);
-  gfx.setCursor(30, 226);
-  
+  // 4px past the wifi icon's rightmost bar (28+2=30) — keeps the pulse dot,
+  // wifi icon, and this activity readout each 4px apart.
+  gfx.setCursor(34, 226);
+
   gfx.setTextColor(COL_TEXT2);
   gfx.print('CPU ');
   gfx.setTextColor(COL_TEXT);

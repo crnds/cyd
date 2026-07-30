@@ -152,9 +152,9 @@ void presentFrame(bool fullScreen) {
 // read as two distinct signals instead of collapsing into one amber dot.
 static void drawWifiIcon() {
   uint16_t c = wifiOk ? COL_GOOD : COL_WARN;
-  g->fillRect(20, 230, 2, 3, c);
-  g->fillRect(23, 228, 2, 5, c);
-  g->fillRect(26, 226, 2, 7, c);
+  g->fillRect(22, 230, 2, 3, c);
+  g->fillRect(25, 228, 2, 5, c);
+  g->fillRect(28, 226, 2, 7, c);
 }
 
 // Footer settings gear, bottom-right corner (SETTINGS_HIT_* in state.h is
@@ -207,7 +207,9 @@ void drawFooter() {
   int cpuInt = (int)(cpuPercentAvg + 0.5f);
 
   g->setTextSize(1);
-  g->setCursor(30, 226);
+  // 4px past the wifi icon's rightmost bar (28+2=30) — keeps the pulse dot,
+  // wifi icon, and this activity readout each 4px apart.
+  g->setCursor(34, 226);
 
   g->setTextColor(COL_TEXT2);
   g->print("CPU ");
