@@ -224,9 +224,10 @@ pre {
 <script>
 // ── CONSTANTS (mirroring cyd_dashboard.ino) ───────────────
 const POLL_DEFAULT_MS = 20000;
-const PAGE_COUNT = 7;
-const GIF_PAGE = 5;   // 6th page: random cat GIFs on the device (stand-in here — see drawGifPage)
-const MIXED_PAGE = 6; // 7th page: status + cats split
+const PAGE_COUNT = 5;
+const FOOTER_RIGHT_PADDING = 8;  // twin of pages.cpp's FOOTER_RIGHT_PADDING
+const GIF_PAGE = 3;   // 4th page: random cat GIFs on the device (stand-in here — see drawGifPage)
+const MIXED_PAGE = 4; // 5th page: status + cats split
 
 // Anti-retention pixel shift — mirrors the firmware's SHIFT_ORBIT/cfgShiftStepMs:
 // the whole frame is blitted at an offset that orbits 0-2px (right/up only, so
@@ -234,7 +235,7 @@ const MIXED_PAGE = 6; // 7th page: status + cats split
 const SHIFT_ORBIT = [[0,0],[1,0],[2,0],[2,-1],[2,-2],[1,-2],[0,-2],[0,-1]];
 // mirrors the firmware's cfgShiftStepMs -- not const since the Settings
 // page's Pixel Shift leaf (applyPixelShift) can now change it at runtime.
-let SHIFT_STEP_MS = 180000;  // firmware default; /config.json pixel_shift_min * 60000
+let SHIFT_STEP_MS = 180000;  // firmware default; flash "pixel_shift_min" * 60000
 // Consecutive failed polls before haveData is forced back to false, mirroring
 // the firmware's fetchFailCycles/OFFLINE_AFTER_CYCLES.
 const OFFLINE_AFTER_CYCLES = 3;
@@ -250,6 +251,11 @@ const PULSE_HIT_X0 = 0, PULSE_HIT_X1 = 40, PULSE_HIT_Y0 = 214, PULSE_HIT_Y1 = 24
 // mirrors the firmware's WEATHER_HIT_*.
 const WEATHER_HIT_X0 = 161, WEATHER_HIT_X1 = 318;
 const WEATHER_HIT_Y0 = 166, WEATHER_HIT_Y1 = 218;
+
+// Footer CPU/ROM/RAM stats hit-box -- tap opens the Device Stats overlay.
+// Mirrors the firmware's DEVICE_HIT_*; x0 starts right where PULSE_HIT ends.
+const DEVICE_HIT_X0 = 40, DEVICE_HIT_X1 = 210;
+const DEVICE_HIT_Y0 = 214, DEVICE_HIT_Y1 = 240;
 const WEATHER_HOURLY_N = 6;
 const WEATHER_DAILY_N = 5;
 const LAST_WEATHER_KEY = 'cyddashboard_v1_weather';
@@ -305,7 +311,7 @@ function applyRestart(v) { location.reload(); }
 // firmware which only touches wifi_ssid/wifi_password.
 function applyForgetWifi(v) {
   console.log('[sim] Forget WiFi: on real hardware this erases wifi_ssid/' +
-              'wifi_password from config.json and restarts into the AP setup portal.');
+              'wifi_password from flash and restarts into the AP setup portal.');
   location.reload();
 }
 
@@ -420,7 +426,8 @@ function applyPixelShift(v) { SHIFT_STEP_MS = v * 60000; }
 
 // Boot page: all 7 pages (including cats/mixed) are valid -- drawScreenContent()
 // already dispatches generically off STATE.currentPage regardless of how it
-// was set, no special-casing needed here either.
+// was set, no special-casing needed here either. Device Stats isn't in this
+// list -- it's an overlay (devicePageOpen), not a currentPage value.
 function getCurrentBootPage() { return STATE.cfgBootPage; }
 function applyBootPage(v) {
   STATE.cfgBootPage = v;
@@ -445,9 +452,9 @@ const SETTINGS = [
     btnTextSize: 2, destructive: false,
     getCurrent: getCurrentPixelShift, apply: applyPixelShift },
   { label: 'BOOT PAGE', leafTitle: 'BOOT PAGE', subtitle: 'PAGE SHOWN AFTER POWER-ON',
-    hint: 'TAP A PAGE TO APPLY', cols: 4, rows: 2, count: 7,
-    values: [0, 1, 2, 3, 4, 5, 6],
-    valueLabels: ['STATUS', 'PROJECTS', 'HOME', 'DEVICE', 'LIMITS', 'CATS', 'MIXED'],
+    hint: 'TAP A PAGE TO APPLY', cols: 3, rows: 2, count: 5,
+    values: [0, 1, 2, 3, 4],
+    valueLabels: ['STATUS', 'PROJECTS', 'LIMITS', 'CATS', 'MIXED'],
     btnTextSize: 1, destructive: false,
     getCurrent: getCurrentBootPage, apply: applyBootPage },
   { label: 'RESTART', leafTitle: 'RESTART', subtitle: '',
@@ -556,6 +563,7 @@ const STATE = {
   weatherHourly: [],      // [{h, tempC, code}] next 6 hours
   weatherDaily: [],       // [{wd, high, low, code}] next 5 days
   weatherPageOpen: false, // Weather overlay (tap status-page weather card)
+  devicePageOpen: false,  // Device Stats overlay (tap footer's CPU/ROM/RAM stats line)
   // simulator-only
   lastPollMs: 0,          // when the last poll cycle started (progress line)
   currentPage: 0,
@@ -751,21 +759,37 @@ function fmtCountdownDHM(sec) {
 function fmtKB(bytes) { return (bytes / 1024).toFixed(1) + 'KB'; }
 function fmtGB(bytes) { return (bytes / (1024 ** 3)).toFixed(1) + 'GB'; }
 
+// Small 3-bar signal icon next to the pulse dot: green when the most recent
+// poll found WiFi up (STATE.wifiOk), rose when it didn't. Twin of
+// pages.cpp's drawWifiIcon() — separate from the pulse dot so a WiFi outage
+// and a server outage read as two distinct signals instead of one amber dot.
+function drawWifiIcon() {
+  const c = STATE.wifiOk ? COL_GOOD : COL_WARN;
+  gfx.fillRect(20, 230, 2, 3, c);
+  gfx.fillRect(23, 228, 2, 5, c);
+  gfx.fillRect(26, 226, 2, 7, c);
+}
+
 // ── PAGE DRAWING (line-for-line port of the .ino) ─────────
 function drawFooter() {
-  // Status dot: blinks once a second while the most recent poll reached the
-  // server — green on the odd second, off on the even second, so the pulse is
-  // easy to read at a glance. Static amber when coasting on cached data
-  // (haveData true but connected false — render() only reaches here when
-  // haveData is true).
+  // Status dot: server reachability only, gated on STATE.wifiOk so it stays
+  // blank whenever WiFi itself is down — that case is already covered by
+  // drawWifiIcon() above. When WiFi is up: blinks once a second while the
+  // most recent poll reached the server — green on the odd second, off on
+  // the even second, so the pulse is easy to read at a glance. Static amber
+  // when WiFi is fine but the poll still didn't reach the server (coasting
+  // on cached data).
   const onPhase = Math.floor(performance.now() / 1000) % 2;
-  if (!STATE.connected) gfx.fillCircle(14, 230, 3, COL_ACCENT);
-  else if (onPhase) gfx.fillCircle(14, 230, 4, COL_GOOD);
+  if (STATE.wifiOk) {
+    if (!STATE.connected) gfx.fillCircle(14, 230, 3, COL_ACCENT);
+    else if (onPhase) gfx.fillCircle(14, 230, 4, COL_GOOD);
+  }
+  drawWifiIcon();
 
   const pageStr = (STATE.currentPage + 1) + ' / ' + PAGE_COUNT;
   gfx.setTextColor(COL_TEXT2);
   gfx.setTextSize(1);
-  gfx.setCursor(320 - pageStr.length * 6, 226);
+  gfx.setCursor(320 - FOOTER_RIGHT_PADDING - pageStr.length * 6, 226);
   gfx.print(pageStr);
 
   const romPct = Math.round(FLASH_USED_BYTES / FLASH_TOTAL_BYTES * 100);
@@ -793,7 +817,7 @@ function drawFooter() {
   const pollMs = effectivePollMs();
   let elapsed = performance.now() - STATE.lastPollMs;
   if (elapsed > pollMs) elapsed = pollMs;
-  const lineW = Math.round(elapsed / pollMs * 320);
+  const lineW = Math.floor(elapsed / pollMs * 320);  // firmware truncates, doesn't round
   if (lineW > 0) gfx.fillRect(0, 239, lineW, 1, COL_TEXT2);
 }
 
@@ -852,7 +876,6 @@ function drawLimitBlock(y, title, percent, resets, resetsInSec) {
   }
   gfx.print(line);
 }
-
 // One row of the /usage-style limits page: label left, right-aligned value,
 // thin 8px bar under. percent < 0 leaves the track empty (unknown).
 function drawLimitsRow(y, label, right, percent) {
@@ -953,7 +976,7 @@ function drawProjectsPage() {
       gfx.setCursor(10, y);
       gfx.print(p.name);
 
-      const barW = Math.round(p.tokens / maxTokens * barMaxW);
+      const barW = Math.floor(p.tokens / maxTokens * barMaxW);  // firmware truncates
       gfx.fillRect(10, y + 10, barMaxW, 8, COL_SURFACE);
       gfx.fillRect(10, y + 10, Math.max(barW, 4), 8, COL_ACCENT);
 
@@ -978,7 +1001,7 @@ function drawProjectsPage() {
   const dayLabels = ['-6', '-5', '-4', '-3', '-2', '-1', 'today'];
   const chartX = 24, chartY = 150, chartH = 64, barW = 34, gap = 8;
   for (let i = 0; i < 7; i++) {
-    const barH = Math.round(STATE.trend[i] / maxTrend * chartH);
+    const barH = Math.floor(STATE.trend[i] / maxTrend * chartH);  // firmware truncates
     const bx = chartX + i * (barW + gap);
     const by = chartY + chartH - barH;
     gfx.fillRoundRect(bx, by, barW, Math.max(barH, 2), 3, COL_ACCENT);
@@ -1258,12 +1281,11 @@ function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour
   // hand stays a thin single-pixel line to keep it visually distinct.
   gfx.drawWideLine(cx, cy, hx, hy, 2.0, COL_TEXT);
   gfx.drawWideLine(cx, cy, mx, my, 1.5, COL_TEXT);
-  gfx.drawLine(cx, cy, sx, sy, COL_ACCENT);
-  gfx.fillCircle(cx, cy, 2, COL_TEXT);
 
   // Session (5h) reset time: a thin green radius from center to rim, static
   // (unlike the hands) at whatever hour/minute the session next resets.
-  // Floating on top of other hands.
+  // Drawn before the second hand (below) so the sweeping second hand stays
+  // visible on top of it when the two overlap, instead of being masked by it.
   if (haveReset) {
     const resetAngle = ((resetHour24 % 12) + resetMinute / 60) * 30 - 90;
     const resetRad = resetAngle * Math.PI / 180;
@@ -1271,6 +1293,9 @@ function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour
     const ry = cy + Math.sin(resetRad) * (r - 2);
     gfx.drawLine(cx, cy, rx, ry, COL_GOOD);
   }
+
+  gfx.drawLine(cx, cy, sx, sy, COL_ACCENT);
+  gfx.fillCircle(cx, cy, 2, COL_TEXT);
 }
 
 function drawStatusPage() {
@@ -1576,8 +1601,8 @@ function drawWeatherPage() {
     gfx.fillRect(barX, barY, barW, barH, COL_TRACK);
     if (have && maxT > minT) {
       const span = maxT - minT;
-      let x0 = barX + Math.round((lo - minT) / span * barW);
-      let x1 = barX + Math.round((hi - minT) / span * barW);
+      let x0 = barX + Math.floor((lo - minT) / span * barW);  // firmware truncates
+      let x1 = barX + Math.floor((hi - minT) / span * barW);  // firmware truncates
       if (x1 - x0 < barH) x1 = x0 + barH;
       gfx.fillRect(x0, barY, x1 - x0, barH, COL_ACCENT);
     }
@@ -1608,6 +1633,9 @@ function drawFullStatBlock(y, title, percent, sub, color) {
   gfx.print(sub);
 }
 
+// Not one of the swiped PAGE_COUNT pages -- reached only by tapping the
+// footer's CPU/ROM/RAM stats line (DEVICE_HIT_*), mirrors the firmware's
+// devicePageOpen overlay.
 function drawDevicePage() {
   gfx.setTextColor(COL_TEXT);
   gfx.setTextSize(2);
@@ -1668,7 +1696,13 @@ function drawGifPage(offline) {
   const note = '(reads /cats/*.gif from the SD card)';
   gfx.setCursor((320 - note.length * 6) / 2, 148);
   gfx.print(note);
-  drawSessionResetOverlay();
+  // Gated on the actual currentPage, not on catMode/offline -- mirrors
+  // gif_player.cpp's `if (currentPage == GIF_PAGE) drawSessionResetOverlay()`.
+  // Going offline while parked on a different page (e.g. STATUS) still
+  // renders this same cat placeholder (catMode forces it), but the firmware
+  // only draws this overlay when GIF_PAGE is the page the user actually left
+  // it on, not on every offline render regardless of page.
+  if (STATE.currentPage === GIF_PAGE) drawSessionResetOverlay();
   if (offline) drawOfflineBanner();
 }
 
@@ -1950,6 +1984,13 @@ function drawScreenContent() {
     document.getElementById('page-status').textContent = 'WEATHER (tap to close)';
     return;
   }
+  if (STATE.devicePageOpen) {
+    gfx.fillScreen(COL_BG);
+    drawDevicePage();
+    drawBatterySaveIcon();
+    document.getElementById('page-status').textContent = 'DEVICE STATS (tap to close)';
+    return;
+  }
   // Offline mode also shows cats (with an OFFLINE banner on top) instead of a bare offline screen — mirrors
   // the firmware's catMode in loop().
   if (!STATE.haveData) {
@@ -1976,9 +2017,7 @@ function drawScreenContent() {
   switch (STATE.currentPage) {
     case 0: drawStatusPage(); break;
     case 1: drawProjectsPage(); break;  // projects (7d) + 7-day trend combined
-    case 2: drawHomePage(); break;
-    case 3: drawDevicePage(); break;
-    case 4: drawLimitsPage(); break;    // /usage-style limits panel
+    case 2: drawLimitsPage(); break;    // /usage-style limits panel
   }
   drawFooter();
   drawBatterySaveIcon();
@@ -2185,7 +2224,16 @@ function markFetchFailed() {
   if (STATE.fetchFailCycles >= OFFLINE_AFTER_CYCLES) STATE.haveData = false;
 }
 
+// setInterval(fetchUsage, ms) below doesn't await the previous call, so a
+// fetch that outlives its own poll interval (e.g. close to the 5s abort
+// timeout on a fast poll rate) would otherwise overlap with the next tick's
+// call -- two in-flight requests racing to write STATE/the footer, with
+// whichever resolves last silently winning even if it's the stale one.
+let fetchInFlight = false;
+
 async function fetchUsage() {
+  if (fetchInFlight) return;
+  fetchInFlight = true;
   STATE.lastPollMs = performance.now();
   const offline = document.getElementById('sim-offline').checked;
   const mock = document.getElementById('mock-data').checked;
@@ -2199,6 +2247,7 @@ async function fetchUsage() {
     setConn(true, 'mock data');
     log('applied mock data', 'ok');
     render();
+    fetchInFlight = false;
     return;
   }
   if (offline) {
@@ -2207,6 +2256,7 @@ async function fetchUsage() {
     setConn(false, 'simulated offline');
     log('poll skipped: simulated offline', 'err');
     render();
+    fetchInFlight = false;
     return;
   }
 
@@ -2232,6 +2282,7 @@ async function fetchUsage() {
     log('fetch failed: ' + err.message, 'err');
   } finally {
     clearTimeout(timer);
+    fetchInFlight = false;
   }
   render();
 }
@@ -2402,6 +2453,13 @@ canvas.addEventListener('click', (event) => {
     return;
   }
 
+  if (STATE.devicePageOpen) {
+    // Any tap dismisses the Device Stats overlay, same as Weather.
+    STATE.devicePageOpen = false;
+    render();
+    return;
+  }
+
   if (!catMode && tx >= PULSE_HIT_X0 && tx < PULSE_HIT_X1 && ty >= PULSE_HIT_Y0 && ty < PULSE_HIT_Y1) {
     STATE.settingsScreen = 'list';
     STATE.settingsScrollOffset = 0;
@@ -2414,6 +2472,14 @@ canvas.addEventListener('click', (event) => {
       ty >= WEATHER_HIT_Y0 && ty < WEATHER_HIT_Y1) {
     // Tap the status-page weather card → open Weather overlay.
     STATE.weatherPageOpen = true;
+    render();
+    return;
+  }
+
+  if (!catMode && tx >= DEVICE_HIT_X0 && tx < DEVICE_HIT_X1 &&
+      ty >= DEVICE_HIT_Y0 && ty < DEVICE_HIT_Y1) {
+    // Tap the footer's CPU/ROM/RAM stats line → open Device Stats overlay.
+    STATE.devicePageOpen = true;
     render();
     return;
   }

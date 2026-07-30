@@ -1,5 +1,5 @@
 // Claude Code token usage dashboard for the ESP32-2432S028R (CYD).
-// Polls a local Python server for usage stats and renders 7 tap-to-cycle pages.
+// Polls a local Python server for usage stats and renders 5 tap-to-cycle pages.
 //
 // This file now holds only the display/state object definitions, setup(),
 // loop(), and networkTask() — everything else was split (2026) into
@@ -29,20 +29,21 @@ LGFX_Sprite frame(&gfx);
 lgfx::LovyanGFX* g = &gfx;
 
 // ── STATE ──────────────────────────────────────────────────
-// Non-const: overridable from /config.json (see sd_store.cpp's
+// Non-const: overridable from flash (see sd_store.cpp's
 // loadRuntimeConfig). Originally set once at boot before the two tasks
 // start; now also settable at runtime from the Settings page's Poll Interval
 // leaf (loop(), core 1). cfgPollIntervalSec is the user's preference;
 // POLL_INTERVAL_MS is the effective cadence networkTask reads every cycle
 // (may be stretched by Battery Save — see applyEffectivePoll()).
-uint32_t cfgPollIntervalSec = 20;
+volatile uint32_t cfgPollIntervalSec = 20;
 volatile uint32_t POLL_INTERVAL_MS = 20000;
 
 UsageState STATE;
 
 int currentPage = 0;
-int cfgBootPage = 0;  // which page currentPage starts on; overridable via /config.json "boot_page"
+int cfgBootPage = 0;  // which page currentPage starts on; overridable via flash "boot_page"
 bool weatherPageOpen = false;  // Weather overlay (tap status-page weather card)
+bool devicePageOpen = false;  // Device Stats overlay (tap footer's CPU/ROM/RAM stats line)
 SettingsScreen settingsScreen = SET_OFF;
 int settingsScrollOffset = 0;  // vertical scroll position (px) of the SET_LIST list
 int settingsLeafIndex = -1;  // index into SETTINGS[] currently open in SET_LEAF
@@ -53,7 +54,7 @@ volatile uint32_t lastPollMs = 0;
 uint32_t lastTouchMs = 0;
 
 // ── PIXEL SHIFT (anti image-retention) ─────────────────────
-uint32_t cfgShiftStepMs = 180000;  // dwell per step; /config.json "pixel_shift_min", 0 disables
+uint32_t cfgShiftStepMs = 180000;  // dwell per step; flash "pixel_shift_min", 0 disables
 uint8_t shiftIdx = 0;
 int shiftX = 0, shiftY = 0;
 uint32_t lastShiftMs = 0;
@@ -74,13 +75,13 @@ volatile bool connected = false;  // did the most recent fetch reach the server?
 SemaphoreHandle_t stateMutex = nullptr;
 SemaphoreHandle_t sdMutex = nullptr;
 
-// Runtime overrides for the compiled config.h defaults, loaded from an
-// optional /config.json on the SD card (see sd_store.cpp's loadRuntimeConfig()).
+// Runtime overrides for the compiled config.h defaults, loaded from internal
+// flash (NVS, see sd_store.cpp's loadRuntimeConfig()).
 String cfgWifiSsid = WIFI_SSID;
 String cfgWifiPassword = WIFI_PASSWORD;
 String cfgServerHost = SERVER_HOST;
 int cfgServerPort = SERVER_PORT;
-int cfgBrightness = 200;   // 0-255 panel backlight; overridable via /config.json
+int cfgBrightness = 200;   // 0-255 panel backlight; overridable via flash
 // Night mode: fixed 23:00-07:00 schedule (Bangkok has no DST, so tm_hour is
 // already correct local time -- no timezone math needed), dims to a fixed
 // 25% while on. Checked once/sec in loop() (core-1-only, like cfgShiftStepMs)
@@ -88,16 +89,16 @@ int cfgBrightness = 200;   // 0-255 panel backlight; overridable via /config.jso
 // -- nightDimActive tracks whether the dim is currently applied, so
 // applyNightMode() can restore immediately if toggled off mid-dim.
 bool cfgNightModeOn = false;
-// /config.json "battery_save": 0=OFF, 1=ON, 2=AUTO (follow Mac). Default AUTO
+// flash "battery_save": 0=OFF, 1=ON, 2=AUTO (follow Mac). Default AUTO
 // so unplugging the Mac (or the control-panel toggle) floors the board poll
 // without a Settings trip. serverBatterySave is the last live power.battery_save.
-int cfgBatterySaveMode = BATTERY_SAVE_AUTO;
+volatile int cfgBatterySaveMode = BATTERY_SAVE_AUTO;
 volatile bool serverBatterySave = false;
-bool cfgShowCountdown = true;  // default on; /config.json "show_countdown"
+bool cfgShowCountdown = true;  // default on; flash "show_countdown"
 bool nightDimActive = false;
 // Generic Settings-page persistence queue: a leaf's apply() (loop(), core 1)
-// mutates its live global directly, then queues the /config.json key/value
-// here; networkTask (core 0) drains it so the SD write never happens on the
+// mutates its live global directly, then queues the flash key/value here;
+// networkTask (core 0) drains it so the flash write never happens on the
 // render core. One queue serves every single-int setting (brightness, poll
 // interval, pixel-shift, etc.) -- see settings.cpp's CONFIG_KEY_NAMES/
 // queueConfigSave().
@@ -108,6 +109,7 @@ volatile int32_t pendingConfigValue = 0;
 // keys), and its restart must wait for the SD write to actually finish, so
 // it gets its own flag -- networkTask() does the erase then restarts.
 volatile bool pendingForgetWifi = false;
+volatile bool pendingRestart = false;  // see state.h -- drained by networkTask, not called directly
 int cfgScreenRotation = 1;
 int cfgTouchXMin = 200;
 int cfgTouchXMax = 3800;
@@ -120,7 +122,12 @@ int cfgTouchOffsetRotation = 0;
 // whenever WiFi drops, so ensureMdns() (net.cpp) re-initializes once it's
 // back — the board's own IP may have changed across the outage.
 int wifiDownCycles = 0;
-const int RESTART_AFTER_CYCLES = 45;  // ~15 min of no WiFi -> self-reboot
+// 45 failed poll cycles -> self-reboot. Each cycle is one effective poll
+// interval (POLL_INTERVAL_MS), not a fixed 20s -- Battery Save floors that to
+// 120s, so 45 cycles is ~90 min in that mode (was "~15 min" back when the
+// interval was always the 20s default; still stretches further if the user's
+// own Poll Interval preference is set above that floor).
+const int RESTART_AFTER_CYCLES = 45;
 
 // Consecutive failed polls (WiFi down OR WiFi up but the Mac unreachable)
 // before STATE.haveData is forced back to false, switching the display to the
@@ -158,6 +165,7 @@ void networkTask(void* param) {
     if (now - lastUsagePollMs >= POLL_INTERVAL_MS) {
       lastUsagePollMs = now;
       lastPollMs = now;  // drives the footer progress line on the render side
+      if (STATE.sdOk) refreshSdCapacityCache();  // cheap FAT bookkeeping; unrelated to WiFi
       if (WiFi.status() == WL_CONNECTED) {
         if (wifiDownCycles > 0) {
           logDiag(("wifi_recovered after " + String(wifiDownCycles) + " cycles").c_str());
@@ -195,13 +203,18 @@ void networkTask(void* param) {
 
     if (pendingConfigSave) {
       pendingConfigSave = false;
-      saveIntConfigToSD(CONFIG_KEY_NAMES[pendingConfigKeyId], pendingConfigValue);
+      saveIntConfigToFlash(CONFIG_KEY_NAMES[pendingConfigKeyId], pendingConfigValue);
     }
 
     if (pendingForgetWifi) {
       pendingForgetWifi = false;
-      forgetWifiFromSD();
-      ESP.restart();  // only after the erase above has actually landed on SD
+      forgetWifiFromFlash();
+      ESP.restart();  // only after the erase above has actually landed in flash
+    }
+
+    if (pendingRestart) {
+      pendingRestart = false;
+      ESP.restart();  // drained here (core 0), never between this task's own SD ops
     }
 
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -213,7 +226,7 @@ void setup() {
   Serial.begin(115200);
   gfx.init();
   gfx.setRotation(1);  // landscape 320x240; use 3 if the image is upside down
-  gfx.setBrightness(200);  // provisional; re-applied from /config.json once SD is up
+  gfx.setBrightness(200);  // provisional; re-applied from flash once loadRuntimeConfig() runs
 
   // Create before any fetch: applyUsageJson locks it even
   // during setup's single-threaded initial fetch (uncontended there).
@@ -243,10 +256,17 @@ void setup() {
   // blocking, so a flaky card must not stall the 20s poll loop.
   sdSPI.begin(CYD_SD_SCLK, CYD_SD_MISO, CYD_SD_MOSI, CYD_SD_CS);
   STATE.sdOk = SD.begin(CYD_SD_CS, sdSPI, 20000000); // 20 MHz SPI
+  refreshSdCapacityCache();  // seed the Device Stats cache before the first render(); still
+                              // single-threaded here (networkTask hasn't started), so no lockSD needed
+
+  // Settings/config load from internal flash (NVS) -- unconditional, since
+  // it no longer depends on the SD card at all (see sd_store.cpp's
+  // loadRuntimeConfig()). SD is only needed below for the genuinely
+  // SD-only assets (env/weather caches, splash, cats).
+  loadRuntimeConfig();
+  currentPage = cfgBootPage;   // honor the flash "boot_page" override
+  applyEffectiveBrightness();  // honor brightness (+ night mode) from flash
   if (STATE.sdOk) {
-    loadRuntimeConfig();
-    currentPage = cfgBootPage;  // honor the /config.json "boot_page" override
-    applyEffectiveBrightness();  // honor brightness (+ night mode) from /config.json
     loadEnvCache();     // show last-known BTC/weather immediately, before any live fetch
     loadWeatherCache(); // full Weather-page snapshot (hourly/daily) if present
     showBootSplash();   // optional /splash.bmp, briefly, before the WiFi spinner
@@ -257,10 +277,11 @@ void setup() {
   gfx.applyRuntimeConfig(cfgScreenRotation, cfgTouchXMin, cfgTouchXMax, cfgTouchYMin, cfgTouchYMax, cfgTouchOffsetRotation);
   logDiag((String("boot reason=") + resetReasonStr()).c_str());
 
-  // First-boot config portal: only when there's an SD card to persist the
-  // result to and no WiFi SSID has ever been configured. See ap_setup.cpp's
-  // runApSetup().
-  if (STATE.sdOk && cfgWifiSsid.length() == 0) {
+  // First-boot config portal: whenever no WiFi SSID has ever been
+  // configured (WIFI_SSID left blank in config.h and none saved to flash
+  // yet). No longer gated on the SD card -- WiFi creds now persist to flash
+  // regardless. See ap_setup.cpp's runApSetup().
+  if (cfgWifiSsid.length() == 0) {
     runApSetup();  // blocks until configured, then restarts -- never returns
   }
 
@@ -295,7 +316,7 @@ void loop() {
 
   // Anti-retention pixel shift. In cat mode the resulting shiftDirty is
   // consumed by gifTick's own presentFrame (placeholder included); on pages
-  // 0-4 the render() below repaints at the new offset right away.
+  // 0-3 the render() below repaints at the new offset right away.
   pixelShiftTick(now);
 
   // Night mode: applies regardless of page/catMode/settings state, on its
@@ -340,6 +361,11 @@ void loop() {
     // Weather overlay is also static (forecast data only refreshes on the
     // poll cadence via networkTask). Redraw only on pixel-shift so the anti-
     // retention orbit still works while the page is open.
+    if (shiftDirty) render();
+  } else if (devicePageOpen) {
+    // Device Stats overlay: same static treatment as the Weather overlay --
+    // its CPU/flash/RAM/SD figures only need to move on the next poll or
+    // pixel-shift step, not every loop pass.
     if (shiftDirty) render();
   } else if (catMode) {
     // Cats animate frame-by-frame; they own the whole screen (no footer or
@@ -414,16 +440,26 @@ void loop() {
       // Any tap dismisses the Weather overlay back to the status page.
       weatherPageOpen = false;
       render();
+    } else if (devicePageOpen) {
+      // Any tap dismisses the Device Stats overlay, same as Weather.
+      devicePageOpen = false;
+      render();
     } else if (!catMode && tx >= PULSE_HIT_X0 && tx < PULSE_HIT_X1 &&
                ty >= PULSE_HIT_Y0 && ty < PULSE_HIT_Y1) {
       settingsScreen = SET_LIST;
       settingsScrollOffset = 0;
+      settingsListDragBegin(tx, ty);  // seed drag state fresh -- this is a real new gesture
       renderSettings();
     } else if (!catMode && currentPage == 0 &&
                tx >= WEATHER_HIT_X0 && tx < WEATHER_HIT_X1 &&
                ty >= WEATHER_HIT_Y0 && ty < WEATHER_HIT_Y1) {
       // Tap the status-page weather card → open Weather overlay.
       weatherPageOpen = true;
+      render();
+    } else if (!catMode && tx >= DEVICE_HIT_X0 && tx < DEVICE_HIT_X1 &&
+               ty >= DEVICE_HIT_Y0 && ty < DEVICE_HIT_Y1) {
+      // Tap the footer's CPU/ROM/RAM stats line → open Device Stats overlay.
+      devicePageOpen = true;
       render();
     } else {
       bool isRight = (tx >= 160);

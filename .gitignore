@@ -5,8 +5,11 @@ secrets.local.json
 
 # Generated cat GIF library (regenerate with prepare_cat_gifs.py; too big to track)
 cats/
+# pull_giphy_cats.py's raw download dir before prepare_cat_gifs.py processes it (~2.5GB)
+cats_raw/
 
 # Python + editor/runtime cruft
 __pycache__/
 *.pyc
 .claude/
+.DS_Store

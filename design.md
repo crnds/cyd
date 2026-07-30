@@ -11,6 +11,13 @@
 | **Workspace** | `/Users/dusitn/cyd` |
 | **Branch context** | `feat/sd-cats-and-market-proxy` (7 pages after long-trend + BTC-ticker removals; battery save) |
 
+> **⚠ Superseded in places.** Written 2026-07-20; the board has since dropped
+> to **5** touch-cycled pages and the BTC ticker page/candles/chart were
+> removed entirely (`af2e232`), with further UI changes since (`a51cafe`,
+> `707ed83`). Treat page counts, the "8 pages" figure, and BTC-tile details
+> below as historical rather than current — `CLAUDE.md` and the code are the
+> source of truth for present behavior.
+
 ---
 
 ## Overview

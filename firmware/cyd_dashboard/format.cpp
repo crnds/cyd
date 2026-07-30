@@ -93,14 +93,42 @@ int staticRamPercent(uint32_t &usedOut) {
   return (int)((float)used / TOTAL_RAM_BYTES * 100 + 0.5f);
 }
 
-// SD card space in use, queried live each time the page renders — cheap FAT
-// bookkeeping reads, not a scan of the card. -1 (with usedOut/totalOut
-// untouched) when the card never mounted.
-int sdCapacityPercent(uint64_t &usedOut, uint64_t &totalOut) {
+// SD card space in use -- cheap FAT bookkeeping reads, not a scan of the
+// card, but SD.totalBytes()/usedBytes() still touch the HSPI bus, so this raw
+// query must only run under lockSD()/unlockSD() from networkTask (core 0),
+// never from the render core. -1 (with usedOut/totalOut untouched) when the
+// card never mounted.
+static int sdCapacityPercentRaw(uint64_t &usedOut, uint64_t &totalOut) {
   if (!STATE.sdOk) return -1;
   uint64_t total = SD.totalBytes();
   uint64_t used = SD.usedBytes();
   usedOut = used;
   totalOut = total;
   return total ? (int)((float)used / total * 100 + 0.5f) : -1;
+}
+
+// cachedSd* are plain (non-atomic) globals: refreshSdCapacityCache() (core 0,
+// under sdMutex) is the only writer, drawDevicePage() (core 1) the only
+// reader, and a torn read of a multi-byte value would at worst show one
+// stale/mixed frame of a cosmetic stat -- self-correcting next refresh, and
+// far cheaper than a lock render() can't take (see state.h's note on why
+// stateMutex -> sdMutex nesting is forbidden).
+static int cachedSdPercent = -1;
+static uint64_t cachedSdUsedBytes = 0;
+static uint64_t cachedSdTotalBytes = 0;
+
+void refreshSdCapacityCache() {
+  uint64_t used = 0, total = 0;
+  lockSD();
+  int pct = sdCapacityPercentRaw(used, total);
+  unlockSD();
+  cachedSdPercent = pct;
+  cachedSdUsedBytes = used;
+  cachedSdTotalBytes = total;
+}
+
+int cachedSdCapacityPercent(uint64_t &usedOut, uint64_t &totalOut) {
+  usedOut = cachedSdUsedBytes;
+  totalOut = cachedSdTotalBytes;
+  return cachedSdPercent;
 }

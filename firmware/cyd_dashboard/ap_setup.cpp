@@ -1,19 +1,38 @@
-// First-boot WiFi config portal. Entered only when STATE.sdOk is true AND
-// cfgWifiSsid is empty after loadRuntimeConfig() runs — i.e. WIFI_SSID was
-// left blank in config.h and no wifi_ssid key has ever been saved to
-// /config.json. Requires the SD card because /config.json is the only
-// writable place credentials can persist (config.h is baked into flash at
-// compile time); with no card there's nowhere to save to, so this is
-// skipped and connectWifi() just runs with the (empty) compiled defaults as
-// it always has.
+// First-boot WiFi config portal. Entered only when cfgWifiSsid is empty
+// after loadRuntimeConfig() runs — i.e. WIFI_SSID was left blank in config.h
+// and no wifi_ssid key has ever been saved to flash. Credentials persist to
+// internal flash (NVS, see sd_store.cpp's saveWifiCredsToFlash()), not the
+// SD card, so this runs regardless of whether a card is present.
 //
 // Runs entirely inside setup(), before networkTask/loop() start, so it's
 // free to block: brings up an open softAP + captive portal, waits for a
-// phone to submit new WiFi creds, writes them to /config.json, then
-// ESP.restart()s into the normal boot path (which now finds a saved
-// wifi_ssid and skips this on the next boot). Never returns normally.
-// Split out of cyd_dashboard.ino.
+// phone to submit new WiFi creds, writes them to flash, then ESP.restart()s
+// into the normal boot path (which now finds a saved wifi_ssid and skips
+// this on the next boot). Never returns normally. Split out of
+// cyd_dashboard.ino.
 #include "state.h"
+
+// Scanned SSIDs are attacker-controlled (any nearby AP can broadcast
+// whatever it wants) and get spliced into the setup page's HTML below as an
+// <option value="..."> attribute -- unescaped, a crafted SSID like
+// `"><script>...` could inject markup/script into a page served, unauthed,
+// over an open AP to whichever phone joins it during first-boot setup.
+static String htmlEscape(const String& in) {
+  String out;
+  out.reserve(in.length());
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    switch (c) {
+      case '&': out += "&amp;"; break;
+      case '<': out += "&lt;"; break;
+      case '>': out += "&gt;"; break;
+      case '"': out += "&quot;"; break;
+      case '\'': out += "&#39;"; break;
+      default: out += c;
+    }
+  }
+  return out;
+}
 
 static void drawApSetupScreen(const char* apName, IPAddress ip, int stations) {
   g->fillScreen(COL_BG);
@@ -62,7 +81,7 @@ void runApSetup() {
 
   String options;
   for (int i = 0; i < found; i++) {
-    options += "<option value=\"" + WiFi.SSID(i) + "\">";
+    options += "<option value=\"" + htmlEscape(WiFi.SSID(i)) + "\">";
   }
 
   DNSServer dnsServer;
@@ -98,7 +117,7 @@ void runApSetup() {
       server.send(400, "text/plain", "SSID required");
       return;
     }
-    saveWifiCredsToSD(ssid, password);
+    saveWifiCredsToFlash(ssid, password);
     logDiag("ap_setup_saved_rebooting");
     server.send(200, "text/html",
       "<html><body style='font-family:sans-serif;background:#08090d;color:#f1f5f9;padding:24px'>"

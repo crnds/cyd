@@ -20,6 +20,7 @@ Then: cp -r cats /Volumes/<SD>/cats
 
 import argparse
 import hashlib
+import http.client
 import os
 import re
 import shutil
@@ -107,17 +108,21 @@ def resize_gif(resizer, binary, src, dst, w, h, colors, max_frames, lossy):
             # resize don't corrupt delta-encoded frames), then thin + resize.
             frames = src
             tmp_co = None
-            if idx and len(idx) < n:
-                tmp_co = src + ".co.gif"
-                subprocess.run([binary, src, "-coalesce", tmp_co],
-                               check=True, capture_output=True, timeout=180)
-                sel = ",".join(str(i) for i in idx)
-                frames = f"{tmp_co}[{sel}]"
-            cmd = [binary, frames, "-coalesce", "-resize", f"{w}x{h}>",
-                   "-fuzz", "3%", "-layers", "Optimize", "-colors", str(colors), dst]
-            subprocess.run(cmd, check=True, capture_output=True, timeout=180)
-            if tmp_co and os.path.exists(tmp_co):
-                os.remove(tmp_co)
+            try:
+                if idx and len(idx) < n:
+                    tmp_co = src + ".co.gif"
+                    subprocess.run([binary, src, "-coalesce", tmp_co],
+                                   check=True, capture_output=True, timeout=180)
+                    sel = ",".join(str(i) for i in idx)
+                    frames = f"{tmp_co}[{sel}]"
+                cmd = [binary, frames, "-coalesce", "-resize", f"{w}x{h}>",
+                       "-fuzz", "3%", "-layers", "Optimize", "-colors", str(colors), dst]
+                subprocess.run(cmd, check=True, capture_output=True, timeout=180)
+            finally:
+                # Must run even if the resize step above raises -- otherwise a
+                # failed batch leaves .co.gif temp files behind forever.
+                if tmp_co and os.path.exists(tmp_co):
+                    os.remove(tmp_co)
         return os.path.exists(dst) and os.path.getsize(dst) > 0
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         stderr = getattr(e, "stderr", b"") or b""
@@ -132,7 +137,10 @@ def download_gif(timeout=20):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead) as e:
+        # IncompleteRead isn't an OSError/URLError subclass, so a truncated
+        # response (connection dropped mid-body) would otherwise crash the
+        # whole batch instead of just skipping this one download.
         print(f"    download failed: {e}")
         return None
     if not data.startswith(GIF_MAGIC):

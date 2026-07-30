@@ -13,6 +13,12 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# The only two contexts server.html legitimately runs in: served by this
+# process itself (same-origin, no CORS needed at all), or opened directly via
+# file:// for local dev (Origin: null). Anything else hitting the destructive
+# POST endpoints below is cross-site and must be rejected outright.
+ALLOWED_ORIGIN = "http://127.0.0.1:8788"
+
 PORT = 8788
 JOB_LABEL = "com.corner.cydusage"
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % JOB_LABEL)
@@ -22,6 +28,7 @@ BATTERY_SAVE_URL = "http://127.0.0.1:8787/api/battery-save"
 LOG_OUT = "/tmp/cydusage.log"
 LOG_ERR = "/tmp/cydusage.err"
 LOG_TAIL_LINES = 40
+MAX_BODY_BYTES = 4096  # POST bodies here are tiny JSON; anything bigger is bogus/abusive
 
 
 def run(cmd):
@@ -138,11 +145,24 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def _origin_allowed(self):
+        # No Origin header at all = not a browser cross-origin request (curl,
+        # the board, etc.) — allow. Otherwise it must be this server's own
+        # origin, or "null" (server.html opened directly via file:// for
+        # local dev) — anything else is a cross-site page trying to drive
+        # /api/enable /api/disable /api/battery-save.
+        origin = self.headers.get("Origin")
+        return origin is None or origin == ALLOWED_ORIGIN or origin == "null"
+
     def _send(self, status, body, content_type):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # ACAO only for the file:// dev case (Origin: null) — same-origin
+        # fetches from server.html-as-served-here need no CORS header at all,
+        # and a blanket "*" would let any web page read this API cross-origin.
+        if self.headers.get("Origin") == "null":
+            self.send_header("Access-Control-Allow-Origin", "null")
         self.end_headers()
         self.wfile.write(body)
 
@@ -153,9 +173,10 @@ class Handler(BaseHTTPRequestHandler):
         # CORS preflight — the battery-save POST sends a JSON Content-Type
         # header, which makes it a non-simple request browsers preflight.
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        if self._origin_allowed() and self.headers.get("Origin") == "null":
+            self.send_header("Access-Control-Allow-Origin", "null")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -178,6 +199,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, b"not found", "text/plain")
 
     def do_POST(self):
+        if not self._origin_allowed():
+            self._send(403, b"forbidden origin", "text/plain")
+            return
         if self.path == "/api/enable":
             ok, detail = do_enable()
             self._send_json({"ok": ok, "detail": detail})
@@ -192,6 +216,9 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 length = 0
+            if length > MAX_BODY_BYTES:
+                self._send_json({"ok": False, "detail": "body too large"}, status=413)
+                return
             raw = self.rfile.read(length) if length > 0 else b"{}"
             try:
                 doc = json.loads(raw.decode("utf-8") or "{}")

@@ -26,12 +26,14 @@ static const int BRIGHTNESS_VALUES[5] = {0, 64, 128, 191, 255};
 static const char* const BRIGHTNESS_LABELS[5] = {"0%", "25%", "50%", "75%", "100%"};
 
 // Config keys persisted through the generic queue (see pendingConfigSave in
-// state.h and sd_store.cpp's saveIntConfigToSD()/cyd_dashboard.ino's
+// state.h and sd_store.cpp's saveIntConfigToFlash()/cyd_dashboard.ino's
 // networkTask()). Index here must match the id passed to queueConfigSave()
-// from each setting's apply().
+// from each setting's apply(). These are also the NVS key names used in
+// flash (Preferences), which caps key length at 15 chars -- poll_sec and
+// night_mode are shortened from their old /config.json names for that limit.
 const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT] = {
-  "brightness", "poll_interval_sec", "pixel_shift_min", "boot_page", "cat_shuffle_sec",
-  "night_mode_preset", "screen_rotation", "show_countdown", "battery_save"
+  "brightness", "poll_sec", "pixel_shift_min", "boot_page", "cat_shuffle_sec",
+  "night_mode", "screen_rotation", "show_countdown", "battery_save"
 };
 
 void queueConfigSave(uint8_t keyId, int32_t value) {
@@ -74,18 +76,21 @@ static void applyBrightness(int v) {
 static int getCurrentNone() { return -1; }
 
 static const int ACTION_VALUES[1] = {0};  // dummy value: these rows are actions, not options
-static void applyRestart(int v) { ESP.restart(); }
+// Arms the restart rather than calling ESP.restart() directly here on core 1
+// -- that could cut power to core 0 mid-SD-write; networkTask drains
+// pendingRestart between its own sequential SD operations instead.
+static void applyRestart(int v) { pendingRestart = true; }
 static const char* const RESTART_LABELS[1] = {"RESTART"};
 
-// Erasing the SD card's WiFi creds + the restart-into-AP-portal must both
-// happen on networkTask (core 0) -- see forgetWifiFromSD()/pendingForgetWifi
+// Erasing the flash-saved WiFi creds + the restart-into-AP-portal must both
+// happen on networkTask (core 0) -- see forgetWifiFromFlash()/pendingForgetWifi
 // -- so apply() here just arms the flag and returns immediately.
 static void applyForgetWifi(int v) { pendingForgetWifi = true; }
 static const char* const FORGET_WIFI_LABELS[1] = {"FORGET WIFI"};
 
 // Poll interval: how often networkTask fetches /api/usage from the Mac.
-// Values are seconds (matches the "poll_interval_sec" config key directly,
-// no unit conversion needed at the SD-persistence layer).
+// Values are seconds (matches the "poll_sec" NVS key directly, no unit
+// conversion needed at the flash-persistence layer).
 static const int POLL_VALUES[5] = {5, 10, 20, 60, 300};
 static const char* const POLL_LABELS[5] = {"5s", "10s", "20s", "60s", "5m"};
 // Leaf shows the *user* preference, not the Battery-Save-stretched effective
@@ -110,13 +115,14 @@ static void applyPixelShift(int v) {
   queueConfigSave(CFGKEY_PIXEL_SHIFT, v);
 }
 
-// Boot page: which of the 7 pages currentPage starts on next boot. All 7
+// Boot page: which of the 6 pages currentPage starts on next boot. All 6
 // (including the cat/mixed pages) are valid -- render()'s switch and loop()'s
 // catMode check already handle those generically regardless of how
-// currentPage got set, no special-casing needed.
-static const int PAGE_VALUES[7] = {0, 1, 2, 3, 4, 5, 6};
-static const char* const PAGE_LABELS[7] = {
-  "STATUS", "PROJECTS", "HOME", "DEVICE", "LIMITS", "CATS", "MIXED"
+// currentPage got set, no special-casing needed. Device Stats isn't in this
+// list -- it's an overlay (devicePageOpen), not a currentPage value.
+static const int PAGE_VALUES[5] = {0, 1, 2, 3, 4};
+static const char* const PAGE_LABELS[5] = {
+  "STATUS", "PROJECTS", "LIMITS", "CATS", "MIXED"
 };
 static int getCurrentBootPage() { return cfgBootPage; }
 static void applyBootPage(int v) {
@@ -206,7 +212,7 @@ static const SettingDef SETTINGS[] = {
     4, 1, 4, PIXEL_SHIFT_VALUES, PIXEL_SHIFT_LABELS, 2, false,
     getCurrentPixelShift, applyPixelShift },
   { "BOOT PAGE", "BOOT PAGE", "PAGE SHOWN AFTER POWER-ON", "TAP A PAGE TO APPLY",
-    4, 2, 7, PAGE_VALUES, PAGE_LABELS, 1, false,
+    3, 2, 5, PAGE_VALUES, PAGE_LABELS, 1, false,
     getCurrentBootPage, applyBootPage },
   { "RESTART", "RESTART", "", "TAP TWICE TO RESTART THE BOARD",
     1, 1, 1, ACTION_VALUES, RESTART_LABELS, 2, true,
@@ -320,9 +326,10 @@ static void drawSettingsLeaf() {
     g->print(def.subtitle);
   }
 
-  // Only lit when the current value is an exact preset -- a value loaded from
-  // an older/hand-edited config.json just shows no selection until the user
-  // taps one, rather than lying about which preset is "closest". Destructive
+  // Only lit when the current value is an exact preset -- a value migrated
+  // from an older config or otherwise off-preset just shows no selection
+  // until the user taps one, rather than lying about which preset is
+  // "closest". Destructive
   // rows have no "current value" -- they're armed/unarmed instead (see
   // confirmArmedRow), so getCurrent() isn't even called for them.
   int current = def.destructive ? -1 : def.getCurrent();
@@ -362,6 +369,11 @@ void renderSettings() {
   presentFrame();
 }
 
+// True only between a real settingsListDragBegin() and its matching End/abandon
+// (see the drag-gesture trio below) -- declared up here too since
+// handleSettingsTouch's BACK case needs to clear it.
+static bool dragActive = false;
+
 // Touch handling for SET_LEAF (called from loop() on a fresh debounced tap,
 // same as before). SET_LIST no longer routes through here at all -- see the
 // drag-gesture trio below.
@@ -370,6 +382,12 @@ bool handleSettingsTouch(int32_t tx, int32_t ty, uint32_t now, bool catMode) {
   if (tx >= SET_BACK_X0 && tx < SET_BACK_X1 && ty >= SET_BACK_Y0 && ty < SET_BACK_Y1) {
     confirmArmedRow = -1;
     settingsScreen = SET_LIST;
+    // This same physical touch is still down and will generate Move/End calls
+    // against the list next -- but it already did its job (leaf -> list) via
+    // this tap, so it must NOT also be replayed as a list tap/scroll on release
+    // (that previously reopened this same leaf, or -- since BACK's hit-box is
+    // the list's own close-box coords -- could otherwise close Settings outright).
+    dragActive = false;
     renderSettings();
     return true;
   }
@@ -413,18 +431,25 @@ bool handleSettingsTouch(int32_t tx, int32_t ty, uint32_t now, bool catMode) {
 static int32_t dragLastX = 0, dragLastY = 0;
 static int32_t dragTotalMoveY = 0;  // cumulative |dy| this gesture, px
 static const int32_t DRAG_TAP_PX = 8;  // below this total movement, treat release as a tap
+// dragActive itself is declared above handleSettingsTouch(), which also needs
+// it. Without it, a touch that transitions INTO SET_LIST by some other path
+// (the pulse-dot tap, or BACK from a leaf) would fall through to Move/End
+// using whatever dragLastX/Y a previous, unrelated gesture left behind -- see
+// the callers below for how each transition sets this correctly.
 
 void settingsListDragBegin(int32_t tx, int32_t ty) {
   dragLastX = tx;
   dragLastY = ty;
   dragTotalMoveY = 0;
+  dragActive = true;
 }
 
 void settingsListDragMove(int32_t tx, int32_t ty) {
+  if (!dragActive) return;
   int32_t dy = ty - dragLastY;
   dragLastX = tx;
-  if (dy == 0) return;
   dragLastY = ty;
+  if (dy == 0) return;
   dragTotalMoveY += (dy < 0) ? -dy : dy;
 
   int newOffset = settingsScrollOffset - dy;  // drag finger up -> scroll list down (reveal later rows)
@@ -437,6 +462,9 @@ void settingsListDragMove(int32_t tx, int32_t ty) {
 }
 
 void settingsListDragEnd(bool catMode) {
+  if (!dragActive) return;  // this touch never went through Begin -- e.g. the same
+                             // press that just transitioned in via BACK; ignore its release
+  dragActive = false;
   if (dragTotalMoveY >= DRAG_TAP_PX) return;  // was a scroll, not a tap -- nothing else to do
   int32_t tx = dragLastX, ty = dragLastY;
 

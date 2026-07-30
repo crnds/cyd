@@ -25,9 +25,29 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-# Default GIPHY API key provided by the user
-DEFAULT_API_KEY = "qYVBNT7XCKcZlxbnzabw1QNLoYqX8AFu"
 GIF_MAGIC = (b"GIF87a", b"GIF89a")
+GIPHY_MAX_OFFSET = 4999  # GIPHY search caps offset+limit around 5000 results total
+
+
+def load_giphy_api_key():
+    """GIPHY_API_KEY env var, then secrets.local.json (repo root, gitignored,
+    same convention as usage_server.py's WEATHER_API_KEY). No hardcoded
+    fallback -- a key must never be committed to source."""
+    env_key = os.environ.get("GIPHY_API_KEY")
+    if env_key:
+        return env_key
+    secrets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "secrets.local.json")
+    if not os.path.exists(secrets_path):
+        return None
+    try:
+        with open(secrets_path, "r") as f:
+            return (json.load(f) or {}).get("GIPHY_API_KEY")
+    except Exception as e:
+        print(f"[warn] failed reading secrets.local.json: {type(e).__name__}: {e}")
+        return None
+
+
+DEFAULT_API_KEY = load_giphy_api_key()
 
 # Attempt to import resizing helpers from prepare_cat_gifs.py
 try:
@@ -93,11 +113,19 @@ def get_existing_raw_gifs(raw_dir):
             path = os.path.join(raw_dir, name)
             try:
                 size = os.path.getsize(path)
-                # Ensure it's a valid non-empty file
-                if size > 0:
-                    total_bytes += size
-                    gif_id = name[6:-4]  # Extract ID from 'giphy_<id>.gif'
-                    seen_ids.add(gif_id)
+                if size == 0:
+                    continue
+                # A truncated download (e.g. killed mid-write on a previous
+                # run) can leave a non-empty file that isn't a real GIF --
+                # size alone would count it toward the target and toward
+                # seen_ids, permanently skipping a re-download of that id.
+                with open(path, "rb") as f:
+                    header = f.read(6)
+                if not header.startswith(GIF_MAGIC):
+                    continue
+                total_bytes += size
+                gif_id = name[6:-4]  # Extract ID from 'giphy_<id>.gif'
+                seen_ids.add(gif_id)
             except OSError:
                 pass
     return total_bytes, seen_ids
@@ -168,7 +196,10 @@ def format_size(size_bytes):
 
 def main():
     ap = argparse.ArgumentParser(description="Download and resize cat GIFs from GIPHY.")
-    ap.add_argument("--api-key", default=DEFAULT_API_KEY, help="GIPHY API key")
+    ap.add_argument("--api-key", default=DEFAULT_API_KEY,
+                     help="GIPHY API key. Prefer the GIPHY_API_KEY env var or "
+                          "secrets.local.json's GIPHY_API_KEY field over this flag -- "
+                          "a CLI arg is visible to any local user via `ps`/shell history.")
     ap.add_argument("--target-gb", type=float, default=2.5, help="Target library size in GB (default: 2.5)")
     ap.add_argument("--raw-dir", default="cats_raw", help="Directory for raw GIPHY GIFs (default: cats_raw)")
     ap.add_argument("--out-dir", default="cats", help="Board-ready resized folder (default: ./cats)")
@@ -188,6 +219,11 @@ def main():
     ap.add_argument("--queries", default="cartoon cat,kawaii cat,pusheen,cat meme,funny cat,cat animation,simons cat,garfield,grumpy cat,anime cat,pixel cat,cute kitten,nyan cat,chibi cat,cat play,cat fail,crying cat,space cat,sleeping cat,cat wiggle",
                     help="Comma-separated search terms to query from GIPHY")
     args = ap.parse_args()
+
+    if not args.api_key:
+        print("Error: no GIPHY API key found. Set the GIPHY_API_KEY env var, add "
+              "\"GIPHY_API_KEY\" to secrets.local.json, or pass --api-key.")
+        sys.exit(1)
 
     # Parse queries list
     queries = [q.strip() for q in args.queries.split(",") if q.strip()]
@@ -232,8 +268,16 @@ def main():
                     break
                 
                 offset = query_offsets[query]
+                if offset > GIPHY_MAX_OFFSET:
+                    # Past this, GIPHY returns an error rather than an empty
+                    # page, which would otherwise count toward the *global*
+                    # consecutive_api_errors abort instead of just retiring
+                    # this one query.
+                    print(f"    Offset {offset} past GIPHY's ~{GIPHY_MAX_OFFSET} cap. Query '{query}' is exhausted.")
+                    exhausted_queries.add(query)
+                    continue
                 print(f"\n--> Querying GIPHY for '{query}' (offset: {offset})...")
-                
+
                 results, rate_rem, code = query_giphy_search(args.api_key, query, limit=50, offset=offset)
                 
                 if code == 429:

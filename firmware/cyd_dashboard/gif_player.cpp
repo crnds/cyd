@@ -1,4 +1,4 @@
-// Page 6: random cat GIFs from /cats/ on the SD card, played endlessly.
+// Page 4 (of 5), CATS/GIF_PAGE: random cat GIFs from /cats/ on the SD card, played endlessly.
 // Decode + draw happen on the render core (core 1) in gifTick(); SD reads
 // there are guarded by sdMutex so they can't collide with the network task's
 // writes. Split out of cyd_dashboard.ino's "PAGE RENDERING"/"SETTINGS"
@@ -19,7 +19,7 @@ int gifMaxY = -1;
 
 uint32_t catShuffleMs = 0;  // 0 = let each GIF play to its natural end
 
-// Mixed-page (page 7) cat region bounds: starts 2px right of the usage card's
+// Mixed-page (page 5 of 5, MIXED_PAGE) cat region bounds: starts 2px right of the usage card's
 // right edge (card is x=2 w=157, edge=159) and ends 2px short of the screen's
 // right edge (161+157=318), mirroring the 2px-gap/2px-margin convention used
 // by drawStatusPage's own left/right card columns. Previously this region
@@ -309,7 +309,9 @@ static bool reopenCurrentCat() {
 void gifTick(bool offline) {
   if (!STATE.sdOk || catCount == 0 || !gif) { drawGifPlaceholder(offline); return; }
   uint32_t now = millis();
-  if (gifOpen && now < gifNextFrameMs) return;  // not time for the next frame yet
+  // (int32_t) subtraction wraps correctly across millis()'s ~49.7-day
+  // rollover, unlike a direct now < gifNextFrameMs comparison.
+  if (gifOpen && (int32_t)(now - gifNextFrameMs) < 0) return;  // not time for the next frame yet
   if (!gifOpen && !openRandomCat()) {
     drawGifPlaceholder(offline);
     gifNextFrameMs = now + 1000;  // retry opening later

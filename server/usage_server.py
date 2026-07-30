@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG_GLOB = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 PORT = 8787
+MAX_BODY_BYTES = 4096  # POST bodies here are tiny JSON; anything bigger is bogus/abusive
 SCAN_INTERVAL_SEC = 15
 # On battery (still serving): slow the jsonl tail a bit. Token pages update
 # from board polls of cached aggregates, so 30s ingest lag is invisible.
@@ -68,6 +69,14 @@ STATE = {
         "paused": False,
         "battery_save_manual": None,
     },
+    # Only wakes a loop that is idle-parked in activity_gated_loop's own
+    # clear-then-wait (see its comment below) -- it is set on every client
+    # poll (do_GET) and every power-state change, both far more often than
+    # each loop's actual fetch cadence, so it must NOT also interrupt a
+    # loop's in-flight interval sleep (each body() computes and sleeps its
+    # own sleep_sec — e.g. limits_loop's 120s/300s — via plain time.sleep,
+    # deliberately not activity_event.wait). Doing so would fire fetches on
+    # every poll instead of on-interval, risking 429s on the OAuth endpoint.
     "activity_event": threading.Event(),
     "lock": threading.Lock(),
 }
@@ -541,7 +550,11 @@ def fetch_weather_openmeteo():
     h_temps = hdoc.get("temperature_2m") or []
     h_codes = hdoc.get("weather_code") or []
     cur_time = cur.get("time") or ""
-    start_i = 0
+    # If no slot >= cur_time is found (the hourly series doesn't reach "now"),
+    # falling back to 0 would silently show the oldest/stale hours at the
+    # start of the window instead. Default past the end so the range below
+    # comes up empty -- no hourly row beats a wrong one.
+    start_i = len(h_times)
     for i, t in enumerate(h_times):
         if t[:13] >= cur_time[:13]:
             start_i = i
@@ -585,7 +598,7 @@ def fetch_weather_openmeteo():
 
 def fetch_weather_weatherapi(key):
     # forecast.json includes current + up to 14 days of hour/day slots.
-    url = (f"http://api.weatherapi.com/v1/forecast.json"
+    url = (f"https://api.weatherapi.com/v1/forecast.json"
            f"?key={key}&q=Bangkok&days=6&aqi=no&alerts=no")
     req = urllib.request.Request(url, headers={"User-Agent": "cydusage"})
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -755,7 +768,8 @@ def scan_once():
     newest_ctx = None  # {tokens, ts} of the newest event in this batch
     newest_ts = None   # exact ts of the newest event in this batch (bucketing
                         # would blur active_now's 180s window otherwise)
-    for path in glob.glob(LOG_GLOB):
+    current_paths = set(glob.glob(LOG_GLOB))
+    for path in current_paths:
         offset = STATE["offsets"].get(path)
         if offset is None:
             try:
@@ -810,6 +824,12 @@ def scan_once():
                 ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
             except ValueError:
                 continue
+            if ts.tzinfo is None:
+                # A naive ts here would later raise TypeError when compared
+                # against the aware `cutoff`/`now` below -- and by then this
+                # file's offset has already advanced, permanently dropping
+                # these events instead of retrying them next scan.
+                ts = ts.replace(tzinfo=timezone.utc)
             # The same assistant message is often written multiple
             # times while streaming, with identical usage — count once.
             msg_id = message.get("id")
@@ -840,6 +860,15 @@ def scan_once():
             if newest_ts is None or ts > newest_ts:
                 newest_ts = ts
         STATE["offsets"][path] = offset + len(consumable)
+
+    # Drop offsets for paths that no longer exist (deleted/rotated project
+    # logs) -- otherwise this dict grows for the life of the process. Safe to
+    # re-read from scratch if a path reappears: "seen" dedup (keyed on
+    # message id + requestId, retained for RETENTION) still catches re-ingested
+    # duplicates.
+    stale_paths = set(STATE["offsets"]) - current_paths
+    for path in stale_paths:
+        del STATE["offsets"][path]
 
     if new_buckets:
         with STATE["lock"]:
@@ -1023,6 +1052,10 @@ def build_report():
     }
 
 
+HEARTBEAT_LOG_INTERVAL_SEC = 300
+_last_heartbeat_log = {}  # ip -> monotonic time of last heartbeat line logged
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -1032,7 +1065,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # ACAO only for the file:// dev case (Origin: null) -- simulator.html
+        # fetches this endpoint directly from disk. A blanket "*" would let
+        # any website's JS read board usage data cross-origin over the LAN/
+        # loopback; nothing else needs CORS here (the board is not a browser,
+        # and server.html goes through control_server's proxy instead).
+        if self.headers.get("Origin") == "null":
+            self.send_header("Access-Control-Allow-Origin", "null")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1046,8 +1085,15 @@ class Handler(BaseHTTPRequestHandler):
             STATE["clients"][ip] = datetime.now(timezone.utc)
             STATE["activity_event"].set()
         if ip not in ("127.0.0.1", "::1"):
-            # One heartbeat line per board poll; local probes stay quiet.
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {ip} GET /api/usage", flush=True)
+            # Heartbeat line, throttled to once per HEARTBEAT_LOG_INTERVAL_SEC
+            # per client -- at the board's ~20s poll cadence an unthrottled
+            # line here grows /tmp/cydusage.log by ~200KB/day for no benefit,
+            # since `tail -f` just needs proof-of-life, not every single poll.
+            now_mono = time.monotonic()
+            last = _last_heartbeat_log.get(ip, 0.0)
+            if now_mono - last >= HEARTBEAT_LOG_INTERVAL_SEC:
+                _last_heartbeat_log[ip] = now_mono
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {ip} GET /api/usage", flush=True)
         self._send_json(build_report())
 
     def do_POST(self):
@@ -1061,10 +1107,22 @@ class Handler(BaseHTTPRequestHandler):
         if ip not in ("127.0.0.1", "::1"):
             self._send_json({"ok": False, "detail": "localhost only"}, status=403)
             return
+        # The only legitimate caller is control_server.py's server-side
+        # urllib proxy, which never sends an Origin header. A same-machine
+        # browser tab (any website, not just server.html) CAN still reach
+        # 127.0.0.1 directly regardless of its own origin -- the IP check
+        # above doesn't stop that CSRF path -- so any request carrying an
+        # Origin header at all is rejected here.
+        if self.headers.get("Origin") is not None:
+            self._send_json({"ok": False, "detail": "forbidden origin"}, status=403)
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
+        if length > MAX_BODY_BYTES:
+            self._send_json({"ok": False, "detail": "body too large"}, status=413)
+            return
         raw = self.rfile.read(length) if length > 0 else b"{}"
         try:
             doc = json.loads(raw.decode("utf-8") or "{}")
@@ -1089,7 +1147,19 @@ class Server(ThreadingHTTPServer):
 
 
 def start_http_server():
-    server = Server(("0.0.0.0", PORT), Handler)
+    # A bare bind failure here (e.g. EADDRINUSE from the previous instance's
+    # socket still tearing down across a fast launchd restart) used to raise
+    # straight out of main(), crash-looping launchd every ~10s. Retry with
+    # backoff instead so a transient bind failure self-heals.
+    delay = 1
+    while True:
+        try:
+            server = Server(("0.0.0.0", PORT), Handler)
+            break
+        except OSError as e:
+            log_err(f"start_http_server: bind failed ({e}), retrying in {delay}s")
+            time.sleep(delay)
+            delay = min(delay * 2, 30)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"Serving usage stats on http://0.0.0.0:{PORT}/api/usage")
     return server

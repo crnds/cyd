@@ -26,6 +26,7 @@
 #include <freertos/semphr.h>
 #include <DNSServer.h>
 #include <WebServer.h>
+#include <Preferences.h>
 
 #include "pins.h"
 #include "config.h"
@@ -124,7 +125,7 @@ void clearShiftMargins();
 bool checkHourlyFlash(bool& isEvenSecond);
 void shineTick(uint32_t nowMs);
 
-// Non-const: overridable from /config.json (see sd_store.cpp's
+// Non-const: overridable from flash (see sd_store.cpp's
 // loadRuntimeConfig). Originally set once at boot before the two tasks
 // start; also settable at runtime from the Settings page's Poll Interval
 // leaf (loop(), core 1), so it's volatile -- networkTask (core 0) reads it
@@ -133,16 +134,16 @@ void shineTick(uint32_t nowMs);
 // cfgPollIntervalSec is the user's chosen rate (what the Poll Interval leaf
 // shows/saves). POLL_INTERVAL_MS is the *effective* interval networkTask
 // uses — Battery Save may stretch it via applyEffectivePoll().
-extern uint32_t cfgPollIntervalSec;
+extern volatile uint32_t cfgPollIntervalSec;
 extern volatile uint32_t POLL_INTERVAL_MS;
 
 // ── SHARED CONSTANTS ───────────────────────────────────────
 // Internal linkage per TU (C++ global `const` default) — safe to define
 // identically in every file that includes this header; no ODR issue.
 const uint32_t TOUCH_DEBOUNCE_MS = 350;
-const int PAGE_COUNT = 7;
-const int GIF_PAGE = 5;    // 6th page (0-indexed): random cat GIFs from /cats/ on SD
-const int MIXED_PAGE = 6;  // 7th page: status + cats split
+const int PAGE_COUNT = 5;
+const int GIF_PAGE = 3;    // 4th page (0-indexed): random cat GIFs from /cats/ on SD
+const int MIXED_PAGE = 4;  // 5th page: status + cats split
 
 const int PULSE_HIT_X0 = 0, PULSE_HIT_X1 = 40, PULSE_HIT_Y0 = 214, PULSE_HIT_Y1 = 240;
 
@@ -175,6 +176,13 @@ const uint16_t COL_YELLOW = 0xFFE0;  // yellow for sun/lightning icons
 // overlay (mirrors settings' PULSE_HIT_* pattern).
 const int WEATHER_HIT_X0 = 161, WEATHER_HIT_X1 = 318;
 const int WEATHER_HIT_Y0 = 166, WEATHER_HIT_Y1 = 218;
+
+// Footer CPU/ROM/RAM stats hit-box (drawFooter()'s "CPU x%  ROM x%  RAM x%"
+// line, x0 picked to start right where the PULSE_HIT zone ends so the two
+// don't compete). Tap opens the Device Stats overlay (mirrors weatherPageOpen's
+// pattern) -- Device Stats is no longer one of the swiped PAGE_COUNT pages.
+const int DEVICE_HIT_X0 = 40, DEVICE_HIT_X1 = 210;
+const int DEVICE_HIT_Y0 = 214, DEVICE_HIT_Y1 = 240;
 
 // Battery Save top-right corner overlay: y-range of drawBatterySaveIcon()'s
 // backing box (pages.cpp), needed by gif_player.cpp to fold the icon's rows
@@ -219,7 +227,8 @@ struct UsageState {
   int weekPercent = -1;
   char weekResets[24] = "";
   long weekResetsInSec = -1;     // countdown to week reset; -1 = unknown
-  long ctxTokens = -1;       // context window of the latest session; -1 = unknown
+  int64_t ctxTokens = -1;    // context window of the latest session; -1 = unknown -- int64_t
+                             // for consistency with the other token fields (see their note above)
   int ctxPercent = -1;
   int weekModelPercent = -1; // per-model weekly limit; -1 = absent (row hidden)
   char weekModelName[24] = "";      // e.g. "Fable"
@@ -259,6 +268,9 @@ extern int cfgBootPage;
 // Weather detail overlay (opened by tapping the weather card on page 0).
 // Not a swipe-cycle page — same pattern as settingsScreen: any tap exits.
 extern bool weatherPageOpen;
+// Device Stats overlay (opened by tapping the footer's CPU/ROM/RAM stats
+// line -- DEVICE_HIT_*). Same not-a-swipe-page pattern as weatherPageOpen.
+extern bool devicePageOpen;
 enum SettingsScreen { SET_OFF, SET_LIST, SET_LEAF };
 extern SettingsScreen settingsScreen;
 extern int settingsScrollOffset;  // vertical scroll position (px) of the SET_LIST list
@@ -281,7 +293,7 @@ extern int gifMaxY;
 const int8_t SHIFT_ORBIT[8][2] = {
   {0, 0}, {1, 0}, {2, 0}, {2, -1}, {2, -2}, {1, -2}, {0, -2}, {0, -1}
 };
-extern uint32_t cfgShiftStepMs;  // dwell per step; /config.json "pixel_shift_min", 0 disables
+extern uint32_t cfgShiftStepMs;  // dwell per step; flash "pixel_shift_min", 0 disables
 extern uint8_t shiftIdx;
 extern int shiftX, shiftY;
 extern uint32_t lastShiftMs;
@@ -316,9 +328,8 @@ inline void unlockSD() { if (sdMutex) xSemaphoreGive(sdMutex); }
 // Cat Shuffle setting reads/writes it via getCurrentCatShuffle/applyCatShuffle.
 extern uint32_t catShuffleMs;
 
-// Runtime overrides for the compiled config.h defaults, loaded from an
-// optional /config.json on the SD card (see sd_store.cpp's loadRuntimeConfig).
-// Defined in cyd_dashboard.ino.
+// Runtime overrides for the compiled config.h defaults, loaded from internal
+// flash (NVS, see sd_store.cpp's loadRuntimeConfig). Defined in cyd_dashboard.ino.
 extern String cfgWifiSsid;
 extern String cfgWifiPassword;
 extern String cfgServerHost;
@@ -329,7 +340,7 @@ extern bool nightDimActive;
 const uint8_t NIGHT_MODE_DIM_VALUE = 64;  // ~25%, matches the brightness preset
 // Battery Save: floor usage-poll interval only (no backlight change). User's
 // Poll Interval preference stays stored; applyEffectivePoll() applies the floor.
-// Mode is Settings OFF/ON/AUTO (persisted as /config.json "battery_save"):
+// Mode is Settings OFF/ON/AUTO (persisted as flash key "battery_save"):
 //   0 OFF  — never floor
 //   1 ON   — always floor
 //   2 AUTO — follow Mac /api/usage power.battery_save (default)
@@ -337,7 +348,10 @@ const uint8_t NIGHT_MODE_DIM_VALUE = 64;  // ~25%, matches the brightness preset
 const int BATTERY_SAVE_OFF = 0;
 const int BATTERY_SAVE_ON = 1;
 const int BATTERY_SAVE_AUTO = 2;
-extern int cfgBatterySaveMode;
+// Written from the Settings leaf on core 1 (loop()), read from networkTask's
+// applyEffectivePoll()/batterySaveActive() call chain on core 0 -- volatile
+// like cfgPollIntervalSec above.
+extern volatile int cfgBatterySaveMode;
 extern volatile bool serverBatterySave;
 const uint32_t BATTERY_SAVE_POLL_SEC = 120;   // 2 min minimum while mode is on
 inline bool batterySaveActive() {
@@ -356,17 +370,23 @@ extern int cfgTouchYMax;
 extern int cfgTouchOffsetRotation;
 
 // Generic Settings-page persistence queue: a leaf's apply() (loop(), core 1)
-// mutates its live global directly, then queues the /config.json key/value
-// here; networkTask (core 0) drains it so the SD write never happens on the
+// mutates its live global directly, then queues the flash key/value here;
+// networkTask (core 0) drains it so the flash write never happens on the
 // render core. Defined in cyd_dashboard.ino (networkTask drains it);
 // queued from settings.cpp.
 extern volatile bool pendingConfigSave;
 extern volatile uint8_t pendingConfigKeyId;
 extern volatile int32_t pendingConfigValue;
 extern volatile bool pendingForgetWifi;
+// Restart (Settings' RESTART row) is armed here rather than calling
+// ESP.restart() directly from core 1 -- that could cut power to core 0
+// mid-SD-write (under sdMutex). networkTask drains this between its own
+// sequential SD operations, so the restart only ever happens once nothing
+// is in flight.
+extern volatile bool pendingRestart;
 
 // Config keys persisted through the generic queue above (see
-// sd_store.cpp's saveIntConfigToSD and settings.cpp's queueConfigSave).
+// sd_store.cpp's saveIntConfigToFlash and settings.cpp's queueConfigSave).
 enum ConfigKeyId {
   CFGKEY_BRIGHTNESS = 0, CFGKEY_POLL_INTERVAL, CFGKEY_PIXEL_SHIFT, CFGKEY_BOOT_PAGE,
   CFGKEY_CAT_SHUFFLE, CFGKEY_NIGHT_MODE, CFGKEY_ROTATION, CFGKEY_SHOW_COUNTDOWN,
@@ -384,7 +404,16 @@ String fmtKB(uint32_t bytes);
 String fmtGB(uint64_t bytes);
 int flashPercent(uint32_t &usedOut, uint32_t &totalOut);
 int staticRamPercent(uint32_t &usedOut);
-int sdCapacityPercent(uint64_t &usedOut, uint64_t &totalOut);
+// SD.totalBytes()/usedBytes() touch the HSPI bus that sdMutex serializes
+// between networkTask (core 0) and the render core's cat-GIF reads (core 1)
+// -- see sdMutex's contract above. refreshSdCapacityCache() does the live
+// query under lockSD()/unlockSD() and must only be called from networkTask;
+// drawDevicePage() (core 1, called from inside render()'s stateMutex-held
+// section, so it cannot also take sdMutex -- only sdMutex -> stateMutex
+// nesting is allowed, never the reverse) reads the cached result instead via
+// cachedSdCapacityPercent(), no lock needed.
+void refreshSdCapacityCache();
+int cachedSdCapacityPercent(uint64_t &usedOut, uint64_t &totalOut);
 
 // ── NETWORK (net.cpp) ──────────────────────────────────────
 void ensureMdns();
@@ -403,14 +432,17 @@ bool applyUsageJson(const String& payload, bool fromNetwork = false);
 extern bool mdnsStarted;
 
 // ── SD STORE (sd_store.cpp) ────────────────────────────────
+// Runtime settings/config now persist to internal flash (NVS, via
+// Preferences) rather than the SD card -- see loadRuntimeConfig()'s comment
+// in sd_store.cpp. SD is still used here for diagnostics and the boot splash.
 void loadRuntimeConfig();
 const char* resetReasonStr();
 void logDiag(const char* event);
 bool drawBmpFromSD(const char* path, int dx, int dy);
 void showBootSplash();
-void saveWifiCredsToSD(const String& ssid, const String& password);
-void saveIntConfigToSD(const char* key, int32_t value);
-void forgetWifiFromSD();
+void saveWifiCredsToFlash(const String& ssid, const String& password);
+void saveIntConfigToFlash(const char* key, int32_t value);
+void forgetWifiFromFlash();
 
 // ── PAGES / RENDER (pages.cpp) ─────────────────────────────
 void render();

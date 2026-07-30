@@ -10,7 +10,7 @@ Display" (CYD) — a 2.8″ 320×240 landscape touch screen. Three moving parts:
 ```
 Mac laptop                                   CYD board (ESP32, on WiFi)
 server/usage_server.py  ──HTTP /api/usage──▶ firmware/cyd_dashboard/*.ino
-(reads local logs + OAuth usage endpoint)    (polls every 20s, 7 tap-to-cycle pages)
+(reads local logs + OAuth usage endpoint)    (polls every 20s, 5 tap-to-cycle pages)
 
 simulator.html = a browser stand-in for the board, fetching the same endpoint
 ```
@@ -76,14 +76,18 @@ pages; `#sim-offline` / `#mock-data` checkboxes exercise those states.
 arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app firmware/cyd_dashboard
 ```
 Requires: `esp32:esp32` core + `LovyanGFX`, `ArduinoJson`, and `AnimatedGIF`
-(the cat player on pages 6–7) libs (`WebServer`/`DNSServer`, used by the
-first-boot AP setup portal, ship with the core, as does ESPmDNS). A
-`config.h` must exist (copy `config.example.h`); it's gitignored.
+(the CATS-page cat player on pages 6–7) libs (`WebServer`/`DNSServer`, used by the
+first-boot AP setup portal, ship with the core, as do ESPmDNS and `Preferences`,
+used for runtime config in flash). A `config.h` must exist (copy
+`config.example.h`); it's gitignored.
 
 **Flash size is 4MB on this board, partitioned as `huge_app` (3MB
 app/1MB SPIFFS, no OTA)** — confirmed against the physical board, not just
-the default assumption. This project never uses OTA or SPIFFS (all
-persistence is the SD card — see "SD card layout" below), so trading away
+the default assumption. This project never uses OTA or SPIFFS: bulk/log data
+(caches, diagnostics, cat GIFs, splash) lives on the SD card — see "SD card
+layout" below — and small runtime settings/config live in the NVS partition
+via `Preferences` (present regardless of partition scheme; unrelated to the
+SPIFFS/OTA tradeoff) — see "Runtime config" above that. So trading away
 the OTA partition for a single large app slot is free headroom with no
 downside. **Always pass `PartitionScheme=huge_app`** in the FQBN for both
 compiling and flashing — the plain default scheme (`PartitionScheme=default`,
@@ -227,25 +231,24 @@ flash storage for the scheme change to orphan.
   non-blocking reconnect in `networkTask` (core 0), and an `ESP.restart()`
   after ~15 min (`RESTART_AFTER_CYCLES`) of no WiFi.
 - **First-boot AP setup portal (`runApSetup()`).** Deliberately narrow trigger:
-  only when `STATE.sdOk` is true AND `cfgWifiSsid` is empty after
-  `loadRuntimeConfig()` (i.e. `WIFI_SSID` left blank in `config.h` and no
-  `wifi_ssid` ever saved to `/config.json`) — a genuine "never configured"
-  board, not a router-down/out-of-range retry (that's what the self-healing
-  above already handles; conflating the two would turn a transient outage
-  into an open, unattended config surface). Runs synchronously inside
-  `setup()`, before `networkTask`/`loop()` start, so it's free to block: opens
-  an **open** (no password) softAP `CYD-Setup-XXXX`, a DNS server that
-  redirects every lookup to itself (captive-portal trick), and a `WebServer`
-  serving a one-field SSID/password form (with a scanned-network `<datalist>`
-  for autocomplete) at `192.168.4.1`. Submitting writes `wifi_ssid`/
-  `wifi_password` into `/config.json` (merged with any existing keys) and
-  `ESP.restart()`s — the next boot finds a saved SSID and skips straight to
-  `connectWifi()`. No SD card means nowhere to persist to, so it's skipped
-  entirely in that case and boot proceeds exactly as before (empty-default
-  `connectWifi()` attempt, which just times out into the normal offline/cat
-  flow). The on-screen setup screen (`drawApSetupScreen`) is not part of the
-  simulator-parity rule — it's a boot-time-only, firmware-only screen, same
-  exception as the cat GIF playback.
+  only when `cfgWifiSsid` is empty after `loadRuntimeConfig()` (i.e.
+  `WIFI_SSID` left blank in `config.h` and no `wifi_ssid` ever saved to
+  flash) — a genuine "never configured" board, not a router-down/out-of-range
+  retry (that's what the self-healing above already handles; conflating the
+  two would turn a transient outage into an open, unattended config surface).
+  Runs synchronously inside `setup()`, before `networkTask`/`loop()` start, so
+  it's free to block: opens an **open** (no password) softAP `CYD-Setup-XXXX`,
+  a DNS server that redirects every lookup to itself (captive-portal trick),
+  and a `WebServer` serving a one-field SSID/password form (with a
+  scanned-network `<datalist>` for autocomplete) at `192.168.4.1`. Submitting
+  writes `wifi_ssid`/`wifi_password` to internal flash (NVS, via
+  `saveWifiCredsToFlash()`) and `ESP.restart()`s — the next boot finds a saved
+  SSID and skips straight to `connectWifi()`. Credentials persist to flash
+  regardless of whether an SD card is present, so this portal runs on any
+  never-configured board, card or no card. The on-screen setup screen
+  (`drawApSetupScreen`) is not part of the simulator-parity rule — it's a
+  boot-time-only, firmware-only screen, same exception as the cat GIF
+  playback.
 - **Offline = the cat GIFs + an "OFFLINE" banner**, not a dimmed dashboard.
   `loop()` computes
   `catMode = (currentPage == GIF_PAGE) || (currentPage == MIXED_PAGE) || offline`,
@@ -282,9 +285,9 @@ flash storage for the scheme change to orphan.
   Pixel Shift, Boot Page, Cat Shuffle, Night Mode, Battery Save, Rotation,
   Show Countdown) persist through one generic queue
   (`pendingConfigSave`/`pendingConfigKeyId`/`pendingConfigValue` →
-  `saveIntConfigToSD()`, drained by `networkTask` on core 0 so the SD write
+  `saveIntConfigToFlash()`, drained by `networkTask` on core 0 so the flash write
   never happens on the render core). Forget WiFi is the string-key exception
-  and gets its own small SD function. Destructive rows (`destructive: true`,
+  and gets its own small flash function. Destructive rows (`destructive: true`,
   e.g. Restart, Forget WiFi) share one two-tap **confirm-arm** mechanic
   (`confirmArmedRow`/`confirmArmedMs`, ~4s window) rather than a modal dialog
   — the whole area is `settingsScreen`/`loop()`-driven, not modal. `loop()`'s
@@ -301,34 +304,38 @@ flash storage for the scheme change to orphan.
   `appendArchiveRow`/`saveEnvCache` under `fetchUsage`'s SD block); nothing takes
   `sdMutex` while holding `stateMutex`, so `render()` never blocks on the card.
   (The display bus is VSPI and stays single-core, so it needs no such lock.)
+- **Runtime config lives in internal flash (NVS via `Preferences`), not the
+  SD card** — so settings and WiFi credentials work with no SD card present
+  at all (`sd_store.cpp`, namespace `"cydcfg"`; `loadRuntimeConfig()` reads,
+  `saveIntConfigToFlash()`/`saveWifiCredsToFlash()`/`forgetWifiFromFlash()`
+  write). A key simply absent from flash means "use the compiled `config.h`
+  default" — never an error. Keys (NVS caps names at 15 chars, so a few are
+  shortened from their old `/config.json` names): `wifi_ssid`,
+  `wifi_password`, `server_host`, `server_port`, `brightness` (0-255),
+  `poll_sec` (clamped 5-3600), `screen_rotation` (1 normal / 3 flipped 180° —
+  see the Settings area's Rotation note above), `touch_x_min`/`touch_x_max`/
+  `touch_y_min`/`touch_y_max`/`touch_offset` (physical touch calibration,
+  board-specific, not exposed in the on-device Settings UI), `pixel_shift_min`
+  (minutes per anti-retention orbit step, clamped 0-60, 0 = off), `boot_page`
+  (0-6, which page `currentPage` starts on), `cat_shuffle_sec` (0-300, forces
+  a cat GIF to rotate before its natural end; 0 = always play to the end),
+  `night_mode` (0/1, fixed 23:00-07:00 auto-dim to 25%), `show_countdown`
+  (0/1, default 1 — green reset bars under 5h/week + analog clock timer
+  wedge; green reset hand always stays), `battery_save` (0/1/2). All of these
+  except `wifi_ssid`/`wifi_password`/`server_host`/`server_port`/the touch
+  calibration keys are also settable at runtime from the on-device Settings
+  area (see above) — lets a set-once board be retuned without reflashing.
+  **One-time migration:** if a board previously ran SD-based config, the
+  first boot of this firmware imports any existing `/config.json` into flash
+  (`migrateLegacyConfigIfNeeded()`, gated on an NVS `migrated` flag so it only
+  ever runs once) so upgrading doesn't lose an already-configured board's
+  WiFi/settings; the old file is left on the card untouched afterward.
 - **SD card layout** (all optional; every read/write no-ops when `sdOk` is
   false, and any missing file is treated as "absent", never an error). All SD
   I/O runs on `networkTask` (core 0) — never add SD access to `loop()`:
-  - `/config.json` — runtime overrides for the compiled `config.h`
-    (`loadRuntimeConfig`): `wifi_ssid`, `wifi_password`, `server_host`,
-    `server_port`, `brightness` (0-255), `poll_interval_sec` (clamped 5-3600;
-    Battery Save may floor the *effective* poll to ≥120s without changing
-    this preference), `screen_rotation` (1 normal / 3 flipped 180° — see the
-    Settings area's Rotation note above), `touch_x_min`/`touch_x_max`/
-    `touch_y_min`/`touch_y_max`/`touch_offset_rotation` (physical touch
-    calibration, board-specific, not exposed in the on-device Settings UI),
-    `pixel_shift_min` (minutes per anti-retention orbit step, clamped 0-60,
-    0 = off), `boot_page` (0-6, which page `currentPage` starts on),
-    `cat_shuffle_sec` (0-300, forces a cat GIF to rotate before its natural
-    end; 0 = always play to the end), `night_mode_preset` (0/1, fixed
-    23:00-07:00 auto-dim to 25%), `show_countdown` (0/1, default 1 — green
-    reset bars under 5h/week + analog clock timer wedge; green reset hand
-    always stays), `battery_save` (0=OFF / 1=ON / 2=AUTO, default AUTO).
-    All of these except `wifi_ssid`/`wifi_password`/`server_host`/
-    `server_port`/the touch calibration keys are also settable at runtime
-    from the on-device Settings area — lets a set-once board be retuned
-    without reflashing or pulling the SD card.
-  - `/last_usage.json` — last-good `/api/usage` blob (restored at boot; power
-    flags from cache are **not** applied so a stale `battery_save` cannot
-    floor polls after reboot).
-  - `/last_env.json` — last BTC price + temp/code for cold-boot tiles.
-  - `/weather.json` — full weather snapshot (hourly/daily) for the weather
-    overlay after reboot without the Mac.
+  - `/last_usage.json` — last-good `/api/usage` blob; `/last_env.json` — last
+    BTC/weather. Both restored at boot so the dashboard shows real (if stale)
+    data and the BTC/weather tiles aren't blank while the Mac is unreachable.
   - `/archive.csv` — fine-grained **one row per poll**
     (~20s, unbounded, ~1GB/yr) for off-device analysis; NOT shown on screen.
     There is **no** `/daily_log.csv` / 30-day on-device trend anymore.
@@ -337,9 +344,9 @@ flash storage for the scheme change to orphan.
   - `/splash.bmp` — optional 320×240 24-bit boot splash, shown ~1.5s before the
     WiFi spinner (`drawBmpFromSD`/`showBootSplash`). A self-hosted asset loaded
     from SD rather than baked into the near-full flash; absent → no splash.
-  - `/cats/*.gif` — the cat GIF library for pages 6–7 (see the GIF-player note
-    above). Prepared board-side by `prepare_cat_gifs.py` (downloads from
-    Cataas, resizes to ≤320×240, thins frames, optimizes with gifsicle);
+  - `/cats/*.gif` — the CATS-page cat GIF library (see the GIF-player note above).
+    Prepared board-side by `pull_giphy_cats.py` / `prepare_cat_gifs.py` (downloads
+    from GIPHY, resizes to ≤320×240, thins frames, optimizes with gifsicle);
     absent → the cat pages show the "CATS" placeholder instead of playing.
 
 ## Conventions

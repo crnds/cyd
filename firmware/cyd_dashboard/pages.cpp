@@ -10,6 +10,12 @@ static const char* const WDAY_ABBR[7] = {
   "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
 };
 
+// Keep a quiet gutter at the physical panel's right edge on every composed
+// frame. Applying it at presentation time makes the inset uniform across all
+// dashboard pages, settings, overlays, and offline/cat states.
+static const int SCREEN_RIGHT_PADDING = 4;
+static const int FOOTER_RIGHT_PADDING = 8;
+
 // Touch feedback: flash a 5px white border on the left or right part of the screen
 // for one frame, straight to the panel over the already-pushed frame, then re-push
 // the clean frame to clear it. Drawn on `gfx` (not `g`) so it overlays the
@@ -131,24 +137,46 @@ void presentFrame(bool fullScreen) {
       clearShiftMargins();
       shiftDirty = false;
     }
+
+    // The framebuffer remains 320px wide for touch and layout parity; mask the
+    // final four panel pixels only after the frame has been presented.
+    gfx.fillRect(320 - SCREEN_RIGHT_PADDING, 0, SCREEN_RIGHT_PADDING, 240, COL_BG);
   }
+}
+
+// Small 3-bar signal icon next to the pulse dot: green when the most recent
+// poll found WiFi up (wifiOk), rose when it didn't. Separate from the pulse
+// dot below so a WiFi outage and a server outage (WiFi fine, Mac unreachable)
+// read as two distinct signals instead of collapsing into one amber dot.
+static void drawWifiIcon() {
+  uint16_t c = wifiOk ? COL_GOOD : COL_WARN;
+  g->fillRect(20, 230, 2, 3, c);
+  g->fillRect(23, 228, 2, 5, c);
+  g->fillRect(26, 226, 2, 7, c);
 }
 
 // ── DRAWING HELPERS ────────────────────────────────────────
 void drawFooter() {
-  // Status dot: blinks once a second while the most recent poll reached the
-  // server — green on the odd second, off on the even second, so the pulse is
-  // easy to read at a glance. Static amber when coasting on cached data
-  // (haveData true but connected false — render() only gets here when
-  // haveData is true, so there's no "no data" case left to color for).
+  // Status dot: server reachability only, gated on wifiOk so it stays blank
+  // (no color) whenever WiFi itself is down — that case is already covered
+  // by drawWifiIcon() above, so lighting the dot too would misread as a
+  // server-side problem. When WiFi is up: blinks once a second while the
+  // most recent poll reached the server — green on the odd second, off on
+  // the even second, so the pulse is easy to read at a glance. Static amber
+  // when WiFi is fine but the poll still didn't reach the server (coasting
+  // on cached data).
   bool onPhase = (millis() / 1000) % 2;
-  if (!connected) g->fillCircle(14, 230, 3, COL_ACCENT);
-  else if (onPhase) g->fillCircle(14, 230, 4, COL_GOOD);
+  if (wifiOk) {
+    if (!connected) g->fillCircle(14, 230, 3, COL_ACCENT);
+    else if (onPhase) g->fillCircle(14, 230, 4, COL_GOOD);
+  }
+  drawWifiIcon();
 
   String pageStr = String(currentPage + 1) + " / " + String(PAGE_COUNT);
   g->setTextColor(COL_TEXT2);
   g->setTextSize(1);
-  g->setCursor(320 - (int)pageStr.length() * 6, 226);
+  // Keep the page label 8px from the panel edge (4px before the screen gutter).
+  g->setCursor(320 - FOOTER_RIGHT_PADDING - (int)pageStr.length() * 6, 226);
   g->print(pageStr);
 
   uint32_t flashUsed, flashTotal, ramUsed;
@@ -243,7 +271,6 @@ static void drawLimitBlock(int y, const char* title, int percent, const char* re
   }
   g->print(line);
 }
-
 // One row of the /usage-style limits page: label left, right-aligned value,
 // thin 8px bar under. percent < 0 leaves the track empty (unknown).
 static void drawLimitsRow(int y, const String& label, const String& right, int percent) {
@@ -697,12 +724,11 @@ static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int s
   // hand stays a thin single-pixel line to keep it visually distinct.
   g->drawWideLine(cx, cy, hx, hy, 2.0f, COL_TEXT);
   g->drawWideLine(cx, cy, mx, my, 1.5f, COL_TEXT);
-  g->drawLine(cx, cy, sx, sy, COL_ACCENT);
-  g->fillCircle(cx, cy, 2, COL_TEXT);
 
   // Session (5h) reset time: a thin green radius from center to rim, static
   // (unlike the hands) at whatever hour/minute the session next resets.
-  // Floating on top of other hands.
+  // Drawn before the second hand (below) so the sweeping second hand stays
+  // visible on top of it when the two overlap, instead of being masked by it.
   if (haveReset) {
     float resetAngle = ((resetHour24 % 12) + resetMinute / 60.0f) * 30.0f - 90.0f;
     float resetRad = resetAngle * PI / 180.0f;
@@ -710,6 +736,9 @@ static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int s
     int ry = cy + (int)(sinf(resetRad) * (r - 2));
     g->drawLine(cx, cy, rx, ry, COL_GOOD);
   }
+
+  g->drawLine(cx, cy, sx, sy, COL_ACCENT);
+  g->fillCircle(cx, cy, 2, COL_TEXT);
 }
 
 // Card layout: one tall left card = session/week limits (always accent
@@ -906,8 +935,10 @@ static void drawFullStatBlock(int y, const char* title, int percent, const Strin
   g->print(sub);
 }
 
-
-
+// Device Stats: not one of the swiped PAGE_COUNT pages -- reached only by
+// tapping the footer's CPU/ROM/RAM stats line (DEVICE_HIT_*), which sets
+// devicePageOpen and renders this full-screen, no footer (see render()'s
+// devicePageOpen branch, mirrors weatherPageOpen).
 static void drawDevicePage() {
   g->setTextColor(COL_TEXT);
   g->setTextSize(2);
@@ -931,7 +962,7 @@ static void drawDevicePage() {
                      fmtKB(ramUsed) + " / " + fmtKB(TOTAL_RAM_BYTES), ramColor);
 
   uint64_t sdUsed = 0, sdTotal = 0;
-  int sdPct = sdCapacityPercent(sdUsed, sdTotal);
+  int sdPct = cachedSdCapacityPercent(sdUsed, sdTotal);
   uint16_t sdColor = (sdPct >= 80) ? COL_WARN : COL_BLUE;
   drawFullStatBlock(172, "SD CARD USAGE", sdPct,
                      sdPct >= 0 ? fmtGB(sdUsed) + " / " + fmtGB(sdTotal) : "SD CARD NOT FOUND",
@@ -1184,13 +1215,21 @@ void render() {
                   (unsigned long)(micros() - startUs));
     return;
   }
+  if (devicePageOpen) {
+    g->fillScreen(COL_BG);
+    drawDevicePage();
+    drawBatterySaveIcon();
+    unlockState();
+    presentFrame();
+    Serial.printf("[timing] render() device took %luus\n",
+                  (unsigned long)(micros() - startUs));
+    return;
+  }
   g->fillScreen(COL_BG);
   switch (currentPage) {
     case 0: drawStatusPage(); break;
     case 1: drawProjectsPage(); break;  // projects (7d) + 7-day trend combined
-    case 2: drawHomePage(); break;
-    case 3: drawDevicePage(); break;
-    case 4: drawLimitsPage(); break;    // /usage-style limits panel
+    case 2: drawLimitsPage(); break;    // /usage-style limits panel
   }
   drawFooter();
   drawBatterySaveIcon();

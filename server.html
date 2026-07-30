@@ -390,6 +390,12 @@ const STATE = {
   batteryBusy: false,
 };
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
 // ── FORMATTING ─────────────────────────────────────────────
 function fmtAgo(sec) {
   if (sec == null) return '—';
@@ -463,7 +469,7 @@ async function postBatterySave(enabled) {
     const resp = await fetch(CONTROL_BASE + '/api/battery-save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: !!enabled }),
+      body: JSON.stringify({ enabled: enabled === null ? null : !!enabled }),
     });
     const doc = await resp.json();
     logEl.textContent = doc.detail || (doc.ok ? 'done' : 'failed');
@@ -639,8 +645,8 @@ function render() {
   document.getElementById('checks').innerHTML = checks.map(([name, ok, detail]) =>
     '<div class="check-row ' + (ok ? 'pass' : 'fail') + '">' +
       '<span class="mark">' + (ok ? '✓' : '✗') + '</span>' +
-      '<span>' + name + '</span>' +
-      '<span class="detail">' + detail + '</span>' +
+      '<span>' + escapeHtml(name) + '</span>' +
+      '<span class="detail">' + escapeHtml(detail) + '</span>' +
     '</div>').join('');
 
   // Clients list
@@ -651,7 +657,7 @@ function render() {
         const isLocal = c.ip === '127.0.0.1' || c.ip === '::1';
         const fresh = c.last_seen_sec <= BOARD_STALE_SEC;
         return '<div class="client-row' + (fresh ? ' fresh' : '') + '">' +
-          '<span>' + c.ip + '</span>' +
+          '<span>' + escapeHtml(c.ip) + '</span>' +
           '<span class="tag">' + (isLocal ? 'this Mac' : 'board / LAN') + '</span>' +
           '<span class="ago">' + fmtAgo(c.last_seen_sec) + '</span>' +
         '</div>';

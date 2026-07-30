@@ -143,10 +143,11 @@ static JsonDocument usageFilter() {
   return f;
 }
 
-// Apply an already-parsed (filtered) document into STATE. fetchUsage parses
-// once and reuses the doc for archive; loadCachedUsage goes through
-// applyUsageJson which deserializes then calls this.
-static bool applyUsageDoc(JsonDocument& doc, bool fromNetwork) {
+// Does the actual STATE population from an already-parsed/filtered doc.
+// Split out of applyUsageJson() so fetchUsage() -- which needs the parsed
+// doc anyway for appendArchiveRow() -- can reuse that one parse instead of
+// deserializing the same payload a second time via applyUsageJson(String).
+static bool applyUsageDoc(const JsonDocument& doc, bool fromNetwork) {
   // NTP fallback: this board has no TLS and only ever reaches the public NTP
   // pool over plain UDP/123 at boot (see connectWifi()) — on networks that
   // block outbound UDP to the internet (hotel/guest WiFi, some routers) that
@@ -168,9 +169,9 @@ static bool applyUsageDoc(JsonDocument& doc, bool fromNetwork) {
   // Parse above runs on a local doc (no shared state); take the lock only for
   // the copy into STATE below, which the render loop reads concurrently.
   lockState();
-  JsonArray projects = doc["projects"].as<JsonArray>();
+  JsonArrayConst projects = doc["projects"].as<JsonArrayConst>();
   STATE.projectCount = 0;
-  for (JsonObject p : projects) {
+  for (JsonObjectConst p : projects) {
     if (STATE.projectCount >= 5) break;
     snprintf(STATE.projectNames[STATE.projectCount], sizeof(STATE.projectNames[0]),
              "%s", p["name"] | "");
@@ -178,7 +179,7 @@ static bool applyUsageDoc(JsonDocument& doc, bool fromNetwork) {
     STATE.projectCount++;
   }
 
-  JsonArray trend = doc["trend"].as<JsonArray>();
+  JsonArrayConst trend = doc["trend"].as<JsonArrayConst>();
   for (int i = 0; i < 7; i++) {
     STATE.trend[i] = i < (int)trend.size() ? trend[i].as<int64_t>() : 0;
   }
