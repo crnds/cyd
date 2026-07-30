@@ -69,6 +69,46 @@ bool checkHourlyFlash(bool& isEvenSecond) {
   return false;
 }
 
+// Push one w×h region of the frame sprite to the panel in a single SPI
+// transaction. LGFXBase::pushImage() assumes a tightly-packed source (it
+// overwrites pixelcopy_t::src_bitwidth with w), so this calls the panel's
+// writeImage() directly: its strided-source path (src_bitwidth = the frame's
+// 320px row pitch) sets the window once and then streams every row — one DMA
+// transfer for the 16bpp sprite, per-line palette conversion into the bus's
+// DMA buffer for the 8bpp fallback — replacing the old per-row pushImage loop
+// that cost hundreds of SPI transactions per frame on the mixed page.
+// Clipping happens here because the panel-level call skips LGFXBase's own
+// clip step (the pixel-shift offset can push a region's edges past the panel).
+static void pushFrameRegion(int x, int y, int w, int h) {
+  int dx = x + shiftX, dy = y + shiftY;
+  int sx = 0, sy = 0;
+  if (dx < 0) { sx = -dx; w -= sx; dx = 0; }
+  if (dy < 0) { sy = -dy; h -= sy; dy = 0; }
+  if (dx + w > 320) w = 320 - dx;
+  if (dy + h > 240) h = 240 - dy;
+  if (w <= 0 || h <= 0) return;
+  void* buf = frame.getBuffer();
+  size_t offset = (size_t)(y + sy) * 320 + (x + sx);
+  lgfx::pixelcopy_t pc;
+  bool useDma = false;
+  if (frame.getColorDepth() == 16) {
+    pc = lgfx::pixelcopy_t((const uint16_t*)buf + offset, lgfx::rgb565_2Byte, lgfx::rgb565_2Byte);
+    useDma = esp_ptr_dma_capable(buf);
+  } else {
+    // 8bpp palette sprite: panel-side conversion via the sprite's palette,
+    // mirroring how LGFX_Sprite::pushSprite() builds its pixelcopy.
+    pc = lgfx::pixelcopy_t((const uint8_t*)buf + offset, gfx.getColorDepth(),
+                           (lgfx::color_depth_t)frame.getColorDepth(),
+                           gfx.hasPalette(), frame.getPalette());
+  }
+  pc.src_bitwidth = 320;
+  pc.src_width = w;
+  pc.src_height = h;
+  gfx.startWrite();
+  gfx.getPanel()->writeImage(dx, dy, w, h, &pc, useDma);
+  gfx.endWrite();
+}
+
 void presentFrame(bool fullScreen) {
   bool isEvenSecond = false;
   if (checkHourlyFlash(isEvenSecond)) {
@@ -79,59 +119,21 @@ void presentFrame(bool fullScreen) {
 
   if (g == &frame) {
     bool offline = !STATE.haveData;
-    // All destination coords carry the pixel-shift offset; LovyanGFX clips
-    // pushes past the panel edge, so no bounds checks are needed. After an
-    // orbit step (shiftDirty) the partial path would leave half the screen at
-    // the old offset, so that one frame falls through to the full blit below.
+    // All destination coords carry the pixel-shift offset; pushFrameRegion
+    // clips against the panel itself. After an orbit step (shiftDirty) the
+    // partial path would leave half the screen at the old offset, so that one
+    // frame falls through to the full blit below.
     if (currentPage == MIXED_PAGE && !offline && !shiftDirty) {
-      gfx.startWrite();
-      if (frame.getColorDepth() == 16) {
-        uint16_t* buf = (uint16_t*)frame.getBuffer();
-        if (fullScreen) {
-          // Push left half (0-159, height 240) + right footer (160-319, rows 220-239)
-          for (int y = 0; y < 240; y++) {
-            gfx.pushImage(shiftX, y + shiftY, 160, 1, buf + y * 320);
-          }
-          for (int y = 220; y < 240; y++) {
-            gfx.pushImage(160 + shiftX, y + shiftY, 160, 1, buf + y * 320 + 160);
-          }
-        } else {
-          // Push only the dirty band of the right half (160-319) where the GIF is drawn
-          if (gifMinY <= gifMaxY) {
-            int startY = gifMinY < 0 ? 0 : gifMinY;
-            int endY = gifMaxY >= 220 ? 219 : gifMaxY;
-            for (int y = startY; y <= endY; y++) {
-              gfx.pushImage(160 + shiftX, y + shiftY, 160, 1, buf + y * 320 + 160);
-            }
-          }
-        }
-      } else {
-        // Fallback for non-16bpp color depths
-        uint16_t rowBuf[160];
-        if (fullScreen) {
-          // Push left half (0-159, height 240)
-          for (int y = 0; y < 240; y++) {
-            frame.readRect(0, y, 160, 1, rowBuf);
-            gfx.pushImage(shiftX, y + shiftY, 160, 1, rowBuf);
-          }
-          // Push right footer (160-319, rows 220-239)
-          for (int y = 220; y < 240; y++) {
-            frame.readRect(160, y, 160, 1, rowBuf);
-            gfx.pushImage(160 + shiftX, y + shiftY, 160, 1, rowBuf);
-          }
-        } else {
-          // Push only the dirty band of the right half (160-319)
-          if (gifMinY <= gifMaxY) {
-            int startY = gifMinY < 0 ? 0 : gifMinY;
-            int endY = gifMaxY >= 220 ? 219 : gifMaxY;
-            for (int y = startY; y <= endY; y++) {
-              frame.readRect(160, y, 160, 1, rowBuf);
-              gfx.pushImage(160 + shiftX, y + shiftY, 160, 1, rowBuf);
-            }
-          }
-        }
+      if (fullScreen) {
+        // Push left half (0-159, height 240) + right footer (160-319, rows 220-239)
+        pushFrameRegion(0, 0, 160, 240);
+        pushFrameRegion(160, 220, 160, 20);
+      } else if (gifMinY <= gifMaxY) {
+        // Push only the dirty band of the right half (160-319) where the GIF is drawn
+        int startY = gifMinY < 0 ? 0 : gifMinY;
+        int endY = gifMaxY >= 220 ? 219 : gifMaxY;
+        if (endY >= startY) pushFrameRegion(160, startY, 160, endY - startY + 1);
       }
-      gfx.endWrite();
     } else {
       frame.pushSprite(shiftX, shiftY);
       clearShiftMargins();
@@ -512,14 +514,27 @@ static volatile int shineFillPx[2] = {-1, -1};
 // panel directly from shineTick (caller adds the pixel-shift offset).
 // Interior columns only (2..fillW-3, full height) so the radius-2 rounded
 // ends stay untouched; repainting non-band columns COL_GOOD erases the trail.
-static void drawShineStrip(lgfx::LovyanGFX* dst, int x, int y, int fillW, uint32_t nowMs) {
+// Only columns whose color actually changed since the previous call for the
+// same bar are written: the band moves ~2px per 30ms shineTick pass, so a
+// full repaint was ~130 tiny panel writes per strip per pass where only a
+// dozen columns change — the dominant constant CPU cost on the shine pages.
+static int shinePrevCenter[2] = {INT_MIN, INT_MIN};
+
+static inline uint16_t shineColor(int i, int center) {
+  int d = abs(i - center);
+  return d <= 1 ? COL_SHINE_HI : d <= 4 ? COL_SHINE_MID : d <= SHINE_BAND_R ? COL_SHINE_LO : COL_GOOD;
+}
+
+static void drawShineStrip(lgfx::LovyanGFX* dst, int x, int y, int fillW, uint32_t nowMs, int barIdx) {
   if (fillW < 12) return;
   float phase = (float)(nowMs % SHINE_PERIOD_MS) / SHINE_PERIOD_MS;
   int center = -SHINE_BAND_R + (int)(phase * (SHINE_BAR_W + 2 * SHINE_BAND_R));
+  int prev = shinePrevCenter[barIdx];
+  shinePrevCenter[barIdx] = center;
   dst->startWrite();
   for (int i = 2; i <= fillW - 3; i++) {
-    int d = abs(i - center);
-    uint16_t c = d <= 1 ? COL_SHINE_HI : d <= 4 ? COL_SHINE_MID : d <= SHINE_BAND_R ? COL_SHINE_LO : COL_GOOD;
+    uint16_t c = shineColor(i, center);
+    if (prev != INT_MIN && c == shineColor(i, prev)) continue;
     dst->fillRect(x + i, y, 1, SHINE_BAR_H, c);
   }
   dst->endWrite();
@@ -534,7 +549,7 @@ void shineTick(uint32_t nowMs) {
   bool isEvenSecond = false;
   if (checkHourlyFlash(isEvenSecond) && isEvenSecond) return;
   for (int i = 0; i < 2; i++) {
-    drawShineStrip(&gfx, SHINE_BAR_X + shiftX, SHINE_BAR_Y[i] + shiftY, shineFillPx[i], nowMs);
+    drawShineStrip(&gfx, SHINE_BAR_X + shiftX, SHINE_BAR_Y[i] + shiftY, shineFillPx[i], nowMs, i);
   }
 }
 
@@ -587,7 +602,7 @@ static void drawLimitsCard() {
   // "Show Countdown"; when off, clear the cached fill so shineTick no-ops.
   if (cfgShowCountdown) {
     shineFillPx[0] = drawMiniBar(12, 51, 137, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
-    drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[0], shineFillPx[0], millis());
+    drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[0], shineFillPx[0], millis(), 0);
   } else {
     shineFillPx[0] = -1;
   }
@@ -611,7 +626,7 @@ static void drawLimitsCard() {
   drawMiniBar(12, 140, 137, STATE.weekPercent, COL_ACCENT);
   if (cfgShowCountdown) {
     shineFillPx[1] = drawMiniBar(12, 150, 137, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
-    drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[1], shineFillPx[1], millis());
+    drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[1], shineFillPx[1], millis(), 1);
   } else {
     shineFillPx[1] = -1;
   }

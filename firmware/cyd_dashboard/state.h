@@ -20,6 +20,7 @@
 #include <SD.h>
 #include <AnimatedGIF.h>
 #include <esp_system.h>
+#include <esp_memory_utils.h>  // esp_ptr_dma_capable (pages.cpp's batched frame push)
 #include <time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
