@@ -42,7 +42,8 @@ void connectWifi() {
     drawWifiSpinner(frameNum++);
     delay(100);
   }
-  if (WiFi.status() == WL_CONNECTED) {
+  wifiOk = WiFi.status() == WL_CONNECTED;
+  if (wifiOk) {
     ensureMdns();
     configTime(GMT_OFFSET_SEC, DST_OFFSET_SEC, "pool.ntp.org", "time.nist.gov");
   }
@@ -399,7 +400,8 @@ static void appendArchiveRow(const JsonDocument& doc) {
 
 bool fetchUsage() {
   uint32_t startUs = micros();  // diagnostic timing only, see comment at the end of this function
-  if (WiFi.status() != WL_CONNECTED) {
+  wifiOk = WiFi.status() == WL_CONNECTED;
+  if (!wifiOk) {
     return false;
   }
 

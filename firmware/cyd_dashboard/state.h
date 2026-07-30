@@ -305,6 +305,7 @@ extern bool touchWasDown;
 // Did the most recent fetch reach the server? Written by networkTask() (core
 // 0), read by drawFooter()/loop()'s progress line (core 1) with no lock --
 // volatile for the same cross-core-visibility reason as STATE.haveData.
+extern bool wifiOk;
 extern volatile bool connected;
 
 // Guards every read/write of the shared UsageState between the render loop

@@ -67,6 +67,7 @@ bool shiftDirty = false;  // set on step; the mixed page's partial pushes need o
 // "how busy is the loop", not a real scheduler-level CPU% figure.
 float cpuPercentAvg = 0;
 bool touchWasDown = false;
+bool wifiOk = false;
 volatile bool connected = false;  // did the most recent fetch reach the server?
 
 // Guards every read/write of the shared UsageState between the render loop
@@ -167,6 +168,7 @@ void networkTask(void* param) {
       lastPollMs = now;  // drives the footer progress line on the render side
       if (STATE.sdOk) refreshSdCapacityCache();  // cheap FAT bookkeeping; unrelated to WiFi
       if (WiFi.status() == WL_CONNECTED) {
+        wifiOk = true;
         if (wifiDownCycles > 0) {
           logDiag(("wifi_recovered after " + String(wifiDownCycles) + " cycles").c_str());
         }
@@ -174,6 +176,7 @@ void networkTask(void* param) {
         ensureMdns();
         connected = fetchUsage();
       } else {
+        wifiOk = false;
         if (wifiDownCycles == 0) logDiag("wifi_down");
         connected = false;
         mdnsStarted = false;       // re-init mDNS once WiFi returns

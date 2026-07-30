@@ -568,6 +568,7 @@ const STATE = {
   lastPollMs: 0,          // when the last poll cycle started (progress line)
   currentPage: 0,
   connected: false,     // did the most recent fetch reach the server?
+  wifiOk: false,
   fetchFailCycles: 0,   // consecutive failed polls; mirrors the firmware's counter
   pollTimer: null,
   shiftIdx: 0,          // pixel-shift orbit position, mirrors the firmware's shiftIdx
@@ -2243,6 +2244,7 @@ async function fetchUsage() {
     saveLastUsageCache(MOCK);
     STATE.haveData = true;
     STATE.fetchFailCycles = 0;
+    STATE.wifiOk = true;
     STATE.connected = true;
     setConn(true, 'mock data');
     log('applied mock data', 'ok');
@@ -2251,6 +2253,7 @@ async function fetchUsage() {
     return;
   }
   if (offline) {
+    STATE.wifiOk = false;
     STATE.connected = false;
     markFetchFailed();
     setConn(false, 'simulated offline');
@@ -2271,11 +2274,13 @@ async function fetchUsage() {
     saveLastUsageCache(doc);
     STATE.haveData = true;
     STATE.fetchFailCycles = 0;
+    STATE.wifiOk = true;
     STATE.connected = true;
     setConn(true, 'ok, ' + new Date().toLocaleTimeString());
     log('fetched ' + fmtTokens(doc.today?.tokens ?? 0) + ' today / ' +
         fmtTokens(doc.week?.tokens ?? 0) + ' week', 'ok');
   } catch (err) {
+    STATE.wifiOk = false;
     STATE.connected = false;
     markFetchFailed();
     setConn(false, err.name === 'AbortError' ? 'timeout (5s)' : err.message);
