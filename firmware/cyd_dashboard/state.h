@@ -190,9 +190,9 @@ const int DEVICE_HIT_Y0 = 214, DEVICE_HIT_Y1 = 240;
 // into the mixed page's dirty-band partial push (see gifTick()).
 const int BATTERY_ICON_Y0 = 2, BATTERY_ICON_Y1 = 14;
 
-// Weather forecast slots delivered by /api/usage (Mac-proxied Open-Meteo /
-// WeatherAPI) and cached on SD as /weather.json. Fixed-size arrays — no
-// String/heap churn on every poll.
+// Weather forecast slots delivered by /api/usage (Mac-proxied Open-Meteo)
+// and cached on SD as /weather.json. Fixed-size arrays — no String/heap
+// churn on every poll.
 const int WEATHER_HOURLY_N = 6;
 const int WEATHER_DAILY_N = 5;
 struct WeatherHour {

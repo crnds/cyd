@@ -131,11 +131,11 @@ flash storage for the scheme change to orphan.
      clamped 10–30 min.
   3. `/etc/localtime` symlink — local timezone name for reset-time display.
   4. `market_loop` — **BTC (Binance, ~60s AC / ~180s battery)** + **Bangkok
-     weather (Open-Meteo or optional WeatherAPI, ~10 min AC / ~30 min
-     battery)**; last-good kept on failure. Done Mac-side ON PURPOSE: the CYD
-     has no PSRAM, and its 154KB framebuffer leaves too little contiguous heap
-     for an mbedTLS handshake. Proxying keeps all TLS off the board — the
-     firmware has no `WiFiClientSecure` at all.
+     weather (Open-Meteo, ~10 min AC / ~30 min battery)**; last-good kept on
+     failure. Done Mac-side ON PURPOSE: the CYD has no PSRAM, and its 154KB
+     framebuffer leaves too little contiguous heap for an mbedTLS handshake.
+     Proxying keeps all TLS off the board — the firmware has no
+     `WiFiClientSecure` at all.
 - **`battery_guard_loop` owns the HTTP server's lifecycle** (`start_http_server`
   binds/unbinds it, `main()` no longer calls `serve_forever()` directly). The
   CYD's ~20s poll cadence gives macOS no long-enough idle gap to ever commit to

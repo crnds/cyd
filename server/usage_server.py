@@ -438,37 +438,6 @@ def fetch_btc():
     return {"price": price} if price > 0 else None
 
 
-def load_weather_api_key():
-    # secrets.local.json lives in the repo root (one level up from server/).
-    # Read once at import time rather than on every fetch_weather() call.
-    secrets_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                 "secrets.local.json")
-    if not os.path.exists(secrets_path):
-        return None
-    try:
-        with open(secrets_path, "r") as f:
-            return (json.load(f) or {}).get("WEATHER_API_KEY")
-    except Exception as e:
-        log_err(f"weather: failed reading secrets.local.json: {type(e).__name__}: {e}")
-        return None
-
-
-WEATHER_API_KEY = load_weather_api_key()
-
-# WeatherAPI condition code -> WMO weather_code, the vocabulary the CYD board
-# (and simulator) actually render icons for. Grouped by the same buckets
-# drawWeatherIcon() switches on: clear/partly-cloudy, cloudy/fog, rain, snow,
-# thunderstorm. Unmapped codes fall back to 3 (cloudy) in fetch_weather_weatherapi.
-WEATHERAPI_TO_WMO = {1000: 0, 1003: 1}
-WEATHERAPI_TO_WMO.update({c: 3 for c in (1006, 1009, 1030, 1135, 1147)})
-WEATHERAPI_TO_WMO.update({c: 61 for c in (
-    1063, 1150, 1153, 1180, 1183, 1186, 1189, 1192, 1195, 1198, 1201, 1240, 1243, 1246)})
-WEATHERAPI_TO_WMO.update({c: 71 for c in (
-    1066, 1069, 1072, 1114, 1117, 1204, 1207, 1210, 1213, 1216, 1219, 1222, 1225,
-    1237, 1249, 1252, 1255, 1258, 1261, 1264)})
-WEATHERAPI_TO_WMO.update({c: 95 for c in (1087, 1273, 1276, 1279, 1282)})
-
-
 def wmo_condition(code):
     # Short condition labels for the Weather page header. Buckets match
     # drawWeatherIcon() so icon + text always describe the same condition.
@@ -596,76 +565,7 @@ def fetch_weather_openmeteo():
                            hourly=hourly_out, daily=daily_out)
 
 
-def fetch_weather_weatherapi(key):
-    # forecast.json includes current + up to 14 days of hour/day slots.
-    url = (f"https://api.weatherapi.com/v1/forecast.json"
-           f"?key={key}&q=Bangkok&days=6&aqi=no&alerts=no")
-    req = urllib.request.Request(url, headers={"User-Agent": "cydusage"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    cur = data.get("current") or {}
-    temp_c = cur.get("temp_c")
-    if temp_c is None:
-        return None
-    wa_code = (cur.get("condition") or {}).get("code", 1000)
-    code = WEATHERAPI_TO_WMO.get(wa_code, 3)
-
-    # Flatten hour slots across forecast days, then take the next 6 from now.
-    now_local = datetime.now(timezone(timedelta(hours=7)))  # Asia/Bangkok fixed
-    now_key = now_local.strftime("%Y-%m-%d %H")
-    flat_hours = []
-    for day in (data.get("forecast") or {}).get("forecastday") or []:
-        for hour in day.get("hour") or []:
-            t = hour.get("time") or ""  # "2026-07-20 17:00"
-            if t[:13] < now_key:
-                continue
-            ht = hour.get("temp_c")
-            if ht is None:
-                continue
-            hc = WEATHERAPI_TO_WMO.get(
-                (hour.get("condition") or {}).get("code", 1000), 3)
-            flat_hours.append({
-                "h": _iso_hour(t.replace(" ", "T")) or 0,
-                "tempC": round(ht),
-                "code": hc,
-            })
-            if len(flat_hours) >= 6:
-                break
-        if len(flat_hours) >= 6:
-            break
-
-    daily_out = []
-    high = low = None
-    for i, day in enumerate(((data.get("forecast") or {}).get("forecastday") or [])[:5]):
-        day_date = day.get("date") or ""
-        d = day.get("day") or {}
-        hi = d.get("maxtemp_c")
-        lo = d.get("mintemp_c")
-        dc = WEATHERAPI_TO_WMO.get(
-            (d.get("condition") or {}).get("code", 1000), 3)
-        if i == 0:
-            high = None if hi is None else round(hi)
-            low = None if lo is None else round(lo)
-        daily_out.append({
-            "wd": _iso_wday(day_date),
-            "high": None if hi is None else round(hi),
-            "low": None if lo is None else round(lo),
-            "code": dc,
-        })
-
-    return weather_payload(temp_c, code, high=high, low=low,
-                           hourly=flat_hours[:6], daily=daily_out)
-
-
 def fetch_weather():
-    # Prefer WeatherAPI when a key is configured; fall back to the keyless
-    # Open-Meteo endpoint on any failure (including "no key configured").
-    if WEATHER_API_KEY:
-        try:
-            return fetch_weather_weatherapi(WEATHER_API_KEY)
-        except Exception as e:
-            log_err(f"weather: WeatherAPI failed, falling back to Open-Meteo: "
-                    f"{type(e).__name__}: {e}")
     try:
         return fetch_weather_openmeteo()
     except Exception as e:
