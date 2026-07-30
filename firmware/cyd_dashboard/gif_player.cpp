@@ -185,7 +185,14 @@ void scanCats() {
         int slash = name.lastIndexOf('/');
         if (slash >= 0) name = name.substring(slash + 1);
         String lower = name; lower.toLowerCase();
-        if (lower.endsWith(".gif")) catFiles[catCount++] = String(CATS_DIR) + "/" + name;
+        // Skip hidden files: macOS copies to a FAT SD card leave "._cat_NNN.gif"
+        // AppleDouble companions (one per real GIF, created right after it, so
+        // FAT enumeration interleaves them) whose names also end in ".gif".
+        // Unfiltered they fill half of catFiles[] and then fail gif->open(),
+        // silently shrinking the playable library — e.g. only cats 001-060 of
+        // 120 ever playing, exactly matching the MAX_CATS cap.
+        if (!name.startsWith(".") && lower.endsWith(".gif"))
+          catFiles[catCount++] = String(CATS_DIR) + "/" + name;
       }
       f.close();
     }

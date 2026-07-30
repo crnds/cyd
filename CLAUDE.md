@@ -348,6 +348,9 @@ flash storage for the scheme change to orphan.
     Prepared board-side by `pull_giphy_cats.py` / `prepare_cat_gifs.py` (downloads
     from GIPHY, resizes to ≤320×240, thins frames, optimizes with gifsicle);
     absent → the cat pages show the "CATS" placeholder instead of playing.
+    `scanCats()` skips dotfiles so macOS AppleDouble junk (`._cat_NNN.gif`,
+    created by `cp` to a FAT card unless copied with `COPYFILE_DISABLE=1`)
+    can't fill the filename list and silently shrink the playable library.
 
 ## Conventions
 

@@ -487,7 +487,8 @@ def main():
     print(f"Added Resized GIFs : {resized_added}")
     print(f"Total on Board     : {current_resized_count + resized_added} / {args.resize_count}")
     print(f"Output Directory   : {args.out_dir}/")
-    print(f"Command to Copy    : cp -r {args.out_dir} /Volumes/<SD>/cats")
+    print(f"Command to Copy    : COPYFILE_DISABLE=1 cp -r {args.out_dir} /Volumes/<SD>/cats")
+    print("  (COPYFILE_DISABLE=1 stops macOS from writing '._*.gif' AppleDouble junk)")
     print("=" * 60)
 
 

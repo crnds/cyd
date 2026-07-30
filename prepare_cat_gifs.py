@@ -15,7 +15,7 @@ library over several runs):
     python3 prepare_cat_gifs.py --count 100     # a bigger library
     python3 prepare_cat_gifs.py --colors 128    # smaller/lighter for the board
 
-Then: cp -r cats /Volumes/<SD>/cats
+Then: COPYFILE_DISABLE=1 cp -r cats /Volumes/<SD>/cats
 """
 
 import argparse
@@ -247,7 +247,8 @@ def main():
     if added < args.count:
         print(f"(wanted {args.count}; stopped after {attempts} attempts — "
               "cataas may be rate-limiting. Re-run to add more.)")
-    print(f"Copy to the SD card:  cp -r {args.outdir} /Volumes/<SD>/cats")
+    print(f"Copy to the SD card:  COPYFILE_DISABLE=1 cp -r {args.outdir} /Volumes/<SD>/cats")
+    print("  (COPYFILE_DISABLE=1 stops macOS from writing '._*.gif' AppleDouble junk")
 
 
 if __name__ == "__main__":
