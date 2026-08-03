@@ -16,9 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LOG_GLOB = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 PORT = 8787
 MAX_BODY_BYTES = 4096  # POST bodies here are tiny JSON; anything bigger is bogus/abusive
-SCAN_INTERVAL_SEC = 15
-# On battery (still serving): slow the jsonl tail a bit. Token pages update
-# from board polls of cached aggregates, so 30s ingest lag is invisible.
+# 30s on AC: token pages update from board polls of cached aggregates, so the
+# ingest lag is invisible on screen, and this halves the scan wakeups + disk
+# glob/stat over ~200 jsonl files vs. the old 15s — the biggest wakeup source.
+SCAN_INTERVAL_SEC = 30
+# On battery (still serving): slow the jsonl tail further.
 SCAN_INTERVAL_BATTERY_SEC = 30
 RETENTION = timedelta(days=8)
 ACTIVE_WINDOW_SEC = 180
@@ -57,6 +59,7 @@ STATE = {
     # Bangkok weather for the status card + Weather page: current + next-6h
     # hourly + next-5d daily, fetched here so the board needs no TLS.
     "weather": None,
+    "aqi": None,        # {aqi} Bangkok AQI from aqicn.org — fetched here so the board needs no TLS
     # Power / battery-save. battery_guard_loop writes on_ac/percent/paused;
     # battery_save_manual is set by POST /api/battery-save (control panel):
     #   None  → auto (follow AC: unplugged = save on)
@@ -170,7 +173,11 @@ def activity_gated_loop(body):
         body()
 
 
-LIMITS_INTERVAL_SEC = 120
+# 180s on AC: the display's countdown stays smooth regardless — build_report()
+# recomputes resets_in_sec per request from the last snapshot's epoch — so only
+# the percent lags slightly, and this cuts the OAuth HTTPS + `security` keychain
+# subprocess forks by a third.
+LIMITS_INTERVAL_SEC = 180
 # On battery (still serving — above BATTERY_LOW_PCT): stretch OAuth a bit.
 # Display already recomputes resets_in_sec per request from the last snapshot.
 LIMITS_INTERVAL_BATTERY_SEC = 300
@@ -199,12 +206,19 @@ WEATHER_URL = (
     "&daily=weather_code,temperature_2m_max,temperature_2m_min"
     "&timezone=Asia%2FBangkok&forecast_days=6"
 )
-# 60s is plenty for a 320px tile — the old 10s cadence was ~8640 HTTPS/day
-# of radio/TLS work that never changed what the board could usefully show.
+# aqicn.org (World Air Quality Index project) — same Bangkok coords as the
+# weather fetch above, geo-based so it's not tied to one named station.
+AQICN_URL = "https://api.waqi.info/feed/geo:13.7563;100.5018/?token={token}"
+AQI_INTERVAL_SEC = 900
+AQI_INTERVAL_BATTERY_SEC = 1800
+# 120s is plenty for a 320px ticker tile — this loop's TLS handshakes are the
+# main new radio load since BTC/weather moved off the board, and 2-min freshness
+# reads identically on screen. (The old 10s cadence was ~8640 HTTPS/day of
+# radio/TLS work that never changed what the board could usefully show.)
 # On battery: stretch further (3 min BTC / 30 min weather) so the Mac isn't
 # doing continuous HTTPS while trying to idle; pairs with the board's
 # Battery Save 2 min usage-poll floor.
-BTC_INTERVAL_SEC = 60
+BTC_INTERVAL_SEC = 120
 BTC_INTERVAL_BATTERY_SEC = 180
 WEATHER_INTERVAL_SEC = 600
 WEATHER_INTERVAL_BATTERY_SEC = 1800
@@ -217,7 +231,9 @@ WEATHER_INTERVAL_BATTERY_SEC = 1800
 # proceed; the board already has a graceful OFFLINE/cat-mode fallback for
 # exactly this "server unreachable" case.
 BATTERY_LOW_PCT = 50
-BATTERY_CHECK_INTERVAL_SEC = 60
+# 120s: BATTERY_LOW_PCT (50%) is a huge margin, so a 2-min reaction to being
+# unplugged is still safe, and this halves the `pmset` subprocess forks.
+BATTERY_CHECK_INTERVAL_SEC = 120
 
 
 def battery_status():
@@ -428,6 +444,45 @@ def limits_loop():
     activity_gated_loop(body)
 
 
+_SECRETS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "secrets.local.json")
+_aqicn_token_warned = False
+
+
+def aqicn_token():
+    # AQICN_TOKEN env var, then secrets.local.json (repo root, gitignored) --
+    # same lookup order pull_giphy_cats.py uses for its GIPHY_API_KEY, so a
+    # missing token here is either unset (never fetched) or added there.
+    global _aqicn_token_warned
+    env_token = os.environ.get("AQICN_TOKEN")
+    if env_token:
+        return env_token
+    try:
+        with open(_SECRETS_PATH) as f:
+            token = (json.load(f) or {}).get("AQICN_TOKEN")
+    except (OSError, ValueError):
+        token = None
+    if not token and not _aqicn_token_warned:
+        _aqicn_token_warned = True
+        log_err("aqi: no AQICN_TOKEN in env or secrets.local.json -- "
+                "skipping AQI fetch (get a free token at https://aqicn.org/data-platform/token/)")
+    return token
+
+
+def fetch_aqi():
+    token = aqicn_token()
+    if not token:
+        return None
+    req = urllib.request.Request(AQICN_URL.format(token=token), headers={"User-Agent": "cydusage"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        doc = json.loads(resp.read())
+    if doc.get("status") != "ok":
+        return None
+    aqi = (doc.get("data") or {}).get("aqi")
+    if not isinstance(aqi, (int, float)) or aqi < 0:
+        return None
+    return {"aqi": round(aqi)}
+
+
 def fetch_btc():
     req = urllib.request.Request(BTC_URL, headers={"User-Agent": "cydusage"})
     with urllib.request.urlopen(req, timeout=8) as resp:
@@ -575,18 +630,21 @@ def fetch_weather():
 
 def market_intervals():
     if battery_save_active():
-        return BTC_INTERVAL_BATTERY_SEC, WEATHER_INTERVAL_BATTERY_SEC
-    return BTC_INTERVAL_SEC, WEATHER_INTERVAL_SEC
+        return BTC_INTERVAL_BATTERY_SEC, WEATHER_INTERVAL_BATTERY_SEC, AQI_INTERVAL_BATTERY_SEC
+    return BTC_INTERVAL_SEC, WEATHER_INTERVAL_SEC, AQI_INTERVAL_SEC
 
 
 def market_loop():
-    # BTC ~60s on AC / ~3 min on battery; weather 10 min / 30 min. Each keeps
-    # its last good value on failure so a transient outage doesn't blank tiles.
+    # BTC ~60s on AC / ~3 min on battery; weather 10 min / 30 min; AQI 15 min /
+    # 30 min (an hourly-updating station gains nothing from polling faster).
+    # Each keeps its last good value on failure so a transient outage doesn't
+    # blank tiles.
     last_weather = 0.0
+    last_aqi = 0.0
 
     def body():
-        nonlocal last_weather
-        btc_iv, weather_iv = market_intervals()
+        nonlocal last_weather, last_aqi
+        btc_iv, weather_iv, aqi_iv = market_intervals()
         try:
             btc = fetch_btc()
             if btc:
@@ -602,6 +660,14 @@ def market_loop():
                     STATE["weather"] = weather
             except Exception as e:
                 log_err(f"market_loop weather: {type(e).__name__}: {e}")
+        if now - last_aqi >= aqi_iv:
+            last_aqi = now
+            try:
+                aqi = fetch_aqi()
+                if aqi:
+                    STATE["aqi"] = aqi
+            except Exception as e:
+                log_err(f"market_loop aqi: {type(e).__name__}: {e}")
         time.sleep(btc_iv)
 
     activity_gated_loop(body)
@@ -770,23 +836,28 @@ def scan_once():
     for path in stale_paths:
         del STATE["offsets"][path]
 
-    if new_buckets:
-        with STATE["lock"]:
-            for bucket_epoch, dims in new_buckets.items():
-                target = STATE["buckets"].setdefault(bucket_epoch, {})
-                for key, v in dims.items():
-                    d = target.setdefault(key, {"tokens": 0, "cost": 0.0})
-                    d["tokens"] += v["tokens"]
-                    d["cost"] += v["cost"]
-            cutoff = datetime.now(timezone.utc) - RETENTION
-            cutoff_epoch = bucket_epoch_for(cutoff)
-            STATE["buckets"] = {b: v for b, v in STATE["buckets"].items() if b >= cutoff_epoch}
-            STATE["seen"] = {k: ts for k, ts in STATE["seen"].items() if ts >= cutoff}
-            prev = STATE["context"]
-            if newest_ctx and (prev is None or newest_ctx["ts"] > prev["ts"]):
-                STATE["context"] = newest_ctx
-            if newest_ts and (STATE["last_ts"] is None or newest_ts > STATE["last_ts"]):
-                STATE["last_ts"] = newest_ts
+    # Returned to scan_loop so it can skip the compute_aggregates() rollup on
+    # scans that ingested nothing (most scans, when no Claude session is
+    # active) -- see its day-rollover note.
+    if not new_buckets:
+        return False
+    with STATE["lock"]:
+        for bucket_epoch, dims in new_buckets.items():
+            target = STATE["buckets"].setdefault(bucket_epoch, {})
+            for key, v in dims.items():
+                d = target.setdefault(key, {"tokens": 0, "cost": 0.0})
+                d["tokens"] += v["tokens"]
+                d["cost"] += v["cost"]
+        cutoff = datetime.now(timezone.utc) - RETENTION
+        cutoff_epoch = bucket_epoch_for(cutoff)
+        STATE["buckets"] = {b: v for b, v in STATE["buckets"].items() if b >= cutoff_epoch}
+        STATE["seen"] = {k: ts for k, ts in STATE["seen"].items() if ts >= cutoff}
+        prev = STATE["context"]
+        if newest_ctx and (prev is None or newest_ctx["ts"] > prev["ts"]):
+            STATE["context"] = newest_ctx
+        if newest_ts and (STATE["last_ts"] is None or newest_ts > STATE["last_ts"]):
+            STATE["last_ts"] = newest_ts
+    return True
 
 
 # Logged hourly from scan_loop: a lightweight heartbeat of the bucketed
@@ -869,10 +940,22 @@ def scan_interval():
 
 
 def scan_loop():
+    # Recompute the rollup only when scan_once() ingested new data, OR when the
+    # local calendar day has rolled over (so today/trend advance at midnight even
+    # through a long idle stretch with no new events -- a plain "new data only"
+    # gate would otherwise freeze "today" at yesterday's total until the next
+    # event). This skips the every-scan compute_aggregates() during idle, which
+    # was pure repeated work re-deriving identical output.
+    last_agg_date = datetime.now().astimezone().date()
+
     def body():
+        nonlocal last_agg_date
         try:
-            scan_once()
-            compute_aggregates()
+            changed = scan_once()
+            today = datetime.now().astimezone().date()
+            if changed or today != last_agg_date:
+                compute_aggregates()
+                last_agg_date = today
             maybe_log_stats()
         except Exception as e:
             # never let a transient error (e.g. during sleep/wake) kill the thread
@@ -947,6 +1030,7 @@ def build_report():
                     if ctx else None),
         "btc": STATE["btc"],
         "weather": STATE["weather"],
+        "aqi": STATE["aqi"],
         "clients": clients,
         "power": power_snapshot(),
     }

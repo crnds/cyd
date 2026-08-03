@@ -793,6 +793,19 @@ static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int s
 // card x=2 w=157 (edge 159), right column x=161 w=157 (edge 318), with the
 // 2px column gap between them (159-161) matching the 2px margins at the
 // screen's own edges.
+// AQI badge colors, per the standard US EPA / aqicn.org scale. Text color
+// alternates white/black by box brightness (white on the darker green/red/
+// purple/maroon boxes, black on the lighter yellow/orange ones) -- mirrored
+// exactly in simulator.html's aqiColors().
+static void aqiColors(int aqi, uint16_t& bg, uint16_t& fg) {
+  if (aqi <= 50)       { bg = COL_GOOD;       fg = COL_TEXT; }        // Good
+  else if (aqi <= 100) { bg = COL_YELLOW;     fg = COL_TRACK_BLACK; } // Moderate
+  else if (aqi <= 150) { bg = COL_AQI_ORANGE; fg = COL_TRACK_BLACK; } // Unhealthy for Sensitive Groups
+  else if (aqi <= 200) { bg = COL_WARN;       fg = COL_TEXT; }        // Unhealthy
+  else if (aqi <= 300) { bg = COL_PURPLE;     fg = COL_TEXT; }        // Very Unhealthy
+  else                 { bg = COL_MAROON;     fg = COL_TEXT; }        // Hazardous
+}
+
 static void drawStatusPage() {
   drawLimitsCard();
   drawBtcCard();
@@ -855,9 +868,34 @@ static void drawStatusPage() {
     char buf[16];
     snprintf(buf, sizeof(buf), "%s %d %s", WDAY_ABBR[timeinfo.tm_wday], timeinfo.tm_mday,
              mons[timeinfo.tm_mon]);
-    int tw = (int)strlen(buf) * 6 * 2;
-    g->setCursor(240 - tw / 2, 142);
+    int dateW = (int)strlen(buf) * 6 * 2;
+
+    // AQI badge: a colored box (aqiColors() above) appended after the date,
+    // e.g. "Mon 3 Aug [81]". Skipped when the Mac hasn't delivered a reading
+    // yet (STATE.aqi < 0) rather than drawing a placeholder in a made-up color.
+    bool haveAqi = STATE.aqi >= 0;
+    char aqiBuf[8] = "";
+    int badgeW = 0, gap = 0;
+    if (haveAqi) {
+      snprintf(aqiBuf, sizeof(aqiBuf), "%d", STATE.aqi);
+      badgeW = (int)strlen(aqiBuf) * 6 * 2 + 6;  // size2 digits + 3px pad each side
+      gap = 4;
+    }
+    int startX = 240 - (dateW + gap + badgeW) / 2;
+
+    g->setCursor(startX, 142);
     g->print(buf);
+
+    if (haveAqi) {
+      uint16_t bg, fg;
+      aqiColors(STATE.aqi, bg, fg);
+      int bx = startX + dateW + gap;
+      g->fillRoundRect(bx, 140, badgeW, 20, 3, bg);
+      g->setTextSize(2);
+      g->setTextColor(fg);
+      g->setCursor(bx + 3, 142);
+      g->print(aqiBuf);
+    }
   } else {
     const char* buf = "--";
     int tw = (int)strlen(buf) * 6 * 2;

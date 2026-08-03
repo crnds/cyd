@@ -131,11 +131,16 @@ flash storage for the scheme change to orphan.
      clamped 10–30 min.
   3. `/etc/localtime` symlink — local timezone name for reset-time display.
   4. `market_loop` — **BTC (Binance, ~60s AC / ~180s battery)** + **Bangkok
-     weather (Open-Meteo, ~10 min AC / ~30 min battery)**; last-good kept on
-     failure. Done Mac-side ON PURPOSE: the CYD has no PSRAM, and its 154KB
+     weather (Open-Meteo, ~10 min AC / ~30 min battery)** + **Bangkok AQI
+     (aqicn.org, ~15 min AC / ~30 min battery)**; last-good kept on failure.
+     Done Mac-side ON PURPOSE: the CYD has no PSRAM, and its 154KB
      framebuffer leaves too little contiguous heap for an mbedTLS handshake.
      Proxying keeps all TLS off the board — the firmware has no
-     `WiFiClientSecure` at all.
+     `WiFiClientSecure` at all. AQI needs a free token from
+     https://aqicn.org/data-platform/token/ — set via the `AQICN_TOKEN` env
+     var or `AQICN_TOKEN` in `secrets.local.json` (repo root, gitignored,
+     same lookup pattern as `pull_giphy_cats.py`'s `GIPHY_API_KEY`); absent
+     token just skips the fetch (`aqi` stays null), logged once.
 - **`battery_guard_loop` owns the HTTP server's lifecycle** (`start_http_server`
   binds/unbinds it, `main()` no longer calls `serve_forever()` directly). The
   CYD's ~20s poll cadence gives macOS no long-enough idle gap to ever commit to
@@ -171,7 +176,10 @@ flash storage for the scheme change to orphan.
   window, percent of a hardcoded 200K; null until first log scan),
   `btc{price}` / `weather{tempC,code,condition,high,low,hourly[],daily[]}`
   (null until the first market fetch; weather feeds the status tile + full
-  weather overlay), `power{on_ac,percent,paused,battery_save,battery_save_manual,source}`,
+  weather overlay), `aqi{aqi}` (Bangkok AQI from aqicn.org, same geo coords as
+  the weather fetch; null until the first fetch succeeds or if no
+  `AQICN_TOKEN` is configured — see market_loop's `fetch_aqi`; feeds the
+  colored badge next to the date on the status page), `power{on_ac,percent,paused,battery_save,battery_save_manual,source}`,
   `clients[{ip,last_seen_sec}]`, `generated_at`, `epoch`.
   **Not in the contract:** `last5h`, `models[]`, `last_activity_sec`,
   `btc.changePct` (removed — no on-device consumer).

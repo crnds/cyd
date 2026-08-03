@@ -136,6 +136,7 @@ static JsonDocument usageFilter() {
   f["context"] = true;
   f["btc"] = true;
   f["weather"] = true;
+  f["aqi"] = true;
   f["today"] = true;  // needed by appendArchiveRow (fetchUsage)
   f["active_now"] = true;
   f["epoch"] = true;  // NTP fallback — see applyUsageDoc's time-sync block
@@ -228,6 +229,10 @@ static bool applyUsageDoc(const JsonDocument& doc, bool fromNetwork) {
   if (!doc["weather"].isNull()) {
     applyWeatherDoc(doc["weather"].as<JsonObjectConst>());
   }
+  if (!doc["aqi"].isNull()) {
+    int a = doc["aqi"]["aqi"] | -1;
+    if (a >= 0) STATE.aqi = a;
+  }
 
   STATE.lastFetchOkMs = millis();
   unlockState();
@@ -281,11 +286,12 @@ static void saveEnvCache() {
   double btc = STATE.btcPrice;
   float tempC = STATE.weatherTempC;
   int code = STATE.weatherCode;
+  int aqi = STATE.aqi;
   unlockState();
   SD.remove(ENV_CACHE_PATH);  // FILE_WRITE appends here; remove for a clean overwrite
   File f = SD.open(ENV_CACHE_PATH, FILE_WRITE);
   if (f) {
-    f.printf("{\"btc\":%.2f,\"tempC\":%.1f,\"code\":%d}", btc, tempC, code);
+    f.printf("{\"btc\":%.2f,\"tempC\":%.1f,\"code\":%d,\"aqi\":%d}", btc, tempC, code, aqi);
     f.close();
   }
 }
@@ -301,6 +307,7 @@ void loadEnvCache() {
   STATE.btcPrice = doc["btc"] | STATE.btcPrice;
   STATE.weatherTempC = doc["tempC"] | STATE.weatherTempC;
   STATE.weatherCode = doc["code"] | STATE.weatherCode;
+  STATE.aqi = doc["aqi"] | STATE.aqi;
   unlockState();
 }
 

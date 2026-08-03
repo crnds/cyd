@@ -529,6 +529,11 @@ const COL_SHINE_HI  = 'rgb(214,247,214)'; // 0xD7BA ~80% to white (shine band ce
 const COL_WARN    = 'rgb(255,24,49)';   // 0xF8C6
 const COL_TRACK   = 'rgb(90,89,90)';    // 0x5ACB neutral grey track
 const COL_TRACK_BLACK = 'rgb(0,0,0)';   // 0x0000 pure-black track (reset-countdown bars)
+// AQI badge colors (status page, see aqiColors() below) not otherwise used
+// elsewhere -- Good/Moderate/Unhealthy reuse COL_GOOD/COL_YELLOW/COL_WARN.
+const COL_AQI_ORANGE = 'rgb(249,115,22)'; // 0xFB82 — Unhealthy for Sensitive Groups
+const COL_PURPLE     = 'rgb(168,85,247)'; // 0xAABE — Very Unhealthy
+const COL_MAROON     = 'rgb(127,29,29)';  // 0x78E3 — Hazardous
 // Weather page background — pure black. 0x0000. Reserved; weather overlay uses COL_BG.
 
 
@@ -556,6 +561,8 @@ const STATE = {
   btcPrice: -1,           // BTC/USDT; -1 = not received yet. Arrives inside /api/usage
                           // (fetched by the Mac), same as the firmware -- not fetched
                           // directly from Binance here (see applyData()).
+  aqi: -1,                // Bangkok AQI (aqicn.org); -1 = not received yet. Same
+                          // Mac-proxied pattern as btc/weather above.
   weatherTempC: -999,     // Bangkok current temp; -999 = not received yet (see above)
   weatherCode: -1,        // WMO weather_code; -1 = not received yet (see above)
   weatherHigh: -999,
@@ -1323,6 +1330,18 @@ function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour
   gfx.fillCircle(cx, cy, 2, COL_TEXT);
 }
 
+// AQI badge colors, per the standard US EPA / aqicn.org scale. Mirrors the
+// firmware's aqiColors() in pages.cpp exactly (same breakpoints, same
+// white/black text choice per box brightness).
+function aqiColors(aqi) {
+  if (aqi <= 50) return { bg: COL_GOOD, fg: COL_TEXT };               // Good
+  if (aqi <= 100) return { bg: COL_YELLOW, fg: COL_TRACK_BLACK };     // Moderate
+  if (aqi <= 150) return { bg: COL_AQI_ORANGE, fg: COL_TRACK_BLACK }; // Unhealthy for Sensitive Groups
+  if (aqi <= 200) return { bg: COL_WARN, fg: COL_TEXT };              // Unhealthy
+  if (aqi <= 300) return { bg: COL_PURPLE, fg: COL_TEXT };            // Very Unhealthy
+  return { bg: COL_MAROON, fg: COL_TEXT };                            // Hazardous
+}
+
 function drawStatusPage() {
   drawLimitsCard();
   drawBtcCard();
@@ -1373,8 +1392,29 @@ function drawStatusPage() {
   // Year dropped: "Mon 25 Jul 2026" at size2 would overrun the 132px inner
   // width; weekday+day+month fits at 120px.
   const dateText = bkk ? (bkk.weekday + ' ' + bkk.day + ' ' + bkk.month) : '--';
-  gfx.setCursor(240 - gfx.textWidth(dateText) / 2, 142);
+  const dateW = gfx.textWidth(dateText);
+
+  // AQI badge: a colored box (aqiColors() above) appended after the date,
+  // e.g. "Mon 3 Aug [81]". Skipped when the Mac hasn't delivered a reading
+  // yet (STATE.aqi < 0) rather than drawing a placeholder in a made-up color.
+  const haveAqi = bkk && STATE.aqi >= 0;
+  const aqiText = haveAqi ? String(STATE.aqi) : '';
+  const badgeW = haveAqi ? aqiText.length * 6 * 2 + 6 : 0;  // size2 digits + 3px pad each side
+  const gap = haveAqi ? 4 : 0;
+  const startX = 240 - (dateW + gap + badgeW) / 2;
+
+  gfx.setCursor(startX, 142);
   gfx.print(dateText);
+
+  if (haveAqi) {
+    const { bg, fg } = aqiColors(STATE.aqi);
+    const bx = startX + dateW + gap;
+    gfx.fillRoundRect(bx, 140, badgeW, 20, 3, bg);
+    gfx.setTextSize(2);
+    gfx.setTextColor(fg);
+    gfx.setCursor(bx + 3, 142);
+    gfx.print(aqiText);
+  }
 
   // 1px divider between the "now" icon+temp block and the next-3-hours
   // forecast to its right, centered in the existing gap so it doesn't
@@ -2072,6 +2112,7 @@ const MOCK = {
   },
   context: { tokens: 80000, percent: 40 },
   btc: { price: 109432 },
+  aqi: { aqi: 81 },
   weather: {
     tempC: 34, code: 3, high: 35, low: 26,
     condition: 'Overcast',
@@ -2149,6 +2190,9 @@ function applyData(doc) {
     STATE.btcPrice = doc.btc.price;
   }
   if (doc.weather) applyWeatherData(doc.weather);
+  if (doc.aqi && doc.aqi.aqi >= 0) {
+    STATE.aqi = doc.aqi.aqi;
+  }
   // Live poll only (applyData is only called from a real/mock fetch, not
   // from a cold SD-cache path the way firmware is) — honor Mac power flag.
   if (doc.power && typeof doc.power.battery_save === 'boolean') {

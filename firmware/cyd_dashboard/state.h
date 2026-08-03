@@ -170,6 +170,11 @@ const uint16_t COL_TRACK = 0x5ACB;   // neutral grey bar track
 const uint16_t COL_TRACK_BLACK = 0x0000; // pure-black bar track (reset-countdown bars)
 const uint16_t COL_BLUE = 0x3C1E;    // device-stats bar chart accent
 const uint16_t COL_YELLOW = 0xFFE0;  // yellow for sun/lightning icons
+// AQI badge colors (status page, see aqiColors() in pages.cpp) not otherwise
+// used elsewhere -- Good/Moderate/Unhealthy reuse COL_GOOD/COL_YELLOW/COL_WARN.
+const uint16_t COL_AQI_ORANGE = 0xFB82; // rgb(249,115,22) — Unhealthy for Sensitive Groups
+const uint16_t COL_PURPLE = 0xAABE;     // rgb(168,85,247) — Very Unhealthy
+const uint16_t COL_MAROON = 0x78E3;     // rgb(127,29,29) — Hazardous
 // Weather card hit-box on the status page (page 0): matches the full card
 // drawn at fillRect(161,166,157,52) (pages.cpp). Tap opens the Weather
 // overlay (mirrors the footer hit-box pattern below).
@@ -242,6 +247,7 @@ struct UsageState {
   int creditsPercent = -1;
   uint32_t lastFetchOkMs = 0;
   double btcPrice = -1;      // BTC/USDT (from the Mac via /api/usage); -1 = unknown
+  int aqi = -1;              // Bangkok AQI, aqicn.org (from the Mac via /api/usage); -1 = unknown
   float weatherTempC = -999; // Bangkok temp (from the Mac via /api/usage); -999 = unknown
   int weatherCode = -1;      // WMO weather_code (from the Mac); -1 = unknown
   // Weather page fields — same payload as the status card's temp/code, plus
