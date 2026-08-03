@@ -285,6 +285,7 @@ const NIGHT_MODE_KEY = 'cyddashboard_v1_nightmode';
 const ROTATION_KEY = 'cyddashboard_v1_rotation';
 const SHOW_COUNTDOWN_KEY = 'cyddashboard_v1_showcountdown';
 const BATTERY_SAVE_KEY = 'cyddashboard_v1_batterysave';
+const SHOW_AQI_KEY = 'cyddashboard_v1_showaqi';
 // Mirrors firmware BATTERY_SAVE_POLL_SEC (usage-poll floor only; no dim).
 const BATTERY_SAVE_POLL_SEC = 120;
 
@@ -409,6 +410,13 @@ function applyShowCountdown(v) {
   localStorage.setItem(SHOW_COUNTDOWN_KEY, String(v));
 }
 
+// AQI badge next to the status-page date. Default ON (mirrors cfgShowAqi).
+function getCurrentShowAqi() { return STATE.cfgShowAqi ? 1 : 0; }
+function applyShowAqi(v) {
+  STATE.cfgShowAqi = v !== 0;
+  localStorage.setItem(SHOW_AQI_KEY, String(v));
+}
+
 // Poll interval: wired to the sidebar's real "#poll-interval" select + its
 // restartPollTimer(), so picking a preset here actually changes the
 // simulated fetch cadence -- a genuine effect, not just a cosmetic stand-in.
@@ -493,8 +501,13 @@ const SETTINGS = [
     values: [0, 1], valueLabels: ['OFF', 'ON'],
     btnTextSize: 2, destructive: false,
     getCurrent: getCurrentShowCountdown, apply: applyShowCountdown },
+  { label: 'SHOW AQI', leafTitle: 'SHOW AQI', subtitle: 'BADGE NEXT TO THE STATUS DATE',
+    hint: 'TAP TO TOGGLE', cols: 2, rows: 1, count: 2,
+    values: [0, 1], valueLabels: ['OFF', 'ON'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentShowAqi, apply: applyShowAqi },
 ];
-const SETTINGS_COUNT = 11;
+const SETTINGS_COUNT = 12;
 const SETTINGS_CONTENT_H = SETTINGS_COUNT * SET_ROW_STEP - (SET_ROW_STEP - SET_ROW_H);
 const SETTINGS_SCROLL_MAX = (SETTINGS_CONTENT_H > SETTINGS_VIEWPORT_H)
     ? (SETTINGS_CONTENT_H - SETTINGS_VIEWPORT_H) : 0;
@@ -595,6 +608,7 @@ const STATE = {
   cfgBatterySaveMode: 2, // 0=OFF 1=ON 2=AUTO — mirrors firmware cfgBatterySaveMode
   serverBatterySave: false, // last live Mac power.battery_save
   cfgShowCountdown: true, // mirrors the firmware's cfgShowCountdown (default on)
+  cfgShowAqi: true,       // mirrors the firmware's cfgShowAqi (default on)
   cfgScreenRotation: 1,  // mirrors the firmware's cfgScreenRotation (1=normal, 3=flipped)
 };
 
@@ -1330,15 +1344,20 @@ function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour
   gfx.fillCircle(cx, cy, 2, COL_TEXT);
 }
 
-// AQI badge colors, per the standard US EPA / aqicn.org scale. Mirrors the
-// firmware's aqiColors() in pages.cpp exactly (same breakpoints, same
-// white/black text choice per box brightness).
+// AQI badge colors, per the standard US EPA / aqicn.org scale. Background
+// hues are fixed by that scale; fg picked per-box by actual WCAG contrast
+// ratio (relative luminance, not a hue guess) -- most of these boxes are
+// bright/saturated enough that black text reads far better than white:
+// Good 9.97:1 black vs 2.11:1 white, Unhealthy 5.43:1 vs 3.87:1 (white fails
+// AA's 4.5:1), Very Unhealthy 5.31:1 vs 3.96:1 (white fails AA too). Only
+// Hazardous's dark maroon flips the winner back to white (10.02:1 vs a poor
+// 2.10:1 for black). Mirrors the firmware's aqiColors() in pages.cpp exactly.
 function aqiColors(aqi) {
-  if (aqi <= 50) return { bg: COL_GOOD, fg: COL_TEXT };               // Good
+  if (aqi <= 50) return { bg: COL_GOOD, fg: COL_TRACK_BLACK };        // Good
   if (aqi <= 100) return { bg: COL_YELLOW, fg: COL_TRACK_BLACK };     // Moderate
   if (aqi <= 150) return { bg: COL_AQI_ORANGE, fg: COL_TRACK_BLACK }; // Unhealthy for Sensitive Groups
-  if (aqi <= 200) return { bg: COL_WARN, fg: COL_TEXT };              // Unhealthy
-  if (aqi <= 300) return { bg: COL_PURPLE, fg: COL_TEXT };            // Very Unhealthy
+  if (aqi <= 200) return { bg: COL_WARN, fg: COL_TRACK_BLACK };       // Unhealthy
+  if (aqi <= 300) return { bg: COL_PURPLE, fg: COL_TRACK_BLACK };     // Very Unhealthy
   return { bg: COL_MAROON, fg: COL_TEXT };                            // Hazardous
 }
 
@@ -1397,7 +1416,7 @@ function drawStatusPage() {
   // AQI badge: a colored box (aqiColors() above) appended after the date,
   // e.g. "Mon 3 Aug [81]". Skipped when the Mac hasn't delivered a reading
   // yet (STATE.aqi < 0) rather than drawing a placeholder in a made-up color.
-  const haveAqi = bkk && STATE.aqi >= 0;
+  const haveAqi = bkk && STATE.cfgShowAqi && STATE.aqi >= 0;
   const aqiText = haveAqi ? String(STATE.aqi) : '';
   const badgeW = haveAqi ? aqiText.length * 6 * 2 + 6 : 0;  // size2 digits + 3px pad each side
   const gap = haveAqi ? 4 : 0;
@@ -1975,6 +1994,12 @@ function loadShowCountdown() {
   if (raw === null) return;
   // Default on when unset; only '0' turns it off (same as night_mode).
   STATE.cfgShowCountdown = raw !== '0';
+}
+
+function loadShowAqi() {
+  const raw = localStorage.getItem(SHOW_AQI_KEY);
+  if (raw === null) return;
+  STATE.cfgShowAqi = raw !== '0';
 }
 
 function loadBatterySave() {
@@ -2600,6 +2625,7 @@ loadNightMode();
 loadRotation();
 loadShowCountdown();
 loadBatterySave();
+loadShowAqi();
 applyEffectiveBrightnessFilter();
 render();
 fetchUsage();

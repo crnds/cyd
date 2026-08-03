@@ -115,6 +115,9 @@ void loadRuntimeConfig() {
   if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_SHOW_COUNTDOWN])) {
     cfgShowCountdown = p.getInt(CONFIG_KEY_NAMES[CFGKEY_SHOW_COUNTDOWN]) != 0;
   }
+  if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_SHOW_AQI])) {
+    cfgShowAqi = p.getInt(CONFIG_KEY_NAMES[CFGKEY_SHOW_AQI]) != 0;
+  }
   if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_BATTERY_SAVE])) {
     // 0=OFF, 1=ON, 2=AUTO (legacy 0/1 still map correctly).
     cfgBatterySaveMode = constrain(p.getInt(CONFIG_KEY_NAMES[CFGKEY_BATTERY_SAVE]),

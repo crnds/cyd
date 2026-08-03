@@ -96,6 +96,7 @@ bool cfgNightModeOn = false;
 volatile int cfgBatterySaveMode = BATTERY_SAVE_AUTO;
 volatile bool serverBatterySave = false;
 bool cfgShowCountdown = true;  // default on; flash "show_countdown"
+bool cfgShowAqi = true;        // default on; flash "show_aqi"
 bool nightDimActive = false;
 // Generic Settings-page persistence queue: a leaf's apply() (loop(), core 1)
 // mutates its live global directly, then queues the flash key/value here;

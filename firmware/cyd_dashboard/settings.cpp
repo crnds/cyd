@@ -33,7 +33,7 @@ static const char* const BRIGHTNESS_LABELS[5] = {"0%", "25%", "50%", "75%", "100
 // night_mode are shortened from their old /config.json names for that limit.
 const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT] = {
   "brightness", "poll_sec", "pixel_shift_min", "boot_page", "cat_shuffle_sec",
-  "night_mode", "screen_rotation", "show_countdown", "battery_save"
+  "night_mode", "screen_rotation", "show_countdown", "battery_save", "show_aqi"
 };
 
 void queueConfigSave(uint8_t keyId, int32_t value) {
@@ -201,6 +201,14 @@ static void applyShowCountdown(int v) {
   queueConfigSave(CFGKEY_SHOW_COUNTDOWN, v);
 }
 
+static const int SHOW_AQI_VALUES[2] = {0, 1};
+static const char* const SHOW_AQI_LABELS[2] = {"OFF", "ON"};
+static int getCurrentShowAqi() { return cfgShowAqi ? 1 : 0; }
+static void applyShowAqi(int v) {
+  cfgShowAqi = (v != 0);
+  queueConfigSave(CFGKEY_SHOW_AQI, v);
+}
+
 static const SettingDef SETTINGS[] = {
   { "BRIGHTNESS", "BRIGHTNESS", "BACKLIGHT BRIGHTNESS", "TAP A LEVEL TO APPLY",
     5, 1, 5, BRIGHTNESS_VALUES, BRIGHTNESS_LABELS, 2, false,
@@ -235,8 +243,11 @@ static const SettingDef SETTINGS[] = {
   { "SHOW COUNTDOWN", "SHOW COUNTDOWN", "GREEN BARS + CLOCK WEDGE", "TAP TO TOGGLE",
     2, 1, 2, SHOW_COUNTDOWN_VALUES, SHOW_COUNTDOWN_LABELS, 2, false,
     getCurrentShowCountdown, applyShowCountdown },
+  { "SHOW AQI", "SHOW AQI", "BADGE NEXT TO THE STATUS DATE", "TAP TO TOGGLE",
+    2, 1, 2, SHOW_AQI_VALUES, SHOW_AQI_LABELS, 2, false,
+    getCurrentShowAqi, applyShowAqi },
 };
-static const int SETTINGS_COUNT = 11;
+static const int SETTINGS_COUNT = 12;
 
 static const int SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
 static const int SET_BTN_X0 = 11, SET_BTN_Y = 100, SET_BTN_W = 54, SET_BTN_H = 56;

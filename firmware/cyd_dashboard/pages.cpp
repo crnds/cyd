@@ -793,16 +793,20 @@ static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int s
 // card x=2 w=157 (edge 159), right column x=161 w=157 (edge 318), with the
 // 2px column gap between them (159-161) matching the 2px margins at the
 // screen's own edges.
-// AQI badge colors, per the standard US EPA / aqicn.org scale. Text color
-// alternates white/black by box brightness (white on the darker green/red/
-// purple/maroon boxes, black on the lighter yellow/orange ones) -- mirrored
-// exactly in simulator.html's aqiColors().
+// AQI badge colors, per the standard US EPA / aqicn.org scale. Background
+// hues are fixed by that scale; fg picked per-box by actual WCAG contrast
+// ratio (relative luminance, not a hue guess) -- most of these boxes are
+// bright/saturated enough that black text reads far better than white:
+// Good 9.97:1 black vs 2.11:1 white, Unhealthy 5.43:1 vs 3.87:1 (white fails
+// AA's 4.5:1), Very Unhealthy 5.31:1 vs 3.96:1 (white fails AA too). Only
+// Hazardous's dark maroon flips the winner back to white (10.02:1 vs a poor
+// 2.10:1 for black). Mirrored exactly in simulator.html's aqiColors().
 static void aqiColors(int aqi, uint16_t& bg, uint16_t& fg) {
-  if (aqi <= 50)       { bg = COL_GOOD;       fg = COL_TEXT; }        // Good
+  if (aqi <= 50)       { bg = COL_GOOD;       fg = COL_TRACK_BLACK; } // Good
   else if (aqi <= 100) { bg = COL_YELLOW;     fg = COL_TRACK_BLACK; } // Moderate
   else if (aqi <= 150) { bg = COL_AQI_ORANGE; fg = COL_TRACK_BLACK; } // Unhealthy for Sensitive Groups
-  else if (aqi <= 200) { bg = COL_WARN;       fg = COL_TEXT; }        // Unhealthy
-  else if (aqi <= 300) { bg = COL_PURPLE;     fg = COL_TEXT; }        // Very Unhealthy
+  else if (aqi <= 200) { bg = COL_WARN;       fg = COL_TRACK_BLACK; } // Unhealthy
+  else if (aqi <= 300) { bg = COL_PURPLE;     fg = COL_TRACK_BLACK; } // Very Unhealthy
   else                 { bg = COL_MAROON;     fg = COL_TEXT; }        // Hazardous
 }
 
@@ -873,7 +877,7 @@ static void drawStatusPage() {
     // AQI badge: a colored box (aqiColors() above) appended after the date,
     // e.g. "Mon 3 Aug [81]". Skipped when the Mac hasn't delivered a reading
     // yet (STATE.aqi < 0) rather than drawing a placeholder in a made-up color.
-    bool haveAqi = STATE.aqi >= 0;
+    bool haveAqi = cfgShowAqi && STATE.aqi >= 0;
     char aqiBuf[8] = "";
     int badgeW = 0, gap = 0;
     if (haveAqi) {

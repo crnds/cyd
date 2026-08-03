@@ -373,6 +373,9 @@ inline bool batterySaveActive() {
 // Green reset-countdown bars (under 5h/week) + analog-clock timer wedge.
 // Green reset hand on the clock is always drawn when a reset is known.
 extern bool cfgShowCountdown;
+// Status-page AQI badge next to the date (see aqiColors()/drawStatusPage in
+// pages.cpp). Default on; toggled from the Settings area like cfgShowCountdown.
+extern bool cfgShowAqi;
 extern int cfgScreenRotation;
 extern int cfgTouchXMin;
 extern int cfgTouchXMax;
@@ -401,7 +404,7 @@ extern volatile bool pendingRestart;
 enum ConfigKeyId {
   CFGKEY_BRIGHTNESS = 0, CFGKEY_POLL_INTERVAL, CFGKEY_PIXEL_SHIFT, CFGKEY_BOOT_PAGE,
   CFGKEY_CAT_SHUFFLE, CFGKEY_NIGHT_MODE, CFGKEY_ROTATION, CFGKEY_SHOW_COUNTDOWN,
-  CFGKEY_BATTERY_SAVE, CFGKEY_COUNT
+  CFGKEY_BATTERY_SAVE, CFGKEY_SHOW_AQI, CFGKEY_COUNT
 };
 extern const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT];
 
