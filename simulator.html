@@ -1320,11 +1320,15 @@ function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour
   const hy = cy + Math.sin(hourRad) * r * 0.5;
   const mx = cx + Math.cos(minRad) * r * 0.8;
   const my = cy + Math.sin(minRad) * r * 0.8;
-  const sx = cx + Math.cos(secRad) * r * 0.9;
-  const sy = cy + Math.sin(secRad) * r * 0.9;
+  const sx = cx + Math.cos(secRad) * (r - 2);
+  const sy = cy + Math.sin(secRad) * (r - 2);
 
-  // Hour/minute hands drawn wide (wedge lines) for a bolder look; the second
-  // hand stays a thin single-pixel line to keep it visually distinct.
+  // Hour/minute hands drawn wide (wedge lines) for a bolder look. The second
+  // hand is thinner but still a wideLine (not a hard 1px drawLine) and
+  // reaches out to the same (r-2) radius as the reset line/wedge rim below --
+  // a plain thin drawLine stopping at r*0.9 left a few px of the timer wedge
+  // exposed past the hand's tip near the rim, reading as the green area
+  // sitting on top of the second hand instead of the other way around.
   gfx.drawWideLine(cx, cy, hx, hy, 2.0, COL_TEXT);
   gfx.drawWideLine(cx, cy, mx, my, 1.5, COL_TEXT);
 
@@ -1340,7 +1344,7 @@ function drawAnalogClock(cx, cy, r, hour24, minute, second, haveReset, resetHour
     gfx.drawLine(cx, cy, rx, ry, COL_GOOD);
   }
 
-  gfx.drawLine(cx, cy, sx, sy, COL_ACCENT);
+  gfx.drawWideLine(cx, cy, sx, sy, 1.0, COL_ACCENT);
   gfx.fillCircle(cx, cy, 2, COL_TEXT);
 }
 
@@ -1555,7 +1559,19 @@ function drawWeatherPage() {
     metaX = tempX + 2 * 30 + 16;
   }
 
-  const metaMaxX = heroRight;  // full right edge — no trailing icon
+  // AQI badge (same aqiColors() styling as the status page's date-row badge)
+  // pinned to the hero card's top-right corner -- this page has no digital
+  // date row to hang it off of, so the corner is the equivalent "top-right
+  // of the page" spot. Computed before metaMaxX so the condition text
+  // truncates around it instead of running underneath.
+  const haveAqi = STATE.cfgShowAqi && STATE.aqi >= 0;
+  let aqiBuf = '';
+  let badgeW = 0;
+  if (haveAqi) {
+    aqiBuf = String(STATE.aqi);
+    badgeW = aqiBuf.length * 6 * 2 + 6;  // size2 digits + 3px pad each side
+  }
+  const metaMaxX = heroRight - (haveAqi ? badgeW + 6 : 0);
 
   // Condition (size2) — top of meta column, optically with upper temp.
   {
@@ -1594,6 +1610,16 @@ function drawWeatherPage() {
     gfx.setTextColor(COL_TEXT);
     gfx.setCursor(x, 36);
     gfx.print(lStr);
+  }
+
+  if (haveAqi) {
+    const { bg, fg } = aqiColors(STATE.aqi);
+    const bx = heroRight - badgeW;
+    gfx.fillRoundRect(bx, 8, badgeW, 20, 3, bg);
+    gfx.setTextSize(2);
+    gfx.setTextColor(fg);
+    gfx.setCursor(bx + 3, 10);
+    gfx.print(aqiBuf);
   }
 
   // ── Hourly (next 6) — no "HOURLY" label ──────────────────

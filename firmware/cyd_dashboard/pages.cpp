@@ -754,11 +754,15 @@ static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int s
   int hy = cy + (int)(sinf(hourRad) * r * 0.5f);
   int mx = cx + (int)(cosf(minRad) * r * 0.8f);
   int my = cy + (int)(sinf(minRad) * r * 0.8f);
-  int sx = cx + (int)(cosf(secRad) * r * 0.9f);
-  int sy = cy + (int)(sinf(secRad) * r * 0.9f);
+  int sx = cx + (int)(cosf(secRad) * (r - 2));
+  int sy = cy + (int)(sinf(secRad) * (r - 2));
 
-  // Hour/minute hands drawn wide (wedge lines) for a bolder look; the second
-  // hand stays a thin single-pixel line to keep it visually distinct.
+  // Hour/minute hands drawn wide (wedge lines) for a bolder look. The second
+  // hand is thinner but still a wideLine (not a hard 1px drawLine) and
+  // reaches out to the same (r-2) radius as the reset line/wedge rim below --
+  // a plain thin drawLine stopping at r*0.9 left a few px of the timer wedge
+  // exposed past the hand's tip near the rim, reading as the green area
+  // sitting on top of the second hand instead of the other way around.
   g->drawWideLine(cx, cy, hx, hy, 2.0f, COL_TEXT);
   g->drawWideLine(cx, cy, mx, my, 1.5f, COL_TEXT);
 
@@ -774,7 +778,7 @@ static void drawAnalogClock(int cx, int cy, int r, int hour24, int minute, int s
     g->drawLine(cx, cy, rx, ry, COL_GOOD);
   }
 
-  g->drawLine(cx, cy, sx, sy, COL_ACCENT);
+  g->drawWideLine(cx, cy, sx, sy, 1.0f, COL_ACCENT);
   g->fillCircle(cx, cy, 2, COL_TEXT);
 }
 
@@ -1103,7 +1107,19 @@ static void drawWeatherPage() {
     metaX = tempX + 2 * 30 + 16;
   }
 
-  const int metaMaxX = heroRight;  // full right edge — no trailing icon
+  // AQI badge (same aqiColors() styling as the status page's date-row badge)
+  // pinned to the hero card's top-right corner -- this page has no digital
+  // date row to hang it off of, so the corner is the equivalent "top-right
+  // of the page" spot. Computed before metaMaxX so the condition text
+  // truncates around it instead of running underneath.
+  bool haveAqi = cfgShowAqi && STATE.aqi >= 0;
+  char aqiBuf[8] = "";
+  int badgeW = 0;
+  if (haveAqi) {
+    snprintf(aqiBuf, sizeof(aqiBuf), "%d", STATE.aqi);
+    badgeW = (int)strlen(aqiBuf) * 6 * 2 + 6;  // size2 digits + 3px pad each side
+  }
+  const int metaMaxX = heroRight - (haveAqi ? badgeW + 6 : 0);
 
   // Condition (size2) — top of meta column, optically with upper temp.
   {
@@ -1151,6 +1167,17 @@ static void drawWeatherPage() {
     g->setTextColor(COL_TEXT);
     g->setCursor(x, 36);
     g->print(lStr);
+  }
+
+  if (haveAqi) {
+    uint16_t bg, fg;
+    aqiColors(STATE.aqi, bg, fg);
+    int bx = heroRight - badgeW;
+    g->fillRoundRect(bx, 8, badgeW, 20, 3, bg);
+    g->setTextSize(2);
+    g->setTextColor(fg);
+    g->setCursor(bx + 3, 10);
+    g->print(aqiBuf);
   }
 
   // ── Hourly (next 6) — no "HOURLY" label ──────────────────
