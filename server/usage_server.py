@@ -1039,6 +1039,24 @@ def build_report():
 HEARTBEAT_LOG_INTERVAL_SEC = 300
 _last_heartbeat_log = {}  # ip -> monotonic time of last heartbeat line logged
 
+# Gap reporting. The throttled heartbeat above keeps the log small, but it also
+# made real outages invisible: at any poll interval the log looks like one
+# tidy line every 300s whether the board polled 60 times in between or zero.
+# That is why a "board goes OFFLINE for 1-2 minutes" report could not be
+# confirmed or dated from this log at all.
+#
+# So: also emit one line whenever a client returns after a suspiciously long
+# silence. The board's poll interval is not known here, so it is inferred as
+# the smallest gap ever seen from that IP (a client cannot poll faster than its
+# own interval). A gap of GAP_MULTIPLE times that, and at least
+# GAP_MIN_SEC (the firmware's own offline grace, OFFLINE_AFTER_MS), means the
+# board almost certainly showed the OFFLINE screen. Low volume by construction:
+# silent while things are healthy, one line per actual episode.
+GAP_MIN_SEC = 60
+GAP_MULTIPLE = 3
+_last_seen_mono = {}  # ip -> monotonic time of that client's previous request
+_min_gap_seen = {}    # ip -> smallest inter-request gap, i.e. inferred poll interval
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -1074,10 +1092,32 @@ class Handler(BaseHTTPRequestHandler):
             # line here grows /tmp/cydusage.log by ~200KB/day for no benefit,
             # since `tail -f` just needs proof-of-life, not every single poll.
             now_mono = time.monotonic()
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            prev_seen = _last_seen_mono.get(ip)
+            _last_seen_mono[ip] = now_mono
+            gap = None if prev_seen is None else now_mono - prev_seen
+            if gap is not None:
+                floor = _min_gap_seen.get(ip)
+                # Update the inferred poll interval before testing, so the very
+                # first gaps (which set the baseline) can't read as an outage.
+                if floor is None or gap < floor:
+                    _min_gap_seen[ip] = gap
+                    floor = gap
+                if gap >= GAP_MIN_SEC and gap >= floor * GAP_MULTIPLE:
+                    # Stamping the heartbeat here also suppresses the routine
+                    # line below, so an episode reports exactly once.
+                    _last_heartbeat_log[ip] = now_mono
+                    print(
+                        f"{stamp} {ip} GET /api/usage  RESUMED after {gap:.0f}s gap "
+                        f"(polls ~every {floor:.0f}s) -- board was likely OFFLINE",
+                        flush=True,
+                    )
+
             last = _last_heartbeat_log.get(ip, 0.0)
             if now_mono - last >= HEARTBEAT_LOG_INTERVAL_SEC:
                 _last_heartbeat_log[ip] = now_mono
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {ip} GET /api/usage", flush=True)
+                print(f"{stamp} {ip} GET /api/usage", flush=True)
         self._send_json(build_report())
 
     def do_POST(self):

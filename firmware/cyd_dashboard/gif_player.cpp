@@ -333,7 +333,15 @@ void gifTick(bool offline) {
     gifMinY = 220;
     gifMaxY = -1;
   }
-  lockSD();
+  // Bounded wait: if networkTask (core 0) is mid-poll on the card, drop this
+  // frame and try again shortly rather than blocking the render core and
+  // holding the bus hostage. See tryLockSD()'s comment in state.h — during an
+  // outage the cat player and the recovery poll are competing for the same
+  // card, and the poll has to win.
+  if (!tryLockSD(20)) {
+    gifNextFrameMs = now + 40;
+    return;
+  }
   int more = gif->playFrame(false, &delayMs);  // bSync=false: we handle timing ourselves
   unlockSD();
   if (gifFirstFrame) {

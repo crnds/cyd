@@ -51,22 +51,74 @@ void connectWifi() {
 
 // Resolve cfgServerHost to an IP. Plain IPs are parsed directly; ".local"
 // names are looked up over mDNS so the board tracks the Mac across IP changes.
+//
+// mDNS must never become the ONLY road back online. Multicast is the first
+// thing a busy or lossy WLAN drops, and MDNS.queryHost() blocks for up to 3s —
+// at the 5s Poll Interval setting that is most of a cycle, every cycle. So:
+//   * once an address has resolved even once, a later failed lookup keeps
+//     using it rather than failing the poll (the Mac's IP only really changes
+//     across a sleep/wake, so stale-but-plausible beats nothing at all);
+//   * lookups are rate-limited to RESOLVE_RETRY_MS regardless of poll rate;
+//   * the address is cached in NVS, so a reboot during a multicast outage can
+//     still reach the Mac without a working lookup.
 static IPAddress serverIp;
-static bool serverIpResolved = false;
+static bool serverIpValid = false;    // serverIp holds an address worth trying
+static bool serverIpSuspect = false;  // ...but repeated failures say re-check it
+static uint32_t lastResolveAttemptMs = 0;
+static bool serverIpLoadedFromFlash = false;
+static const uint32_t RESOLVE_RETRY_MS = 30000;
 
 bool resolveServer() {
   String host = cfgServerHost;
-  if (host.endsWith(".local")) {
-    String name = host.substring(0, host.length() - 6);
-    IPAddress ip = MDNS.queryHost(name.c_str(), 3000);
-    if (ip == IPAddress(0, 0, 0, 0)) return false;
-    serverIp = ip;
-  } else if (!serverIp.fromString(host)) {
-    return false;
+  if (!host.endsWith(".local")) {
+    if (!serverIp.fromString(host)) return false;
+    serverIpValid = true;
+    serverIpSuspect = false;
+    return true;
   }
-  serverIpResolved = true;
+
+  // Seed from the NVS cache once per boot, so the very first poll after a
+  // restart doesn't have to wait for a successful multicast lookup.
+  if (!serverIpLoadedFromFlash) {
+    serverIpLoadedFromFlash = true;
+    uint32_t cached = loadServerIpFromFlash();
+    if (cached != 0) {
+      serverIp = IPAddress(cached);
+      serverIpValid = true;
+      serverIpSuspect = true;  // plausible, but confirm it with a real lookup
+    }
+  }
+
+  uint32_t now = millis();
+  if (lastResolveAttemptMs != 0 && now - lastResolveAttemptMs < RESOLVE_RETRY_MS) {
+    return serverIpValid;  // too soon to pay for mDNS again; use what we have
+  }
+  lastResolveAttemptMs = now;
+
+  String name = host.substring(0, host.length() - 6);
+  IPAddress ip = MDNS.queryHost(name.c_str(), 3000);
+  if (ip == IPAddress(0, 0, 0, 0)) {
+    logDiag("mdns_resolve_fail");
+    return serverIpValid;  // fall back to the last known good address
+  }
+  if (!serverIpValid || ip != serverIp) {
+    serverIp = ip;
+    saveIntConfigToFlash(SERVER_IP_KEY, (int32_t)(uint32_t)ip);
+  }
+  serverIpValid = true;
+  serverIpSuspect = false;
   return true;
 }
+
+// Consecutive failed GETs against the currently cached serverIp. A single
+// ordinary blip (one dropped packet, one slow response) shouldn't make us
+// distrust an IP that's still almost certainly correct -- the Mac's IP only
+// actually changes across a sleep/wake -- so this must reach
+// IP_INVALIDATE_AFTER_FAILS before we mark the address suspect and let
+// resolveServer() re-check it (which it then does on its own rate limit,
+// still falling back to this address while the lookup keeps failing).
+static int ipFailStreak = 0;
+static const int IP_INVALIDATE_AFTER_FAILS = 2;
 
 static const char* CACHE_PATH = "/last_usage.json";
 static const char* WEATHER_CACHE_PATH = "/weather.json";
@@ -412,24 +464,52 @@ bool fetchUsage() {
     return false;
   }
 
-  if (!serverIpResolved && !resolveServer()) {
-    return false;  // Mac not announcing itself yet (likely still asleep)
+  if ((!serverIpValid || serverIpSuspect) && !resolveServer()) {
+    return false;  // never resolved at all — Mac likely still asleep
   }
 
-  HTTPClient http;
-  String url = String("http://") + serverIp.toString() + ":" + String(cfgServerPort) + "/api/usage";
-  http.setConnectTimeout(3000);  // cap the TCP connect, not just the read
-  http.setTimeout(5000);
-  http.begin(url);
-  int code = http.GET();
-  if (code != 200) {
+  // One immediate retry before calling the cycle a failure. On a lossy link a
+  // single dropped SYN is routine, and with the offline grace measured in wall
+  // time (cyd_dashboard.ino's OFFLINE_AFTER_MS) an isolated miss should cost
+  // nothing at all. Two back-to-back misses is real evidence, one is not.
+  String payload;
+  int code = 0;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) delay(300);
+    HTTPClient http;
+    String url = String("http://") + serverIp.toString() + ":" + String(cfgServerPort) + "/api/usage";
+    http.setConnectTimeout(3000);  // cap the TCP connect, not just the read
+    http.setTimeout(5000);
+    http.begin(url);
+    code = http.GET();
+    if (code == 200) {
+      payload = http.getString();
+      http.end();
+      break;
+    }
     http.end();
-    serverIpResolved = false;  // force a fresh mDNS lookup next cycle
+  }
+
+  if (code != 200) {
+    ipFailStreak++;
+    if (ipFailStreak == 1) {
+      logDiag((String("fetch_fail http_code=") + code).c_str());
+    } else if (ipFailStreak >= IP_INVALIDATE_AFTER_FAILS) {
+      // Re-check the address, but keep using it meanwhile — resolveServer()
+      // falls back to it for as long as the lookup keeps failing.
+      serverIpSuspect = true;
+    }
     return false;
   }
-
-  String payload = http.getString();
-  http.end();
+  // A 200 is direct proof the address is right, which beats any lookup — so
+  // stop re-checking it. Without this, a board whose mDNS is permanently
+  // broken but whose cached IP works fine would keep paying the 3s blocking
+  // query every RESOLVE_RETRY_MS forever.
+  serverIpSuspect = false;
+  if (ipFailStreak > 0) {
+    logDiag(("fetch_recovered after " + String(ipFailStreak) + " fails").c_str());
+    ipFailStreak = 0;
+  }
 
   // Single filtered parse: applyUsageDoc copies into STATE; appendArchiveRow
   // reuses the same doc for today/active_now (no second deserialize).
@@ -439,7 +519,18 @@ bool fetchUsage() {
   if (err) return false;
   if (!applyUsageDoc(doc, true)) return false;  // live poll: honor power.battery_save
 
-  if (STATE.sdOk) {
+  // Persisting to SD is paced by wall time, not by the poll rate. Poll Interval
+  // goes down to 5s, and this block is an SD.remove plus four file writes — at
+  // 5s that was ~17k archive rows/day (~4GB/yr) and a constant stream of card
+  // I/O competing with the GIF player for sdMutex. None of these files needs
+  // finer-than-a-minute granularity: the caches only matter at cold boot, and
+  // the archive is for off-device trend analysis. At the 20s/60s/5min poll
+  // settings this changes almost nothing; at 5s it cuts card traffic ~12x.
+  static uint32_t lastSdPersistMs = 0;
+  uint32_t nowMs = millis();
+  bool persistDue = (lastSdPersistMs == 0) || (nowMs - lastSdPersistMs >= SD_PERSIST_MIN_MS);
+  if (STATE.sdOk && persistDue) {
+    lastSdPersistMs = nowMs;
     // FILE_WRITE appends on this SD library rather than truncating, so
     // remove first to guarantee a clean overwrite each time. One sdMutex hold
     // covers the cache write + archive + env cache (appendArchiveRow/saveEnvCache

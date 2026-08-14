@@ -333,6 +333,17 @@ inline void unlockState() { if (stateMutex) xSemaphoreGive(stateMutex); }
 extern SemaphoreHandle_t sdMutex;
 inline void lockSD()   { if (sdMutex) xSemaphoreTake(sdMutex, portMAX_DELAY); }
 inline void unlockSD() { if (sdMutex) xSemaphoreGive(sdMutex); }
+// Bounded variant for the GIF player's per-frame decode, which is the ONLY
+// high-frequency SD consumer (core 1, ~12fps). With an unbounded wait there,
+// going offline actively sabotaged coming back: the cat screen is what plays
+// during an outage, so core 0's recovery path (diag appends, cache reads,
+// capacity refresh) queued behind a continuous stream of frame decodes.
+// A skipped cat frame is invisible; a stalled poll is not. Returns false if
+// the card was busy — callers must NOT unlock in that case.
+inline bool tryLockSD(uint32_t waitMs) {
+  if (!sdMutex) return true;
+  return xSemaphoreTake(sdMutex, pdMS_TO_TICKS(waitMs)) == pdTRUE;
+}
 
 // Cat-shuffle interval: how long each cat GIF plays before rotating to a new
 // random one. Defined in gif_player.cpp (gifTick reads it); settings.cpp's
@@ -456,6 +467,16 @@ bool drawBmpFromSD(const char* path, int dx, int dy);
 void showBootSplash();
 void saveWifiCredsToFlash(const String& ssid, const String& password);
 void saveIntConfigToFlash(const char* key, int32_t value);
+// Cached last-known server IPv4 (raw 4 bytes in an int32). Not a Settings-area
+// key — see the comment on loadServerIpFromFlash() in sd_store.cpp.
+const char* const SERVER_IP_KEY = "server_ip";
+uint32_t loadServerIpFromFlash();
+
+// Floor on how often the poll loop touches the SD card for the JSON caches,
+// /archive.csv and the capacity stats. Decoupled from Poll Interval so the 5s
+// setting doesn't turn every poll into five file operations — see the comments
+// at fetchUsage()'s persist block (net.cpp) and networkTask() (the .ino).
+const uint32_t SD_PERSIST_MIN_MS = 60000UL;
 void forgetWifiFromFlash();
 
 // ── PAGES / RENDER (pages.cpp) ─────────────────────────────

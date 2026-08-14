@@ -13,16 +13,18 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <!-- Background + low-priority I/O: tell launchd this is a helper, not
-         interactive UI work. Helps App Nap / scheduler deprioritize us when
-         the Mac is trying to idle (the real power cost is sleep-prevention
-         from board polls; CPU itself is already tiny). -->
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>LowPriorityIO</key>
-    <true/>
-    <key>Nice</key>
-    <integer>5</integer>
+    <!-- Deliberately NOT set: ProcessType=Background, LowPriorityIO, Nice.
+         They look right for a helper daemon, but this job has a latency
+         contract: the board gives up on a response after 5s
+         (firmware/cyd_dashboard/net.cpp's http.setTimeout) and treats the
+         miss as evidence it is offline. ProcessType=Background confines the
+         process to efficiency cores on Apple Silicon and opts it into
+         aggressive timer coalescing, which is exactly the wrong trade here.
+         The installed copy in ~/Library/LaunchAgents has never had these
+         keys; this file previously did, so re-copying it would have silently
+         changed the running behaviour. CPU cost is negligible either way —
+         the real power concern is sleep-prevention, handled by
+         battery_guard_loop in usage_server.py, not by scheduler priority. -->
     <key>StandardOutPath</key>
     <string>/tmp/cydusage.log</string>
     <key>StandardErrorPath</key>

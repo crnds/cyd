@@ -123,21 +123,31 @@ int cfgTouchOffsetRotation = 0;
 // resolveServer() looks it up via mDNS. mdnsStarted is reset here (core 0)
 // whenever WiFi drops, so ensureMdns() (net.cpp) re-initializes once it's
 // back — the board's own IP may have changed across the outage.
-int wifiDownCycles = 0;
-// 45 failed poll cycles -> self-reboot. Each cycle is one effective poll
-// interval (POLL_INTERVAL_MS), not a fixed 20s -- Battery Save floors that to
-// 120s, so 45 cycles is ~90 min in that mode (was "~15 min" back when the
-// interval was always the 20s default; still stretches further if the user's
-// own Poll Interval preference is set above that floor).
-const int RESTART_AFTER_CYCLES = 45;
+// Both thresholds below are WALL-CLOCK, deliberately not counted in poll
+// cycles. Poll Interval is user-settable from 5s to 5min (settings.cpp's
+// POLL_VALUES) and Battery Save floors it to 120s, so a cycle count silently
+// divides any threshold by the interval: the old "3 cycles" offline trigger
+// was ~1 min at the 20s default but a **15-second hair trigger** at the 5s
+// setting, which a link with any ordinary packet loss trips constantly.
+// Timestamps are millis() and compared with unsigned subtraction, so the
+// ~49-day rollover is handled without a special case.
 
-// Consecutive failed polls (WiFi down OR WiFi up but the Mac unreachable)
-// before STATE.haveData is forced back to false, switching the display to the
+// millis() of the last poll that found WiFi down, 0 when WiFi is up. Drives
+// the self-reboot below.
+uint32_t wifiDownSinceMs = 0;
+// ~15 min of continuous WiFi loss -> self-reboot, at any poll interval.
+const uint32_t RESTART_AFTER_WIFI_DOWN_MS = 900000UL;
+
+// millis() of the last *successful* poll. Once this is more than
+// OFFLINE_AFTER_MS in the past (WiFi down OR WiFi up but the Mac unreachable),
+// STATE.haveData is forced back to false, switching the display to the
 // cat-GIF/OFFLINE screen. STATE.haveData is otherwise sticky-true once any
 // fetch (or SD cache load) succeeds, so this is what makes a real outage
 // actually visible instead of just freezing the last-known dashboard forever.
-int fetchFailCycles = 0;
-const int OFFLINE_AFTER_CYCLES = 3;  // ~1 min at the default 20s poll interval
+// Left at 0 on purpose: before the first success, `now - 0` is simply uptime,
+// so a board that never reaches the Mac goes offline OFFLINE_AFTER_MS after boot.
+uint32_t lastFetchSuccessMs = 0;
+const uint32_t OFFLINE_AFTER_MS = 60000UL;  // ~1 min without a successful poll
 
 // ── NETWORK TASK ───────────────────────────────────────────
 // All blocking I/O (usage poll — which now also carries BTC/weather — mDNS,
@@ -167,23 +177,35 @@ void networkTask(void* param) {
     if (now - lastUsagePollMs >= POLL_INTERVAL_MS) {
       lastUsagePollMs = now;
       lastPollMs = now;  // drives the footer progress line on the render side
-      if (STATE.sdOk) refreshSdCapacityCache();  // cheap FAT bookkeeping; unrelated to WiFi
+      // FAT bookkeeping for the Device Stats page; unrelated to WiFi. Paced by
+      // wall time rather than by the poll rate — SD.totalBytes()/usedBytes()
+      // walk the allocation table, which is not free on a large card, and the
+      // Poll Interval setting goes down to 5s. Card capacity does not change
+      // meaningfully inside a minute.
+      static uint32_t lastCapacityRefreshMs = 0;
+      if (STATE.sdOk && (lastCapacityRefreshMs == 0 ||
+                         now - lastCapacityRefreshMs >= SD_PERSIST_MIN_MS)) {
+        lastCapacityRefreshMs = now;
+        refreshSdCapacityCache();
+      }
       if (WiFi.status() == WL_CONNECTED) {
         wifiOk = true;
-        if (wifiDownCycles > 0) {
-          logDiag(("wifi_recovered after " + String(wifiDownCycles) + " cycles").c_str());
+        if (wifiDownSinceMs != 0) {
+          logDiag(("wifi_recovered after " + String((now - wifiDownSinceMs) / 1000) + "s").c_str());
+          wifiDownSinceMs = 0;
         }
-        wifiDownCycles = 0;
         ensureMdns();
         connected = fetchUsage();
       } else {
         wifiOk = false;
-        if (wifiDownCycles == 0) logDiag("wifi_down");
+        if (wifiDownSinceMs == 0) {
+          wifiDownSinceMs = now;
+          logDiag("wifi_down");
+        }
         connected = false;
         mdnsStarted = false;       // re-init mDNS once WiFi returns
-        wifiDownCycles++;
         WiFi.reconnect();
-        if (wifiDownCycles >= RESTART_AFTER_CYCLES) {
+        if (now - wifiDownSinceMs >= RESTART_AFTER_WIFI_DOWN_MS) {
           logDiag("restart_wifi_timeout");
           ESP.restart();
         }
@@ -194,11 +216,14 @@ void networkTask(void* param) {
       // only thing that ever flips the display back to the offline/cat screen.
       if (connected) {
         STATE.haveData = true;
-        fetchFailCycles = 0;
-      } else {
-        if (!STATE.haveData && STATE.sdOk) STATE.haveData = loadCachedUsage();
-        if (fetchFailCycles < OFFLINE_AFTER_CYCLES) fetchFailCycles++;
-        if (fetchFailCycles >= OFFLINE_AFTER_CYCLES) STATE.haveData = false;
+        lastFetchSuccessMs = now;
+      } else if (now - lastFetchSuccessMs >= OFFLINE_AFTER_MS) {
+        STATE.haveData = false;
+      } else if (!STATE.haveData && STATE.sdOk) {
+        // Still inside the grace window with nothing to show yet (cold boot
+        // against an unreachable Mac): fall back to the SD cache so the
+        // dashboard shows real, if stale, numbers rather than the cat screen.
+        STATE.haveData = loadCachedUsage();
       }
     }
 
@@ -292,6 +317,7 @@ void setup() {
   connectWifi();
   connected = fetchUsage();  // also carries BTC + weather from the Mac
   STATE.haveData = connected;
+  if (connected) lastFetchSuccessMs = millis();  // start the offline grace window
   if (!connected && STATE.sdOk) STATE.haveData = loadCachedUsage();
   render();
   lastPollMs = millis();

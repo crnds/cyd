@@ -132,6 +132,19 @@ void loadRuntimeConfig() {
   Serial.println("[config] loaded overrides from flash");
 }
 
+// Last mDNS-resolved server address, cached in NVS as a raw 4-byte IPv4 under
+// the key "server_ip". Not a user setting (it never appears in the Settings
+// area) — purely a boot-time shortcut so a board that reboots while multicast
+// is unhealthy can still reach the Mac without waiting for a working mDNS
+// lookup. Written via the generic saveIntConfigToFlash(). 0 = nothing cached.
+uint32_t loadServerIpFromFlash() {
+  Preferences p;
+  p.begin(CFG_NS, true);  // read-only
+  uint32_t ip = p.isKey(SERVER_IP_KEY) ? (uint32_t)p.getInt(SERVER_IP_KEY, 0) : 0;
+  p.end();
+  return ip;
+}
+
 const char* resetReasonStr() {
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON: return "POWERON";

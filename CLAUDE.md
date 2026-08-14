@@ -233,11 +233,22 @@ flash storage for the scheme change to orphan.
   physical board.
 - **Server discovery by name, not IP:** `SERVER_HOST` is normally a `.local`
   Bonjour name, resolved via mDNS (`resolveServer()`), so the board tracks
-  the Mac across the IP changes a sleeping laptop causes. The resolved IP is
-  cached and re-resolved on any fetch failure.
+  the Mac across the IP changes a sleeping laptop causes. **mDNS is never the
+  only road back online** — multicast is the first thing a busy/lossy WLAN
+  drops, and `MDNS.queryHost()` blocks up to 3s, which at the 5s Poll Interval
+  setting is most of a cycle. So `resolveServer()`: keeps using the last
+  known-good IP when a lookup fails (the Mac's IP only really changes across a
+  sleep/wake, so stale-but-plausible beats nothing); rate-limits lookups to
+  `RESOLVE_RETRY_MS` (30s) regardless of poll rate; and caches the address in
+  NVS under `server_ip` so a reboot during a multicast outage still reaches the
+  Mac. 2 consecutive fetch failures (`ipFailStreak`/`IP_INVALIDATE_AFTER_FAILS`)
+  only mark the address *suspect* (re-check it), they no longer discard it.
+  `fetchUsage()` also **retries once immediately** (300ms apart) before calling
+  a cycle failed, so an isolated dropped packet costs nothing.
 - **Self-healing for "set up once and leave":** `WiFi.setAutoReconnect(true)`,
   non-blocking reconnect in `networkTask` (core 0), and an `ESP.restart()`
-  after ~15 min (`RESTART_AFTER_CYCLES`) of no WiFi.
+  after ~15 min of no WiFi (`RESTART_AFTER_WIFI_DOWN_MS`, measured against
+  `wifiDownSinceMs` in wall time — see the offline-threshold note below).
 - **First-boot AP setup portal (`runApSetup()`).** Deliberately narrow trigger:
   only when `cfgWifiSsid` is empty after `loadRuntimeConfig()` (i.e.
   `WIFI_SSID` left blank in `config.h` and no `wifi_ssid` ever saved to
@@ -263,10 +274,17 @@ flash storage for the scheme change to orphan.
   so cats play on the cat pages and on *any* page whenever offline, and
   `gifTick(offline)` overlays `drawOfflineBanner()` (textSize 5, top-center)
   on top of the frame. `STATE.haveData` is otherwise sticky-true once any
-  fetch or SD cache load succeeds, so `fetchFailCycles`/`OFFLINE_AFTER_CYCLES`
-  (~1 min of consecutive failed polls at default 20s, longer under Battery
-  Save) is what forces it back to false — without that, a real outage would
-  just freeze the last-known dashboard forever instead of ever showing offline.
+  fetch or SD cache load succeeds, so `lastFetchSuccessMs`/`OFFLINE_AFTER_MS`
+  is what forces it back to false — without that, a real outage would just
+  freeze the last-known dashboard forever instead of ever showing offline.
+  **This threshold (and the WiFi self-reboot) is WALL-CLOCK — ~60s since the
+  last successful poll — deliberately not a count of poll cycles.** Poll
+  Interval is user-settable from 5s to 5min and Battery Save floors it to
+  120s, so a cycle count silently divides the threshold by the interval: the
+  old `OFFLINE_AFTER_CYCLES = 3` meant ~1 min at the 20s default but a
+  **15-second hair trigger at the 5s setting**, which any ordinary packet loss
+  trips constantly. That was the cause of the "goes OFFLINE for 1-2 minutes
+  for no reason" flap. Don't reintroduce cycle-counted timeouts here.
 - Token fields are `int64_t` (weekly totals exceed the 32-bit `long` range).
 - **Page map (`PAGE_COUNT = 7`):** 0 status (clock + mini bars + weather/BTC
   tiles; tap weather → overlay), 1 projects + 7-day trend, 2 home large
@@ -309,7 +327,12 @@ flash storage for the scheme change to orphan.
 - **`sdMutex` — the second lock.** The cat pages are the only code that reads the SD
   card from the render core (core 1); all other SD I/O is on `networkTask`
   (core 0). `sdMutex` (via `lockSD`/`unlockSD`) serializes the HSPI/SD bus
-  between the two. Only nesting allowed is `sdMutex` → `stateMutex` (as in
+  between the two. **The GIF player's per-frame decode uses `tryLockSD(20)`,
+  not `lockSD()`, and skips the frame when the card is busy** — with an
+  unbounded wait, going offline sabotaged coming back: cats are what play
+  during an outage, so `networkTask`'s recovery I/O queued behind a continuous
+  ~12fps stream of frame decodes. A dropped cat frame is invisible; a stalled
+  poll is not. Only nesting allowed is `sdMutex` → `stateMutex` (as in
   `appendArchiveRow`/`saveEnvCache` under `fetchUsage`'s SD block); nothing takes
   `sdMutex` while holding `stateMutex`, so `render()` never blocks on the card.
   (The display bus is VSPI and stays single-core, so it needs no such lock.)
@@ -331,10 +354,13 @@ flash storage for the scheme change to orphan.
   `night_mode` (0/1, fixed 23:00-07:00 auto-dim to 25%), `show_countdown`
   (0/1, default 1 — green reset bars under 5h/week + analog clock timer
   wedge; green reset hand always stays), `battery_save` (0/1/2), `show_aqi`
-  (0/1, default 1 — colored AQI badge next to the status-page date). All of these
-  except `wifi_ssid`/`wifi_password`/`server_host`/`server_port`/the touch
-  calibration keys are also settable at runtime from the on-device Settings
-  area (see above) — lets a set-once board be retuned without reflashing.
+  (0/1, default 1 — colored AQI badge next to the status-page date), and
+  `server_ip` (raw 4-byte IPv4 of the last successful mDNS resolve — written
+  by `resolveServer()`, not a user setting and absent from the Settings area;
+  purely so a reboot during a multicast outage can still reach the Mac). All of
+  these except `wifi_ssid`/`wifi_password`/`server_host`/`server_port`/`server_ip`/
+  the touch calibration keys are also settable at runtime from the on-device
+  Settings area (see above) — lets a set-once board be retuned without reflashing.
   **One-time migration:** if a board previously ran SD-based config, the
   first boot of this firmware imports any existing `/config.json` into flash
   (`migrateLegacyConfigIfNeeded()`, gated on an NVS `migrated` flag so it only
@@ -346,8 +372,13 @@ flash storage for the scheme change to orphan.
   - `/last_usage.json` — last-good `/api/usage` blob; `/last_env.json` — last
     BTC/weather. Both restored at boot so the dashboard shows real (if stale)
     data and the BTC/weather tiles aren't blank while the Mac is unreachable.
-  - `/archive.csv` — fine-grained **one row per poll**
-    (~20s, unbounded, ~1GB/yr) for off-device analysis; NOT shown on screen.
+  - `/archive.csv` — fine-grained history for off-device analysis; NOT shown on
+    screen. **Written at most once per `SD_PERSIST_MIN_MS` (60s), not once per
+    poll** — the whole SD-persist block in `fetchUsage()` (cache rewrite +
+    archive + env + weather) and `refreshSdCapacityCache()` are paced by wall
+    time, because at the 5s Poll Interval setting per-poll writes meant ~17k
+    rows/day (~4GB/yr) plus constant `sdMutex` contention with the GIF player.
+    Unbounded, ~300MB/yr.
     There is **no** `/daily_log.csv` / 30-day on-device trend anymore.
   - `/diag_log.csv` — black-box event log (`logDiag`): boot + reset reason,
     WiFi down/recovered, self-reboot, hourly heap/uptime, one-shot low-heap.
