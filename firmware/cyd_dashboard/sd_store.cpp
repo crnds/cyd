@@ -102,12 +102,20 @@ void loadRuntimeConfig() {
     cfgShiftStepMs = (uint32_t)m * 60000;
   }
   if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_BOOT_PAGE])) {
-    cfgBootPage = constrain(p.getInt(CONFIG_KEY_NAMES[CFGKEY_BOOT_PAGE]), 0, PAGE_COUNT - 1);
+    int v = p.getInt(CONFIG_KEY_NAMES[CFGKEY_BOOT_PAGE]);
+    cfgBootPage = (v == BOOT_PAGE_AUTO) ? BOOT_PAGE_AUTO : constrain(v, 0, PAGE_COUNT - 1);
+  }
+  if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_LAST_PAGE])) {
+    cfgLastPage = constrain(p.getInt(CONFIG_KEY_NAMES[CFGKEY_LAST_PAGE]), 0, PAGE_COUNT - 1);
   }
   if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_CAT_SHUFFLE])) {
-    // 0 disables the early cutoff (GIFs always play to their natural end).
-    int s = constrain(p.getInt(CONFIG_KEY_NAMES[CFGKEY_CAT_SHUFFLE]), 0, 300);
-    catShuffleMs = (uint32_t)s * 1000;
+    // 0 disables the early cutoff (GIFs always play to their natural end);
+    // -1 is FIXED (disables auto-rotation entirely -- see catShuffleFixed).
+    // The -1 branch is explicit rather than folded into the *1000 cast below,
+    // since (uint32_t)(-1) would otherwise wrap to a huge millisecond value.
+    int s = constrain(p.getInt(CONFIG_KEY_NAMES[CFGKEY_CAT_SHUFFLE]), -1, 300);
+    catShuffleFixed = (s < 0);
+    catShuffleMs = catShuffleFixed ? 0 : (uint32_t)s * 1000;
   }
   if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_NIGHT_MODE])) {
     cfgNightModeOn = p.getInt(CONFIG_KEY_NAMES[CFGKEY_NIGHT_MODE]) != 0;
@@ -117,6 +125,12 @@ void loadRuntimeConfig() {
   }
   if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_SHOW_AQI])) {
     cfgShowAqi = p.getInt(CONFIG_KEY_NAMES[CFGKEY_SHOW_AQI]) != 0;
+  }
+  if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_HOURLY_FLASH])) {
+    cfgHourlyFlash = p.getInt(CONFIG_KEY_NAMES[CFGKEY_HOURLY_FLASH]) != 0;
+  }
+  if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_SHOW_PROGRESS])) {
+    cfgShowProgress = p.getInt(CONFIG_KEY_NAMES[CFGKEY_SHOW_PROGRESS]) != 0;
   }
   if (p.isKey(CONFIG_KEY_NAMES[CFGKEY_BATTERY_SAVE])) {
     // 0=OFF, 1=ON, 2=AUTO (legacy 0/1 still map correctly).

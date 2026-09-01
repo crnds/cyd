@@ -205,7 +205,7 @@ pre {
       <div class="status-line">
         <span id="conn-status"><span class="dot bad"></span>not connected</span>
         <span id="fetch-status">no fetch yet</span>
-        <span id="page-status">page 1/7</span>
+        <span id="page-status">page 1/6</span>
       </div>
     </div>
 
@@ -224,10 +224,14 @@ pre {
 <script>
 // ── CONSTANTS (mirroring cyd_dashboard.ino) ───────────────
 const POLL_DEFAULT_MS = 20000;
-const PAGE_COUNT = 5;
+const PAGE_COUNT = 6;
 const FOOTER_RIGHT_PADDING = 8;  // twin of pages.cpp's FOOTER_RIGHT_PADDING
 const GIF_PAGE = 3;   // 4th page: random cat GIFs on the device (stand-in here — see drawGifPage)
 const MIXED_PAGE = 4; // 5th page: status + cats split
+// 6th page: the same left column as MIXED_PAGE, but the right half shows the
+// note text from note.html instead of cats. Unlike GIF_PAGE/MIXED_PAGE this is
+// an ordinary page — a `case` in drawScreenContent()'s switch, no early return.
+const NOTE_PAGE = 5;
 
 // Anti-retention pixel shift — mirrors the firmware's SHIFT_ORBIT/cfgShiftStepMs:
 // the whole frame is blitted at an offset that orbits 0-2px (right/up only, so
@@ -280,12 +284,18 @@ const SETTINGS_VIEWPORT_H = SETTINGS_VISIBLE_ROWS * SET_ROW_STEP - (SET_ROW_STEP
 const SETTINGS_SCROLLBAR_X = 316, SETTINGS_SCROLLBAR_W = 4;
 const BRIGHTNESS_KEY = 'cyddashboard_v1_brightness';
 const BOOT_PAGE_KEY = 'cyddashboard_v1_bootpage';
+const LAST_PAGE_KEY = 'cyddashboard_v1_lastpage';
+// Mirrors the firmware's BOOT_PAGE_AUTO (state.h): cfgBootPage sentinel
+// meaning "resume whichever page was on screen before the last restart".
+const BOOT_PAGE_AUTO = -1;
 const CAT_SHUFFLE_KEY = 'cyddashboard_v1_catshuffle';
 const NIGHT_MODE_KEY = 'cyddashboard_v1_nightmode';
 const ROTATION_KEY = 'cyddashboard_v1_rotation';
 const SHOW_COUNTDOWN_KEY = 'cyddashboard_v1_showcountdown';
 const BATTERY_SAVE_KEY = 'cyddashboard_v1_batterysave';
 const SHOW_AQI_KEY = 'cyddashboard_v1_showaqi';
+const HOURLY_FLASH_KEY = 'cyddashboard_v1_hourlyflash';
+const SHOW_PROGRESS_KEY = 'cyddashboard_v1_showprogress';
 // Mirrors firmware BATTERY_SAVE_POLL_SEC (usage-poll floor only; no dim).
 const BATTERY_SAVE_POLL_SEC = 120;
 
@@ -319,8 +329,10 @@ function applyForgetWifi(v) {
 
 // Cat shuffle interval: cosmetic/persisted only -- the simulator's cat page
 // is a static placeholder (see drawGifPage), not real GIF playback, so
-// there's no pacing to actually hook this into (same firmware-only-effect
-// exception already documented for cat GIFs generally).
+// there's no pacing (or FIXED-mode tap-to-advance) to actually hook this
+// into (same firmware-only-effect exception already documented for cat GIFs
+// generally). The values/labels still mirror the firmware's SettingDef row,
+// including FIXED (-1), for visual parity of the Settings screen itself.
 function getCurrentCatShuffle() { return STATE.catShuffleSec; }
 function applyCatShuffle(v) {
   STATE.catShuffleSec = v;
@@ -417,6 +429,23 @@ function applyShowAqi(v) {
   localStorage.setItem(SHOW_AQI_KEY, String(v));
 }
 
+// Hourly Flash: the on-the-hour signal (6s of 1Hz inversion at :00). Mirrors
+// cfgHourlyFlash — the firmware gates checkHourlyFlash() on it, which here is
+// render()'s difference-composite block at the end. Default ON.
+function getCurrentHourlyFlash() { return STATE.cfgHourlyFlash ? 1 : 0; }
+function applyHourlyFlash(v) {
+  STATE.cfgHourlyFlash = v !== 0;
+  localStorage.setItem(HOURLY_FLASH_KEY, String(v));
+}
+
+// Progress Bar: the 1px poll-countdown line along the bottom edge, drawn at
+// the tail of drawFooter(). Mirrors cfgShowProgress. Default ON.
+function getCurrentShowProgress() { return STATE.cfgShowProgress ? 1 : 0; }
+function applyShowProgress(v) {
+  STATE.cfgShowProgress = v !== 0;
+  localStorage.setItem(SHOW_PROGRESS_KEY, String(v));
+}
+
 // Poll interval: wired to the sidebar's real "#poll-interval" select + its
 // restartPollTimer(), so picking a preset here actually changes the
 // simulated fetch cadence -- a genuine effect, not just a cosmetic stand-in.
@@ -433,14 +462,17 @@ function applyPollInterval(v) {
 function getCurrentPixelShift() { return SHIFT_STEP_MS / 60000; }
 function applyPixelShift(v) { SHIFT_STEP_MS = v * 60000; }
 
-// Boot page: all 7 pages (including cats/mixed) are valid -- drawScreenContent()
+// Boot page: AUTO resumes STATE.cfgLastPage -- whichever page the swipe cycle
+// was on before the last restart, tracked on every page change below. The
+// other 6 (including cats/mixed/note) pin a fixed page -- drawScreenContent()
 // already dispatches generically off STATE.currentPage regardless of how it
 // was set, no special-casing needed here either. Device Stats isn't in this
 // list -- it's an overlay (devicePageOpen), not a currentPage value.
 function getCurrentBootPage() { return STATE.cfgBootPage; }
 function applyBootPage(v) {
   STATE.cfgBootPage = v;
-  STATE.currentPage = v;  // jump the live dashboard too, mirrors the firmware
+  if (v !== BOOT_PAGE_AUTO) STATE.currentPage = v;  // jump the live dashboard too,
+                                                     // mirrors the firmware; AUTO isn't itself a page
   localStorage.setItem(BOOT_PAGE_KEY, String(v));
 }
 
@@ -460,10 +492,10 @@ const SETTINGS = [
     values: [0, 1, 3, 10], valueLabels: ['OFF', '1m', '3m', '10m'],
     btnTextSize: 2, destructive: false,
     getCurrent: getCurrentPixelShift, apply: applyPixelShift },
-  { label: 'BOOT PAGE', leafTitle: 'BOOT PAGE', subtitle: 'PAGE SHOWN AFTER POWER-ON',
-    hint: 'TAP A PAGE TO APPLY', cols: 3, rows: 2, count: 5,
-    values: [0, 1, 2, 3, 4],
-    valueLabels: ['STATUS', 'PROJECTS', 'LIMITS', 'CATS', 'MIXED'],
+  { label: 'BOOT PAGE', leafTitle: 'BOOT PAGE', subtitle: 'AUTO = RESUME LAST PAGE SHOWN',
+    hint: 'TAP A PAGE TO APPLY', cols: 4, rows: 2, count: 7,
+    values: [BOOT_PAGE_AUTO, 0, 1, 2, 3, 4, 5],
+    valueLabels: ['AUTO', 'STATUS', 'PROJECTS', 'LIMITS', 'CATS', 'MIXED', 'NOTE'],
     btnTextSize: 1, destructive: false,
     getCurrent: getCurrentBootPage, apply: applyBootPage },
   { label: 'RESTART', leafTitle: 'RESTART', subtitle: '',
@@ -477,8 +509,8 @@ const SETTINGS = [
     btnTextSize: 2, destructive: true,
     getCurrent: getCurrentNone, apply: applyForgetWifi },
   { label: 'CAT SHUFFLE', leafTitle: 'CAT SHUFFLE', subtitle: 'HOW LONG EACH CAT GIF PLAYS',
-    hint: 'TAP A RATE TO APPLY', cols: 4, rows: 1, count: 4,
-    values: [0, 5, 10, 30], valueLabels: ['OFF', '5s', '10s', '30s'],
+    hint: 'TAP A RATE TO APPLY', cols: 5, rows: 1, count: 5,
+    values: [-1, 0, 5, 10, 30], valueLabels: ['FIXED', 'OFF', '5s', '10s', '30s'],
     btnTextSize: 2, destructive: false,
     getCurrent: getCurrentCatShuffle, apply: applyCatShuffle },
   { label: 'NIGHT MODE', leafTitle: 'NIGHT MODE', subtitle: '23:00-07:00, DIMS TO 25%',
@@ -506,8 +538,18 @@ const SETTINGS = [
     values: [0, 1], valueLabels: ['OFF', 'ON'],
     btnTextSize: 2, destructive: false,
     getCurrent: getCurrentShowAqi, apply: applyShowAqi },
+  { label: 'HOURLY FLASH', leafTitle: 'HOURLY FLASH', subtitle: 'INVERT SIGNAL ON THE HOUR',
+    hint: 'TAP TO TOGGLE', cols: 2, rows: 1, count: 2,
+    values: [0, 1], valueLabels: ['OFF', 'ON'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentHourlyFlash, apply: applyHourlyFlash },
+  { label: 'PROGRESS BAR', leafTitle: 'PROGRESS BAR', subtitle: 'POLL COUNTDOWN ALONG THE FOOT',
+    hint: 'TAP TO TOGGLE', cols: 2, rows: 1, count: 2,
+    values: [0, 1], valueLabels: ['OFF', 'ON'],
+    btnTextSize: 2, destructive: false,
+    getCurrent: getCurrentShowProgress, apply: applyShowProgress },
 ];
-const SETTINGS_COUNT = 12;
+const SETTINGS_COUNT = 14;
 const SETTINGS_CONTENT_H = SETTINGS_COUNT * SET_ROW_STEP - (SET_ROW_STEP - SET_ROW_H);
 const SETTINGS_SCROLL_MAX = (SETTINGS_CONTENT_H > SETTINGS_VIEWPORT_H)
     ? (SETTINGS_CONTENT_H - SETTINGS_VIEWPORT_H) : 0;
@@ -583,6 +625,8 @@ const STATE = {
   weatherCondition: '',
   weatherHourly: [],      // [{h, tempC, code}] next 6 hours
   weatherDaily: [],       // [{wd, high, low, code}] next 5 days
+  note: '',               // NOTE_PAGE text, authored in note.html (see drawNotePane)
+  noteSize: 1,            // board text size 1-3, also chosen in note.html
   weatherPageOpen: false, // Weather overlay (tap status-page weather card)
   devicePageOpen: false,  // Device Stats overlay (tap footer's CPU/ROM/RAM stats line)
   // simulator-only
@@ -602,6 +646,7 @@ const STATE = {
   confirmArmedRow: -1,
   cfgBrightness: 200,   // 0-255, mirrors the firmware's cfgBrightness
   cfgBootPage: 0,       // mirrors the firmware's cfgBootPage
+  cfgLastPage: 0,       // mirrors the firmware's cfgLastPage
   catShuffleSec: 0,     // mirrors the firmware's catShuffleMs (seconds here); cosmetic only --
                         // the simulator's cat page is a placeholder, no real GIF playback to pace
   cfgNightModeOn: false, // mirrors the firmware's cfgNightModeOn
@@ -609,6 +654,8 @@ const STATE = {
   serverBatterySave: false, // last live Mac power.battery_save
   cfgShowCountdown: true, // mirrors the firmware's cfgShowCountdown (default on)
   cfgShowAqi: true,       // mirrors the firmware's cfgShowAqi (default on)
+  cfgHourlyFlash: true,   // mirrors the firmware's cfgHourlyFlash (default on)
+  cfgShowProgress: true,  // mirrors the firmware's cfgShowProgress (default on)
   cfgScreenRotation: 1,  // mirrors the firmware's cfgScreenRotation (1=normal, 3=flipped)
 };
 
@@ -859,7 +906,9 @@ function drawFooter() {
   gfx.print(ramPct + '%');
 
   // Minimal 1px line along the bottom edge, filling left-to-right as the
-  // next poll approaches (full width = fetch imminent).
+  // next poll approaches (full width = fetch imminent). Settings > PROGRESS
+  // BAR hides it, same early return as the firmware's drawFooter().
+  if (!STATE.cfgShowProgress) return;
   const pollMs = effectivePollMs();
   let elapsed = performance.now() - STATE.lastPollMs;
   if (elapsed > pollMs) elapsed = pollMs;
@@ -1774,25 +1823,14 @@ function drawDevicePage() {
                      sdColor);
 }
 
-// "OFFLINE" banner overlaid on cats / current page — mirrors the firmware's
-// drawOfflineBanner(). A solid bar behind the text keeps it legible over a
-// busy GIF frame on the real device.
-function drawOfflineBanner() {
-  gfx.fillRect(0, 0, 320, 44, COL_BG);
-  gfx.setTextColor(COL_TEXT);
-  gfx.setTextSize(5);
-  gfx.setCursor(55, 6);  // centered: "OFFLINE" is 7 chars * 30px = 210px; (320-210)/2 = 55
-  gfx.print('OFFLINE');
-}
-
 // Page 6 stand-in. On the device this page decodes and plays random cat GIFs
 // from /cats/ on the SD card frame-by-frame (AnimatedGIF, in the firmware's
 // gifTick()) — which the canvas simulator can't emulate, so it shows the same
 // "CATS" title as the firmware's no-cats placeholder plus a note. This is the
 // one page that is deliberately NOT a pixel-faithful twin of the hardware.
-// Cats also double as the offline screen (see render()); `offline` overlays
-// the OFFLINE banner on top, mirroring the firmware's gifTick(offline).
-function drawGifPage(offline) {
+// Cats also double as the offline screen (see render()) — mirrors the
+// firmware's gifTick(offline).
+function drawGifPage() {
   gfx.fillScreen(COL_BG);
   gfx.setTextColor(COL_ACCENT);
   gfx.setTextSize(3);
@@ -1806,14 +1844,14 @@ function drawGifPage(offline) {
   const note = '(reads /cats/*.gif from the SD card)';
   gfx.setCursor((320 - note.length * 6) / 2, 148);
   gfx.print(note);
-  // Gated on the actual currentPage, not on catMode/offline -- mirrors
-  // gif_player.cpp's `if (currentPage == GIF_PAGE) drawSessionResetOverlay()`.
-  // Going offline while parked on a different page (e.g. STATUS) still
-  // renders this same cat placeholder (catMode forces it), but the firmware
-  // only draws this overlay when GIF_PAGE is the page the user actually left
-  // it on, not on every offline render regardless of page.
-  if (STATE.currentPage === GIF_PAGE) drawSessionResetOverlay();
-  if (offline) drawOfflineBanner();
+  // Gated on the actual currentPage, and never while offline -- mirrors
+  // gif_player.cpp's `if (currentPage == GIF_PAGE && !offline)
+  // drawSessionResetOverlay()`. Going offline while parked on a different
+  // page (e.g. STATUS) still renders this same cat placeholder (catMode
+  // forces it), but the stale session/limit numbers would be misleading
+  // during an outage, so this only draws when GIF_PAGE is the page the user
+  // deliberately left it on AND the board is actually online.
+  if (STATE.currentPage === GIF_PAGE && STATE.haveData) drawSessionResetOverlay();
 }
 
 // "26% reset: 02:09" pinned to the bottom-left corner of the full-screen
@@ -1840,16 +1878,228 @@ function drawSessionResetOverlay() {
   gfx.print(resets);
 }
 
-function drawMixedPage(offline) {
+// ── NOTE PAGE (page 6, NOTE_PAGE) ─────────────────────────────────────────
+// Line-for-line port of pages.cpp's drawNotePane/drawNotePage. Right-hand
+// pane geometry, mirroring the status page's right card and the mixed page's
+// cat region: x 161..317 (2px clear of the left card's edge at 159), y 2..217
+// (flush with the BTC card's bottom, 2px above the footer band).
+const NOTE_X = 161;
+const NOTE_Y = 2;
+const NOTE_W = 157;
+const NOTE_H = 216;
+const NOTE_PAD = 6;
+const NOTE_TX = NOTE_X + NOTE_PAD;  // 167, first glyph column
+// First glyph row sits below BATTERY_ICON_Y1: drawBatterySaveIcon() punches a
+// COL_BG rect over x 296..317, y 2..14 on *every* page, after the page content.
+// Text starting any higher would have the end of its first line erased
+// whenever Battery Save is active. The band that buys is used for the "NOTE"
+// label, which also names the page.
+const NOTE_TY = 18;
+// Exclusive bottom limit: a row is drawn only while y + 8*size <= this.
+const NOTE_TY_MAX = 212;  // NOTE_Y + NOTE_H - NOTE_PAD
+// Usable width is 311 - 167 = 144px = 24 columns at size 1, and 24 divides
+// evenly by all three sizes. Rightmost glyph pixel is 167 + 24*6 - 1 = 310,
+// which stays clear of the 4-column right-edge mask the firmware's
+// presentFrame() applies (x >= 316) even with the pixel-shift orbit's +2px.
+// (That mask is hardware-only — this simulator does not emulate it.)
+//
+//   size | cols | rows | glyphs | line height
+//     1  |  24  |  19  |  456   |  10
+//     2  |  12  |  10  |  120   |  18
+//     3  |   8  |   7  |   56   |  26
+//
+// ── Syntax highlighting ───────────────────────────────────────────────────
+// This rule set is duplicated in firmware/cyd_dashboard/pages.cpp and in
+// note.html; all three must agree or the board and the editor disagree about
+// what the text looks like. Tokenizing happens at two levels — source line,
+// then word — plus a one-character backtick toggle. There is deliberately no
+// per-character classification: colouring digits individually renders "3.5"
+// as yellow-white-yellow, which reads as broken rather than highlighted.
+//
+// Precedence, first match wins:
+//   1. inside a `backtick span`      -> COL_BLUE (delimiters included)
+//   2. word is TODO/FIXME/BUG        -> COL_WARN
+//      word is DONE/OK               -> COL_GOOD
+//      word is numeric               -> COL_YELLOW
+//   3. line begins '#'               -> COL_ACCENT (whole line)
+//      line begins '>'               -> COL_TEXT2  (whole line)
+//   4. leading "- ", "* ", "+ "      -> COL_ACCENT (the marker char only)
+//   5. otherwise                     -> COL_TEXT
+//
+// Keywords are matched case-SENSITIVE uppercase-only. That keeps "ok" in
+// ordinary prose from lighting up, and avoids the parity hazard of case
+// folding: C's toupper is byte-wise and locale-dependent while JS's
+// toUpperCase is Unicode-aware and can even change a string's length.
+function notePunctOpen(c) {
+  return c === '(' || c === '[' || c === '{' || c === '"' || c === "'";
+}
+
+function notePunctClose(c) {
+  return c === ')' || c === ']' || c === '}' || c === ':' || c === ';' ||
+         c === ',' || c === '.' || c === '!' || c === '?' || c === '"' || c === "'";
+}
+
+function noteIsDigit(c) { return c >= '0' && c <= '9'; }
+
+// Characters allowed inside a numeric token alongside the digits, so
+// "12:30", "$1,200", "2026-08-26" and "50%" each colour as one unit.
+function noteIsNumChar(c) {
+  return noteIsDigit(c) || c === '.' || c === ',' || c === ':' || c === '/' ||
+         c === '%' || c === '$' || c === '+' || c === '-';
+}
+
+// Word-level colour for s[a..b), or null for "no override". Wrapping
+// punctuation is trimmed for the comparison only — the colour still applies to
+// the whole untrimmed word, so "TODO:" and "(TODO)" both light up including
+// the punctuation.
+function noteWordColor(s, a, b) {
+  while (a < b && notePunctOpen(s[a])) a++;
+  while (b > a && notePunctClose(s[b - 1])) b--;
+  if (b === a) return null;
+  const w = s.slice(a, b);
+  if (w === 'TODO' || w === 'FIXME' || w === 'BUG') return COL_WARN;
+  if (w === 'DONE' || w === 'OK') return COL_GOOD;
+  // Numeric token: at least one digit, and nothing but number characters.
+  // "v2" and "e2e" stay plain, which is what you want in prose.
+  let hasDigit = false;
+  for (let i = 0; i < w.length; i++) {
+    if (!noteIsNumChar(w[i])) return null;
+    if (noteIsDigit(w[i])) hasDigit = true;
+  }
+  return hasDigit ? COL_YELLOW : null;
+}
+
+// Word-wrapped, syntax-coloured render of the note into the right-hand pane.
+// Single pass, no scratch buffer. Overflow past NOTE_TY_MAX is simply not
+// drawn — the "wrap + clip" contract, which is what keeps this an ordinary
+// static page with no scrolling and no timers.
+function drawNotePane() {
+  gfx.fillRect(NOTE_X, NOTE_Y, NOTE_W, NOTE_H, COL_SURFACE);
+  gfx.drawRect(NOTE_X, NOTE_Y, NOTE_W, NOTE_H, COL_BORDER);
+  drawCardLabel(NOTE_TX, 6, 'NOTE');
+
+  const s = STATE.note || '';
+  const size = Math.min(3, Math.max(1, STATE.noteSize || 1));
+  const glyphW = 6 * size;
+  const glyphH = 8 * size;
+  const lineH = glyphH + 2;
+  const cols = 24 / size;
+
+  if (s.length === 0) {
+    // Centred placeholder, same idiom as the cat pages' "CATS" screen.
+    gfx.setTextColor(COL_TEXT2);
+    gfx.setTextSize(1);
+    const msg = 'no note yet';
+    gfx.setCursor(NOTE_X + (NOTE_W - msg.length * 6) / 2, 104);
+    gfx.print(msg);
+    const hint = 'edit at :8787/note';
+    gfx.setCursor(NOTE_X + (NOTE_W - hint.length * 6) / 2, 116);
+    gfx.print(hint);
+    return;
+  }
+
+  gfx.setTextSize(size);
+  let y = NOTE_TY;
+  let col = 0;
+  const n = s.length;
+  let i = 0;
+
+  while (i < n) {
+    // ── extent of this source line ──
+    let lineEnd = i;
+    while (lineEnd < n && s[lineEnd] !== '\n') lineEnd++;
+
+    // ── line-level context, decided once ──
+    let p = i;
+    while (p < lineEnd && s[p] === ' ') p++;  // allow indented markers
+    let lineColor = null;
+    let markerIdx = -1;
+    if (p < lineEnd) {
+      if (s[p] === '#') lineColor = COL_ACCENT;
+      else if (s[p] === '>') lineColor = COL_TEXT2;
+      else if ((s[p] === '-' || s[p] === '*' || s[p] === '+') &&
+               (p + 1 === lineEnd || s[p + 1] === ' ')) markerIdx = p;
+    }
+    let inCode = false;  // an unmatched backtick stains only its own line
+    col = 0;
+
+    // ── emit the source line as one or more visual rows ──
+    while (i < lineEnd) {
+      if (s[i] === ' ') {
+        // Leading spaces on a wrapped row collapse; a source line's own
+        // indentation collapses too, which on a 24-column pane is worth more
+        // than preserving it. Indented bullets still work — the `p` scan above
+        // skips spaces before classifying.
+        if (col > 0) col++;
+        i++;
+        if (col >= cols) {
+          y += lineH; col = 0;
+          if (y + glyphH > NOTE_TY_MAX) return;
+        }
+        continue;
+      }
+
+      // Word lookahead: [i, wEnd) is the next run of non-space characters.
+      let wEnd = i;
+      while (wEnd < lineEnd && s[wEnd] !== ' ') wEnd++;
+      const wLen = wEnd - i;
+
+      // Wrap before a word that doesn't fit here but would fit on a fresh
+      // row. A word longer than a whole row is hard-broken below instead.
+      if (col > 0 && col + wLen > cols && wLen <= cols) {
+        y += lineH; col = 0;
+        if (y + glyphH > NOTE_TY_MAX) return;
+        continue;  // re-test on the new row
+      }
+
+      const wordColor = noteWordColor(s, i, wEnd);
+
+      while (i < wEnd) {
+        if (col >= cols) {  // hard break inside an over-long word
+          y += lineH; col = 0;
+          if (y + glyphH > NOTE_TY_MAX) return;
+        }
+        let c;
+        if (s[i] === '`') {
+          inCode = !inCode;
+          c = COL_BLUE;  // colour the tick itself, so a stray one is visible
+        } else if (inCode) {
+          c = COL_BLUE;
+        } else if (wordColor) {
+          c = wordColor;
+        } else if (lineColor) {
+          c = lineColor;
+        } else if (i === markerIdx) {
+          c = COL_ACCENT;
+        } else {
+          c = COL_TEXT;
+        }
+        gfx.setTextColor(c);
+        gfx.setCursor(NOTE_TX + col * glyphW, y);
+        gfx.print(s[i]);
+        col++; i++;
+      }
+    }
+
+    // ── end of source line (an empty line consumes a row, as an editor implies) ──
+    i = lineEnd + 1;  // step over the '\n'
+    y += lineH; col = 0;
+    if (y + glyphH > NOTE_TY_MAX) return;
+  }
+}
+
+// Page 6: the mixed page's left column, with the note pane where the cats go.
+function drawNotePage() {
+  drawLimitsCard();
+  drawBtcCard();
+  drawNotePane();
+}
+
+function drawMixedPage() {
   gfx.fillScreen(COL_BG);
   drawLimitsCard();
   drawBtcCard();
   drawFooter();
-
-  if (offline) {
-    drawOfflineBanner();
-    return;
-  }
 
   // Draw right side GIF placeholder box — starts 2px right of the usage
   // card's right edge (card is x=2 w=157, edge=159) and ends 2px short of
@@ -1989,10 +2239,19 @@ function loadBrightness() {
 }
 
 function loadBootPage() {
+  const lastRaw = localStorage.getItem(LAST_PAGE_KEY);
+  const last = parseInt(lastRaw, 10);
+  if (!Number.isNaN(last)) STATE.cfgLastPage = last;
+
   const raw = localStorage.getItem(BOOT_PAGE_KEY);
   if (raw === null) return;
   const v = parseInt(raw, 10);
-  if (!Number.isNaN(v)) { STATE.cfgBootPage = v; STATE.currentPage = v; }
+  if (Number.isNaN(v)) return;
+  STATE.cfgBootPage = v;
+  // AUTO resumes cfgLastPage (falls back to whatever STATE.currentPage
+  // already defaulted to if no last-page value was ever saved), matching
+  // the firmware's boot restore in cyd_dashboard.ino.
+  STATE.currentPage = (v === BOOT_PAGE_AUTO) ? STATE.cfgLastPage : v;
 }
 
 function loadCatShuffle() {
@@ -2026,6 +2285,18 @@ function loadShowAqi() {
   const raw = localStorage.getItem(SHOW_AQI_KEY);
   if (raw === null) return;
   STATE.cfgShowAqi = raw !== '0';
+}
+
+function loadHourlyFlash() {
+  const raw = localStorage.getItem(HOURLY_FLASH_KEY);
+  if (raw === null) return;
+  STATE.cfgHourlyFlash = raw !== '0';
+}
+
+function loadShowProgress() {
+  const raw = localStorage.getItem(SHOW_PROGRESS_KEY);
+  if (raw === null) return;
+  STATE.cfgShowProgress = raw !== '0';
 }
 
 function loadBatterySave() {
@@ -2063,7 +2334,9 @@ function render() {
       ' · shift (' + shiftX + ',' + shiftY + ')';
   }
 
-  const bkk = bangkokParts();
+  // Settings > HOURLY FLASH off: no signal at all (the firmware short-circuits
+  // checkHourlyFlash() on cfgHourlyFlash for the same effect).
+  const bkk = STATE.cfgHourlyFlash ? bangkokParts() : null;
   if (bkk) {
     const min = parseInt(bkk.minute);
     const sec = parseInt(bkk.second);
@@ -2107,23 +2380,23 @@ function drawScreenContent() {
     document.getElementById('page-status').textContent = 'DEVICE STATS (tap to close)';
     return;
   }
-  // Offline mode also shows cats (with an OFFLINE banner on top) instead of a bare offline screen — mirrors
+  // Offline mode also shows cats instead of a bare offline screen — mirrors
   // the firmware's catMode in loop().
   if (!STATE.haveData) {
-    drawGifPage(true);
+    drawGifPage();
     drawBatterySaveIcon();
     document.getElementById('page-status').textContent = 'OFFLINE (cat GIFs)';
     return;
   }
   if (STATE.currentPage === GIF_PAGE) {
-    drawGifPage(false);
+    drawGifPage();
     drawBatterySaveIcon();
     document.getElementById('page-status').textContent =
       'page ' + (GIF_PAGE + 1) + '/' + PAGE_COUNT + ' (cat GIFs)';
     return;
   }
   if (STATE.currentPage === MIXED_PAGE) {
-    drawMixedPage(false);
+    drawMixedPage();
     drawBatterySaveIcon();
     document.getElementById('page-status').textContent =
       'page ' + (MIXED_PAGE + 1) + '/' + PAGE_COUNT + ' (status + cats)';
@@ -2134,11 +2407,13 @@ function drawScreenContent() {
     case 0: drawStatusPage(); break;
     case 1: drawProjectsPage(); break;  // projects (7d) + 7-day trend combined
     case 2: drawLimitsPage(); break;    // /usage-style limits panel
+    case 5: drawNotePage(); break;      // mixed-page left column + note text pane
   }
   drawFooter();
   drawBatterySaveIcon();
 
   let label = 'page ' + (STATE.currentPage + 1) + '/' + PAGE_COUNT;
+  if (STATE.currentPage === NOTE_PAGE) label += ' (note)';
   document.getElementById('page-status').textContent = label;
 }
 
@@ -2164,6 +2439,17 @@ const MOCK = {
   context: { tokens: 80000, percent: 40 },
   btc: { price: 109432 },
   aqi: { aqi: 81 },
+  // Exercises every rule in drawNotePane's tokenizer at once: heading, quote,
+  // blank line, all three bullet markers, all five keywords, numeric tokens
+  // with $ , % and -, a code span that soft-wraps, and one word longer than a
+  // whole 24-column row (hard break). Keep it in sync with note.html's sample.
+  note: {
+    text: '# SPRINT 6\n> shipped 2026-08-26\n\n- TODO wire the note pane\n' +
+          '* DONE server /api/note\n+ OK boot page picker\n\n' +
+          'budget $1,200 / 50% used\nrun `arduino-cli compile --fqbn esp32`\n' +
+          'supercalifragilisticexpialidocious',
+    size: 1,
+  },
   weather: {
     tempC: 34, code: 3, high: 35, low: 26,
     condition: 'Overcast',
@@ -2243,6 +2529,13 @@ function applyData(doc) {
   if (doc.weather) applyWeatherData(doc.weather);
   if (doc.aqi && doc.aqi.aqi >= 0) {
     STATE.aqi = doc.aqi.aqi;
+  }
+  // The server always sends this object, so an empty "text" is a real
+  // "the note was cleared" and must overwrite — unlike the guards above,
+  // which keep the last-known value when a key is missing entirely.
+  if (doc.note) {
+    STATE.note = doc.note.text || '';
+    STATE.noteSize = Math.min(3, Math.max(1, doc.note.size || 1));
   }
   // Live poll only (applyData is only called from a real/mock fetch, not
   // from a cold SD-cache path the way firmware is) — honor Mac power flag.
@@ -2616,6 +2909,9 @@ canvas.addEventListener('click', (event) => {
   } else {
     STATE.currentPage = (STATE.currentPage - 1 + PAGE_COUNT) % PAGE_COUNT;
   }
+  // Always tracked (regardless of cfgBootPage's mode), mirrors the firmware.
+  STATE.cfgLastPage = STATE.currentPage;
+  localStorage.setItem(LAST_PAGE_KEY, String(STATE.currentPage));
   render();
   flashTouchBorder(isRight);  // one-frame white edge flash on the new page: touch registered
 });
@@ -2652,6 +2948,8 @@ loadRotation();
 loadShowCountdown();
 loadBatterySave();
 loadShowAqi();
+loadHourlyFlash();
+loadShowProgress();
 applyEffectiveBrightnessFilter();
 render();
 fetchUsage();

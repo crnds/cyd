@@ -189,6 +189,7 @@ static JsonDocument usageFilter() {
   f["btc"] = true;
   f["weather"] = true;
   f["aqi"] = true;
+  f["note"] = true;   // NOTE_PAGE text + text size, authored in note.html
   f["today"] = true;  // needed by appendArchiveRow (fetchUsage)
   f["active_now"] = true;
   f["epoch"] = true;  // NTP fallback — see applyUsageDoc's time-sync block
@@ -284,6 +285,13 @@ static bool applyUsageDoc(const JsonDocument& doc, bool fromNetwork) {
   if (!doc["aqi"].isNull()) {
     int a = doc["aqi"]["aqi"] | -1;
     if (a >= 0) STATE.aqi = a;
+  }
+  // The server always sends this object, so an empty "text" is a real
+  // "the note was cleared" and must overwrite — unlike the guards above,
+  // which keep the last-known value when a key is missing entirely.
+  if (!doc["note"].isNull()) {
+    snprintf(STATE.note, sizeof(STATE.note), "%s", doc["note"]["text"] | "");
+    STATE.noteSize = constrain((int)(doc["note"]["size"] | 1), 1, 3);
   }
 
   STATE.lastFetchOkMs = millis();

@@ -16,6 +16,30 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 LOG_GLOB = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 PORT = 8787
 MAX_BODY_BYTES = 4096  # POST bodies here are tiny JSON; anything bigger is bogus/abusive
+
+# ── Note page (board page 6) ──────────────────────────────────────────────
+# Free text authored in note.html and rendered in the right-hand pane of the
+# board's Note page. It rides along inside /api/usage rather than getting its
+# own endpoint, so the board needs no second HTTP call and gets SD caching for
+# free via the existing /last_usage.json replay.
+NOTE_PATH = os.path.expanduser("~/.cyd_note.json")
+# The board's pane draws at most 24 cols x 19 rows = 456 glyphs at text size 1.
+# 480 sits just above that ceiling (headroom for newlines) and comfortably
+# under the firmware's 512-byte buffer. Because sanitize_note() forces ASCII,
+# characters == bytes and the two caps are directly comparable.
+NOTE_MAX_CHARS = 480
+NOTE_HTML_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "note.html"
+)
+# note.html is served from this same origin, so its POST carries an Origin
+# header — the blanket "reject any Origin" rule /api/battery-save uses (see
+# do_POST) can't be reused here. Allowlist the origins this server can
+# legitimately be reached on instead, plus "null" for the file:// dev case.
+NOTE_ALLOWED_ORIGINS = {
+    f"http://127.0.0.1:{PORT}",
+    f"http://localhost:{PORT}",
+    "null",
+}
 # 30s on AC: token pages update from board polls of cached aggregates, so the
 # ingest lag is invisible on screen, and this halves the scan wakeups + disk
 # glob/stat over ~200 jsonl files vs. the old 15s — the biggest wakeup source.
@@ -72,6 +96,11 @@ STATE = {
         "paused": False,
         "battery_save_manual": None,
     },
+    # Note page text + board text size (1-3). Seeded from NOTE_PATH at startup
+    # by load_note() and rewritten there on every POST /api/note, so a server
+    # restart doesn't wipe what's on the board. Never None — an empty string
+    # means "cleared", which the board must be able to tell from "absent".
+    "note": {"text": "", "size": 1},
     # Only wakes a loop that is idle-parked in activity_gated_loop's own
     # clear-then-wait (see its comment below) -- it is set on every client
     # poll (do_GET) and every power-state change, both far more often than
@@ -965,6 +994,60 @@ def scan_loop():
     activity_gated_loop(body)
 
 
+def sanitize_note(text):
+    """Fold arbitrary editor text down to what the board can actually draw.
+
+    The CYD renders with the built-in Adafruit GFX font, which only has glyphs
+    for 7-bit printable ASCII. Thai, emoji and box-drawing characters have no
+    glyph at all, so passing them through would paint garbage. They become "?"
+    rather than being dropped, so a note never silently loses content — and
+    note.html warns about the count before you ever get here.
+    """
+    if not isinstance(text, str):
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ")
+    out = []
+    for ch in text:
+        if ch == "\n" or " " <= ch <= "~":
+            out.append(ch)
+        else:
+            out.append("?")
+    return "".join(out)[:NOTE_MAX_CHARS]
+
+
+def note_snapshot():
+    with STATE["lock"]:
+        return dict(STATE["note"])
+
+
+def load_note():
+    """Seed STATE["note"] from disk at startup. A missing/corrupt file is not
+    an error — it just means "no note yet"."""
+    try:
+        with open(NOTE_PATH, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+        note = {
+            "text": sanitize_note(doc.get("text", "")),
+            "size": min(3, max(1, int(doc.get("size", 1)))),
+        }
+    except (OSError, ValueError, TypeError):
+        return
+    with STATE["lock"]:
+        STATE["note"] = note
+
+
+def save_note(note):
+    """Persist atomically so a crash mid-write can't leave a truncated file
+    that load_note() would then discard on the next boot."""
+    tmp = NOTE_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(note, f)
+        os.replace(tmp, NOTE_PATH)
+    except OSError as e:
+        log_err(f"save_note: {type(e).__name__}: {e}")
+
+
 def build_report():
     now = datetime.now(timezone.utc)
 
@@ -1031,6 +1114,10 @@ def build_report():
         "btc": STATE["btc"],
         "weather": STATE["weather"],
         "aqi": STATE["aqi"],
+        # Board page 6. Always an object (never null) so an empty "text" reads
+        # as "the user cleared the note" rather than "no data yet" — the
+        # firmware keeps its previous value for absent keys.
+        "note": STATE["note"],
         "clients": clients,
         "power": power_snapshot(),
     }
@@ -1062,10 +1149,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def _send_json(self, doc, status=200):
-        body = json.dumps(doc).encode("utf-8")
+    def _send(self, body, content_type, status=200):
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         # ACAO only for the file:// dev case (Origin: null) -- simulator.html
         # fetches this endpoint directly from disk. A blanket "*" would let
@@ -1077,11 +1163,75 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_json(self, doc, status=200):
+        self._send(json.dumps(doc).encode("utf-8"), "application/json", status)
+
+    def _is_local(self):
+        return self.client_address[0] in ("127.0.0.1", "::1")
+
+    def _read_json_body(self):
+        """Shared POST body reader. Returns (doc, None) or (None, True) after
+        having already sent the error response."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > MAX_BODY_BYTES:
+            self._send_json({"ok": False, "detail": "body too large"}, status=413)
+            return None, True
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            return json.loads(raw.decode("utf-8") or "{}"), None
+        except (ValueError, UnicodeDecodeError):
+            self._send_json({"ok": False, "detail": "invalid JSON"}, status=400)
+            return None, True
+
+    def do_OPTIONS(self):
+        # Only the file:// (Origin: null) case ever preflights: note.html is
+        # served same-origin, and same-origin requests skip CORS entirely.
+        if self.headers.get("Origin") == "null" and self.path == "/api/note":
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "null")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def _serve_note_html(self):
+        # Read fresh from disk per request (same as control_server.py) — this
+        # is a single local page, not a hot path, and it means editing
+        # note.html doesn't need a server restart.
+        try:
+            with open(NOTE_HTML_PATH, "rb") as f:
+                self._send(f.read(), "text/html; charset=utf-8")
+        except OSError:
+            self._send(b"note.html not found", "text/plain", status=404)
+
     def do_GET(self):
+        # The note routes are localhost-only, matching /api/battery-save:
+        # the note is writable only from this Mac, so serving the editor to
+        # the LAN would just be a form that 403s on save.
+        if self.path in ("/", "/note", "/note.html"):
+            if not self._is_local():
+                self._send(b"localhost only", "text/plain", status=403)
+                return
+            self._serve_note_html()
+            return
+        if self.path == "/api/note":
+            if not self._is_local():
+                self._send_json({"ok": False, "detail": "localhost only"}, status=403)
+                return
+            self._send_json(note_snapshot())
+            return
         if self.path != "/api/usage":
             self.send_response(404)
             self.end_headers()
             return
+        # Only /api/usage counts as a client poll: the client registry drives
+        # active_now and un-parks the activity-gated background loops, and a
+        # browser loading the note editor is not a dashboard client.
         ip = self.client_address[0]
         with STATE["lock"]:
             STATE["clients"][ip] = datetime.now(timezone.utc)
@@ -1120,15 +1270,54 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"{stamp} {ip} GET /api/usage", flush=True)
         self._send_json(build_report())
 
+    def _do_post_note(self):
+        # Note text from note.html. Localhost-only, same policy as
+        # /api/battery-save: anyone on the LAN can *read* the note (it rides
+        # in /api/usage, which is how the board gets it), but only this Mac
+        # can change what's on the screen.
+        if not self._is_local():
+            self._send_json({"ok": False, "detail": "localhost only"}, status=403)
+            return
+        # Unlike /api/battery-save, an Origin header is expected here —
+        # note.html is served from this origin, and browsers send Origin on
+        # same-origin POSTs. Allowlist instead of blanket-reject, which still
+        # blocks the CSRF path (a random site's origin isn't in the set).
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in NOTE_ALLOWED_ORIGINS:
+            self._send_json({"ok": False, "detail": "forbidden origin"}, status=403)
+            return
+        doc, err = self._read_json_body()
+        if err:
+            return
+        if not isinstance(doc, dict) or not isinstance(doc.get("text"), str):
+            self._send_json(
+                {"ok": False, "detail": "body must be {\"text\": str, \"size\": 1-3}"},
+                status=400,
+            )
+            return
+        size = doc.get("size", 1)
+        if not isinstance(size, int) or isinstance(size, bool) or not 1 <= size <= 3:
+            self._send_json(
+                {"ok": False, "detail": "size must be an int 1-3"}, status=400
+            )
+            return
+        note = {"text": sanitize_note(doc["text"]), "size": size}
+        with STATE["lock"]:
+            STATE["note"] = note
+        save_note(note)
+        self._send_json({"ok": True, "note": note})
+
     def do_POST(self):
+        if self.path == "/api/note":
+            self._do_post_note()
+            return
         # Manual battery-save override from the localhost control panel.
         # LAN clients (the board) get 403 — power policy stays Mac-local.
         if self.path != "/api/battery-save":
             self.send_response(404)
             self.end_headers()
             return
-        ip = self.client_address[0]
-        if ip not in ("127.0.0.1", "::1"):
+        if not self._is_local():
             self._send_json({"ok": False, "detail": "localhost only"}, status=403)
             return
         # The only legitimate caller is control_server.py's server-side
@@ -1140,20 +1329,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Origin") is not None:
             self._send_json({"ok": False, "detail": "forbidden origin"}, status=403)
             return
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            length = 0
-        if length > MAX_BODY_BYTES:
-            self._send_json({"ok": False, "detail": "body too large"}, status=413)
+        doc, err = self._read_json_body()
+        if err:
             return
-        raw = self.rfile.read(length) if length > 0 else b"{}"
-        try:
-            doc = json.loads(raw.decode("utf-8") or "{}")
-        except ValueError:
-            self._send_json({"ok": False, "detail": "invalid JSON"}, status=400)
-            return
-        if "enabled" not in doc or (
+        if not isinstance(doc, dict) or "enabled" not in doc or (
             doc.get("enabled") is not None and not isinstance(doc.get("enabled"), bool)
         ):
             self._send_json(
@@ -1186,6 +1365,7 @@ def start_http_server():
             delay = min(delay * 2, 30)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"Serving usage stats on http://0.0.0.0:{PORT}/api/usage")
+    print(f"Note editor (localhost only) on http://127.0.0.1:{PORT}/")
     return server
 
 
@@ -1243,6 +1423,7 @@ def battery_guard_loop():
 
 
 def main():
+    load_note()
     scan_once()
     compute_aggregates()
     threading.Thread(target=scan_loop, daemon=True).start()

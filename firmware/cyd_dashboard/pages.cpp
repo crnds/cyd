@@ -59,6 +59,7 @@ void clearShiftMargins() {
 }
 
 bool checkHourlyFlash(bool& isEvenSecond) {
+  if (!cfgHourlyFlash) return false;  // Settings > HOURLY FLASH off: no signal at all
   struct tm timeinfo;
   if (getLocalTime(&timeinfo, 0)) {
     if (timeinfo.tm_min == 0 && timeinfo.tm_sec < 6) {
@@ -225,7 +226,9 @@ void drawFooter() {
   g->print(String(ramPct) + "%");
 
   // Minimal 1px line along the bottom edge, filling left-to-right as the
-  // next poll approaches (full width = fetch imminent).
+  // next poll approaches (full width = fetch imminent). Settings > PROGRESS
+  // BAR hides it; loop()'s between-render top-up is gated on the same flag.
+  if (!cfgShowProgress) return;
   uint32_t elapsed = millis() - lastPollMs;
   if (elapsed > POLL_INTERVAL_MS) elapsed = POLL_INTERVAL_MS;
   int lineW = (int)((float)elapsed / POLL_INTERVAL_MS * 320);
@@ -567,7 +570,10 @@ static void drawShineStrip(lgfx::LovyanGFX* dst, int x, int y, int fillW, uint32
 // cached fill widths), pixel-shift offset applied here, and the inverted
 // hourly-flash frames skipped.
 void shineTick(uint32_t nowMs) {
-  if (currentPage != 0 && currentPage != MIXED_PAGE) return;
+  // NOTE_PAGE shows the same left column as MIXED_PAGE, so it needs the same
+  // between-render top-up — without it the green bars' shine would freeze at
+  // whatever phase the last 1Hz render() left it on.
+  if (currentPage != 0 && currentPage != MIXED_PAGE && currentPage != NOTE_PAGE) return;
   bool isEvenSecond = false;
   if (checkHourlyFlash(isEvenSecond) && isEvenSecond) return;
   for (int i = 0; i < 2; i++) {
@@ -688,6 +694,227 @@ static void drawBtcCard() {
   g->setTextSize(2);
   g->setCursor(60, 197);
   g->print(fmtBtc(STATE.btcPrice));
+}
+
+// ── NOTE PAGE (page 6, NOTE_PAGE) ─────────────────────────────────────────
+// Right-hand pane geometry, mirroring the status page's right card and the
+// mixed page's cat region: x 161..317 (2px clear of the left card's edge at
+// 159), y 2..217 (flush with the BTC card's bottom, 2px above the footer band).
+static const int NOTE_X = 161;
+static const int NOTE_Y = 2;
+static const int NOTE_W = 157;
+static const int NOTE_H = 216;
+static const int NOTE_PAD = 6;
+static const int NOTE_TX = NOTE_X + NOTE_PAD;  // 167, first glyph column
+// First glyph row sits below BATTERY_ICON_Y1: drawBatterySaveIcon() punches a
+// COL_BG rect over x 296..317, y 2..14 on *every* page, after the page content.
+// Text starting any higher would have the end of its first line erased
+// whenever Battery Save is active. The band that buys is used for the "NOTE"
+// label, which also names the page.
+static const int NOTE_TY = 18;
+// Exclusive bottom limit: a row is drawn only while y + 8*size <= this.
+static const int NOTE_TY_MAX = 212;  // NOTE_Y + NOTE_H - NOTE_PAD
+// Usable width is 311 - 167 = 144px = 24 columns at size 1, and 24 divides
+// evenly by all three sizes. Rightmost glyph pixel is 167 + 24*6 - 1 = 310,
+// which stays clear of the 4-column right-edge mask presentFrame() applies
+// (x >= 316) even with the pixel-shift orbit's +2px.
+//
+//   size | cols | rows | glyphs | line height
+//     1  |  24  |  19  |  456   |  10
+//     2  |  12  |  10  |  120   |  18
+//     3  |   8  |   7  |   56   |  26
+//
+// ── Syntax highlighting ───────────────────────────────────────────────────
+// This rule set is duplicated in simulator.html and note.html; all three must
+// agree or the board and the editor disagree about what the text looks like.
+// Tokenizing happens at two levels — source line, then word — plus a
+// one-character backtick toggle. There is deliberately no per-character
+// classification: colouring digits individually renders "3.5" as
+// yellow-white-yellow, which reads as broken rather than highlighted.
+//
+// Precedence, first match wins:
+//   1. inside a `backtick span`      -> COL_BLUE (delimiters included)
+//   2. word is TODO/FIXME/BUG        -> COL_WARN
+//      word is DONE/OK               -> COL_GOOD
+//      word is numeric               -> COL_YELLOW
+//   3. line begins '#'               -> COL_ACCENT (whole line)
+//      line begins '>'               -> COL_TEXT2  (whole line)
+//   4. leading "- ", "* ", "+ "      -> COL_ACCENT (the marker char only)
+//   5. otherwise                     -> COL_TEXT
+//
+// Keywords are matched case-SENSITIVE uppercase-only. That keeps "ok" in
+// ordinary prose from lighting up, and avoids the parity hazard of case
+// folding: C's toupper is byte-wise and locale-dependent while JS's
+// toUpperCase is Unicode-aware and can even change a string's length.
+static bool notePunctOpen(char c) {
+  return c == '(' || c == '[' || c == '{' || c == '"' || c == '\'';
+}
+
+static bool notePunctClose(char c) {
+  return c == ')' || c == ']' || c == '}' || c == ':' || c == ';' ||
+         c == ',' || c == '.' || c == '!' || c == '?' || c == '"' || c == '\'';
+}
+
+static bool noteIsDigit(char c) { return c >= '0' && c <= '9'; }
+
+// Characters allowed inside a numeric token alongside the digits, so
+// "12:30", "$1,200", "2026-08-26" and "50%" each colour as one unit.
+static bool noteIsNumChar(char c) {
+  return noteIsDigit(c) || c == '.' || c == ',' || c == ':' || c == '/' ||
+         c == '%' || c == '$' || c == '+' || c == '-';
+}
+
+static bool noteRangeEquals(const char* s, int a, int b, const char* w) {
+  int n = strlen(w);
+  return (b - a) == n && strncmp(s + a, w, n) == 0;
+}
+
+// Word-level colour for s[a..b), or 0 for "no override". Wrapping punctuation
+// is trimmed for the comparison only — the colour still applies to the whole
+// untrimmed word, so "TODO:" and "(TODO)" both light up including the punctuation.
+static uint16_t noteWordColor(const char* s, int a, int b) {
+  while (a < b && notePunctOpen(s[a])) a++;
+  while (b > a && notePunctClose(s[b - 1])) b--;
+  if (b == a) return 0;
+  if (noteRangeEquals(s, a, b, "TODO") || noteRangeEquals(s, a, b, "FIXME") ||
+      noteRangeEquals(s, a, b, "BUG")) return COL_WARN;
+  if (noteRangeEquals(s, a, b, "DONE") || noteRangeEquals(s, a, b, "OK")) return COL_GOOD;
+  // Numeric token: at least one digit, and nothing but number characters.
+  // "v2" and "e2e" stay plain, which is what you want in prose.
+  bool hasDigit = false;
+  for (int i = a; i < b; i++) {
+    if (!noteIsNumChar(s[i])) return 0;
+    if (noteIsDigit(s[i])) hasDigit = true;
+  }
+  return hasDigit ? COL_YELLOW : 0;
+}
+
+// Word-wrapped, syntax-coloured render of STATE.note into the right-hand pane.
+// Single pass, no scratch buffer. Overflow past NOTE_TY_MAX is simply not
+// drawn — the "wrap + clip" contract, which is what keeps this an ordinary
+// static render() page with no scrolling and no timers.
+// Caller holds stateMutex (render() does, across the whole switch); this must
+// not re-lock — the mutex is non-recursive.
+static void drawNotePane() {
+  g->fillRect(NOTE_X, NOTE_Y, NOTE_W, NOTE_H, COL_SURFACE);
+  g->drawRect(NOTE_X, NOTE_Y, NOTE_W, NOTE_H, COL_BORDER);
+  drawCardLabel(NOTE_TX, 6, "NOTE");
+
+  const char* s = STATE.note;
+  const int size = constrain(STATE.noteSize, 1, 3);
+  const int glyphW = 6 * size;
+  const int glyphH = 8 * size;
+  const int lineH = glyphH + 2;
+  const int cols = 24 / size;
+
+  if (s[0] == '\0') {
+    // Centred placeholder, same idiom as the cat pages' "CATS" screen.
+    g->setTextColor(COL_TEXT2);
+    g->setTextSize(1);
+    const char* msg = "no note yet";
+    g->setCursor(NOTE_X + (NOTE_W - (int)strlen(msg) * 6) / 2, 104);
+    g->print(msg);
+    const char* hint = "edit at :8787/note";
+    g->setCursor(NOTE_X + (NOTE_W - (int)strlen(hint) * 6) / 2, 116);
+    g->print(hint);
+    return;
+  }
+
+  g->setTextSize(size);
+  int y = NOTE_TY;
+  int col = 0;
+  const int n = strlen(s);
+  int i = 0;
+
+  while (i < n) {
+    // ── extent of this source line ──
+    int lineEnd = i;
+    while (lineEnd < n && s[lineEnd] != '\n') lineEnd++;
+
+    // ── line-level context, decided once ──
+    int p = i;
+    while (p < lineEnd && s[p] == ' ') p++;  // allow indented markers
+    uint16_t lineColor = 0;
+    int markerIdx = -1;
+    if (p < lineEnd) {
+      if (s[p] == '#') lineColor = COL_ACCENT;
+      else if (s[p] == '>') lineColor = COL_TEXT2;
+      else if ((s[p] == '-' || s[p] == '*' || s[p] == '+') &&
+               (p + 1 == lineEnd || s[p + 1] == ' ')) markerIdx = p;
+    }
+    bool inCode = false;  // an unmatched backtick stains only its own line
+    col = 0;
+
+    // ── emit the source line as one or more visual rows ──
+    while (i < lineEnd) {
+      if (s[i] == ' ') {
+        // Leading spaces on a wrapped row collapse; a source line's own
+        // indentation collapses too, which on a 24-column pane is worth more
+        // than preserving it. Indented bullets still work — the `p` scan above
+        // skips spaces before classifying.
+        if (col > 0) col++;
+        i++;
+        if (col >= cols) {
+          y += lineH; col = 0;
+          if (y + glyphH > NOTE_TY_MAX) return;
+        }
+        continue;
+      }
+
+      // Word lookahead: [i, wEnd) is the next run of non-space characters.
+      int wEnd = i;
+      while (wEnd < lineEnd && s[wEnd] != ' ') wEnd++;
+      const int wLen = wEnd - i;
+
+      // Wrap before a word that doesn't fit here but would fit on a fresh
+      // row. A word longer than a whole row is hard-broken below instead.
+      if (col > 0 && col + wLen > cols && wLen <= cols) {
+        y += lineH; col = 0;
+        if (y + glyphH > NOTE_TY_MAX) return;
+        continue;  // re-test on the new row
+      }
+
+      const uint16_t wordColor = noteWordColor(s, i, wEnd);
+
+      while (i < wEnd) {
+        if (col >= cols) {  // hard break inside an over-long word
+          y += lineH; col = 0;
+          if (y + glyphH > NOTE_TY_MAX) return;
+        }
+        uint16_t c;
+        if (s[i] == '`') {
+          inCode = !inCode;
+          c = COL_BLUE;  // colour the tick itself, so a stray one is visible
+        } else if (inCode) {
+          c = COL_BLUE;
+        } else if (wordColor) {
+          c = wordColor;
+        } else if (lineColor) {
+          c = lineColor;
+        } else if (i == markerIdx) {
+          c = COL_ACCENT;
+        } else {
+          c = COL_TEXT;
+        }
+        g->setTextColor(c);
+        g->setCursor(NOTE_TX + col * glyphW, y);
+        g->print(s[i]);
+        col++; i++;
+      }
+    }
+
+    // ── end of source line (an empty line consumes a row, as an editor implies) ──
+    i = lineEnd + 1;  // step over the '\n'
+    y += lineH; col = 0;
+    if (y + glyphH > NOTE_TY_MAX) return;
+  }
+}
+
+// Page 6: the mixed page's left column, with the note pane where the cats go.
+static void drawNotePage() {
+  drawLimitsCard();
+  drawBtcCard();
+  drawNotePane();
 }
 
 void drawMixedPageStatic() {
@@ -1052,17 +1279,6 @@ static void drawDevicePage() {
                      sdColor);
 }
 
-// "OFFLINE" banner overlaid on top of whatever the cat player is already showing (a
-// playing cat GIF, or the no-cats placeholder) — a solid bar behind the text
-// keeps it legible over a busy GIF frame. Drawn last, right before presentFrame().
-void drawOfflineBanner() {
-  g->fillRect(0, 0, 320, 44, COL_BG);
-  g->setTextColor(COL_TEXT);
-  g->setTextSize(5);
-  g->setCursor(55, 6);  // centered: "OFFLINE" is 7 chars * 30px = 210px; (320-210)/2 = 55
-  g->print("OFFLINE");
-}
-
 // Weather detail overlay (status-page weather card). Card-structured landscape
 // layout per design.md — no place / HOURLY / 5-DAY word labels (space goes to
 // daily row pitch). Hero (temp · H/L · icon · condition) + hourly 6-col +
@@ -1336,6 +1552,7 @@ void render() {
     case 0: drawStatusPage(); break;
     case 1: drawProjectsPage(); break;  // projects (7d) + 7-day trend combined
     case 2: drawLimitsPage(); break;    // /usage-style limits panel
+    case 5: drawNotePage(); break;      // mixed-page left column + note text pane
   }
   drawFooter();
   drawBatterySaveIcon();

@@ -142,9 +142,26 @@ extern volatile uint32_t POLL_INTERVAL_MS;
 // Internal linkage per TU (C++ global `const` default) — safe to define
 // identically in every file that includes this header; no ODR issue.
 const uint32_t TOUCH_DEBOUNCE_MS = 350;
-const int PAGE_COUNT = 5;
+const int PAGE_COUNT = 6;
+// cfgBootPage sentinel: resume whichever page was on screen before the last
+// restart (cfgLastPage), rather than a fixed page. See the Boot Page setting.
+const int BOOT_PAGE_AUTO = -1;
 const int GIF_PAGE = 3;    // 4th page (0-indexed): random cat GIFs from /cats/ on SD
 const int MIXED_PAGE = 4;  // 5th page: status + cats split
+// 6th page: the same left column as MIXED_PAGE, but the right half shows the
+// note text from note.html instead of cats. Unlike GIF_PAGE/MIXED_PAGE this is
+// an ordinary render() page (a `case` in its switch) — nothing here needs the
+// per-frame decode loop or the partial-push path those two require.
+const int NOTE_PAGE = 5;
+// Note buffer. The pane can draw at most 24 cols x 19 rows = 456 glyphs at
+// text size 1, plus up to 19 newlines -> 475 bytes; 512 rounds that up and
+// leaves room for the NUL. Anything larger would be RAM spent on characters
+// that can never reach the screen at any of the three sizes. The server caps
+// its own copy at 480 chars (NOTE_MAX_CHARS), so the snprintf that fills this
+// is a belt-and-braces path that shouldn't fire against a well-behaved server.
+// Named NOTE_BUF_MAX, not NOTE_MAX: esp32-hal-ledc.h already has a note_t
+// enumerator called NOTE_MAX -- the musical kind -- and the two collide.
+const int NOTE_BUF_MAX = 512;
 
 // Total DRAM available to globals+heap on this ESP32 variant/partition
 // scheme — a fixed board constant (matches "Maximum is 327680 bytes" in the
@@ -260,6 +277,10 @@ struct UsageState {
   uint8_t weatherHourlyCount = 0;
   WeatherDay weatherDaily[WEATHER_DAILY_N];
   uint8_t weatherDailyCount = 0;
+  // Note page text + the board text size (1-3) chosen in note.html. Fixed
+  // buffer for the same heap-churn reason as the other char fields above.
+  char note[NOTE_BUF_MAX] = "";
+  int noteSize = 1;
   bool sdOk = false;
   // Written by networkTask() (core 0) without stateMutex (see state.h's lock
   // comment: only the brief result-copy takes the lock, not this flag), read
@@ -275,6 +296,11 @@ extern UsageState STATE;
 // read by pages.cpp/settings.cpp/gif_player.cpp to know what's on screen.
 extern int currentPage;
 extern int cfgBootPage;
+// Last page currentPage was on before the most recent restart -- kept up to
+// date on every swipe regardless of cfgBootPage's mode, so switching Boot
+// Page to AUTO always has a fresh value ready. Only actually used at boot
+// when cfgBootPage == BOOT_PAGE_AUTO.
+extern int cfgLastPage;
 // Weather detail overlay (opened by tapping the weather card on page 0).
 // Not a swipe-cycle page — same pattern as settingsScreen: any tap exits.
 extern bool weatherPageOpen;
@@ -349,6 +375,11 @@ inline bool tryLockSD(uint32_t waitMs) {
 // random one. Defined in gif_player.cpp (gifTick reads it); settings.cpp's
 // Cat Shuffle setting reads/writes it via getCurrentCatShuffle/applyCatShuffle.
 extern uint32_t catShuffleMs;
+// FIXED preset (Cat Shuffle value -1): disables all auto-rotation, so
+// gifTick() just keeps replaying the current cat. cyd_dashboard.ino's touch
+// handler reads this to decide whether a tap on the CATS/mixed page should
+// manually advance to a new random cat.
+extern bool catShuffleFixed;
 
 // Runtime overrides for the compiled config.h defaults, loaded from internal
 // flash (NVS, see sd_store.cpp's loadRuntimeConfig). Defined in cyd_dashboard.ino.
@@ -387,6 +418,14 @@ extern bool cfgShowCountdown;
 // Status-page AQI badge next to the date (see aqiColors()/drawStatusPage in
 // pages.cpp). Default on; toggled from the Settings area like cfgShowCountdown.
 extern bool cfgShowAqi;
+// On-the-hour signal: 6s of 1Hz display inversion at :00 (see
+// checkHourlyFlash(), which returns false outright when this is off, so every
+// consumer -- presentFrame's invertDisplay, the poll-progress line and the
+// shine sweep's skip-while-inverted guards -- goes quiet together).
+extern bool cfgHourlyFlash;
+// The 1px poll-countdown line along the bottom edge (drawFooter's tail plus
+// loop()'s between-render top-up). Off = no line at all.
+extern bool cfgShowProgress;
 extern int cfgScreenRotation;
 extern int cfgTouchXMin;
 extern int cfgTouchXMax;
@@ -415,7 +454,9 @@ extern volatile bool pendingRestart;
 enum ConfigKeyId {
   CFGKEY_BRIGHTNESS = 0, CFGKEY_POLL_INTERVAL, CFGKEY_PIXEL_SHIFT, CFGKEY_BOOT_PAGE,
   CFGKEY_CAT_SHUFFLE, CFGKEY_NIGHT_MODE, CFGKEY_ROTATION, CFGKEY_SHOW_COUNTDOWN,
-  CFGKEY_BATTERY_SAVE, CFGKEY_SHOW_AQI, CFGKEY_COUNT
+  CFGKEY_BATTERY_SAVE, CFGKEY_SHOW_AQI, CFGKEY_HOURLY_FLASH, CFGKEY_SHOW_PROGRESS,
+  CFGKEY_LAST_PAGE,
+  CFGKEY_COUNT
 };
 extern const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT];
 
@@ -481,7 +522,6 @@ void forgetWifiFromFlash();
 
 // ── PAGES / RENDER (pages.cpp) ─────────────────────────────
 void render();
-void drawOfflineBanner();
 void drawMixedPageStatic();
 void drawBatterySaveIcon();
 

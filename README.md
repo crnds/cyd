@@ -228,41 +228,44 @@ After flashing, the board restarts by itself:
 1. Screen shows **"Connecting to WiFi..."** for a few seconds.
 2. Then the dashboard appears with your real usage numbers.
 
-If the whole screen just says **OFFLINE** instead, see Troubleshooting below.
+If the screen just shows cat GIFs instead, see Troubleshooting below.
 
 ### Step 2.8 — Move it to its permanent home
 
 Unplug it from the Mac and plug it into **any USB phone charger**
 anywhere in WiFi range. It reconnects and runs 24/7 on its own. (Your Mac
 must be switched on and awake for the display to work — whenever it can't
-reach the Mac, the screen shows cat GIFs (or a placeholder) with an
-**OFFLINE** banner, and returns to the dashboard on the next successful
-poll after the Mac comes back.)
+reach the Mac, the screen switches to cat GIFs (or a placeholder), and
+returns to the dashboard on the next successful poll after the Mac comes
+back.)
 
 ---
 
 ## Using it
 
 Tap the **right half** of the screen to go forward, the **left half** to
-go back, across seven pages:
+go back, across six pages:
 
 | Page | Shows |
 |---|---|
-| **1. Status** (default) | Bangkok clock, session/week mini bars with a looping light sweep on the countdown, weather card (tap for a multi-hour / multi-day overlay), and BTC/USDT price |
+| **1. Status** (default) | Bangkok clock, session/week mini bars with a looping light sweep on the countdown, weather card (tap for a multi-hour / multi-day overlay), AQI badge, and BTC/USDT price |
 | **2. Projects + 7-day trend** | Your most token-hungry projects over the last 7 days, plus a daily token bar chart |
-| **3. Home** | Large session + week limit blocks (same light sweep) with BTC price |
-| **4. Device Stats** | CPU duty cycle, flash, RAM, and SD status on the board itself |
-| **5. Limits** | Full `/usage`-style panel: context window, 5h, weekly, per-model week, credits |
-| **6. Cats** | Random cat GIFs from the SD card (`/cats/`), if present |
-| **7. Mixed** | Limits card on the left, cats on the right |
+| **3. Limits** | Full `/usage`-style panel: context window, 5h, weekly, per-model week, credits |
+| **4. Cats** | Random cat GIFs from the SD card (`/cats/`), if present |
+| **5. Mixed** | Limits card on the left, cats on the right |
+| **6. Note** | Limits card on the left, your own text on the right — see [The Note page](#the-note-page-your-own-text-on-the-board) |
+
+Two more screens are **tap-only**, not part of that cycle: the **Weather
+overlay** (tap the weather card on page 1) and **Device Stats** (tap the
+CPU/ROM/RAM line in the footer) — which is why the footer counter reads
+"3 / 6" and not more.
 
 The bottom edge shows the WiFi status, how fresh the data is
-("updated 5s ago"), and which page you're on. Tap the small connection
-pulse in the footer corner to open **Settings** (brightness, poll rate,
+("updated 5s ago"), and which page you're on. Tap the **gear icon** in the
+bottom-right corner to open **Settings** (brightness, poll rate,
 battery save, night mode, and more). If the board can't reach your Mac
 for about a minute of failed polls, the screen switches to cat GIFs (or
-the cats placeholder) with a large **OFFLINE** banner until the
-connection comes back.
+the cats placeholder) until the connection comes back.
 
 ---
 
@@ -272,7 +275,7 @@ Open **http://127.0.0.1:8788/** in any browser on your Mac. You get a
 live status page that answers "is everything working?" at a glance:
 
 - **RUNNING / STOPPED** pill and a one-click **Enable / Disable server**
-  button (disabling makes the board show OFFLINE; enabling brings it back
+  button (disabling switches the board to cat GIFs; enabling brings it back
   within one 20-second poll — nothing to do on the board itself).
 - **Battery save** — force on, force off, or reset to auto (follow AC power).
   When save is active, the Mac slows its background work and the board (in
@@ -292,14 +295,60 @@ cannot reach it, because it has the power to stop and start the server.
 
 ---
 
+## The Note page (your own text on the board)
+
+Page 6 shows whatever text you want — a reminder, a to-do list, a phone
+number — next to your usage limits. There are two ways to write it, and
+both talk to the same place, so it doesn't matter which you use.
+
+**From the terminal** (fastest):
+
+```
+python3 note.py                      # opens your editor on the current note
+python3 note.py --show               # see it the way the board will draw it
+python3 note.py "back at 3pm"        # set it in one shot
+python3 note.py --append "- milk"    # add a line
+pbpaste | python3 note.py -          # set it from the clipboard
+python3 note.py --size 2             # bigger text on the board (1, 2 or 3)
+python3 note.py --clear              # wipe it
+```
+
+Editing uses whatever `$EDITOR` you already like (vim, nano, `code -w`…).
+Worth an alias, since you'll type it often:
+
+```
+alias note='~/cyd/note.py'           # add to ~/.zshrc, then: note --show
+```
+
+**From a browser:** open **http://127.0.0.1:8787/** for the same thing with
+a mouse — a plain monospace editor that saves as you type.
+
+A few things to know:
+
+- **The board's font is ASCII-only.** Thai, emoji and accented letters have
+  no shape to draw, so they're stored as `?`. Both editors tell you how many
+  characters that affected rather than silently dropping them.
+- **Long notes get cut off, not scrolled.** The pane fits 24 characters
+  across and 19 lines down at size 1 (12 x 10 at size 2, 8 x 7 at size 3).
+  `--show` draws the real box and marks where the text runs out; the browser
+  editor warns you in words.
+- **Text is colour-coded** the same way in the terminal, the browser and on
+  the board: `# headings`, `> quotes`, `-`/`*`/`+` bullets, `TODO`/`FIXME`/
+  `BUG` in red, `DONE`/`OK` in green, numbers in yellow, and `` `code` `` in
+  blue. Keywords must be UPPERCASE to count, so ordinary prose stays plain.
+- **Only your Mac can change the note.** Other devices on your WiFi get a
+  403 — the board reads it, but nothing on the network can write it.
+- Changes reach the board on its next poll (about 20 seconds by default).
+
+---
+
 ## Troubleshooting
 
-**The whole screen just says OFFLINE**
+**The whole screen just shows cat GIFs**
 - This is normal and expected whenever your Mac is **asleep or off** —
-  the board shows cats + an OFFLINE banner, and the dashboard comes back
-  on the next successful poll after the Mac wakes up. You don't need to
-  do anything.
-- If it stays OFFLINE even when the Mac is awake, work through:
+  the board switches to cats, and the dashboard comes back on the next
+  successful poll after the Mac wakes up. You don't need to do anything.
+- If it stays on cats even when the Mac is awake, work through:
 - Is the helper running? (Test on the Mac with
   `curl http://localhost:8787/api/usage` in Terminal. If Part 1 Step 1.5
   is done, it starts automatically — but you can re-run that step.)
@@ -340,8 +389,8 @@ cannot reach it, because it has the power to stop and start the server.
 You don't need to keep your Mac running like a server — this is designed
 for a normal laptop that sleeps and wakes many times a day:
 
-- **When the Mac sleeps**, the board can't reach it, so it shows a plain
-  **OFFLINE** screen. Nothing to do.
+- **When the Mac sleeps**, the board can't reach it, so it switches to cat
+  GIFs. Nothing to do.
 - **When the Mac wakes**, the helper resumes automatically and the board
   reconnects on its own — the dashboard reappears within ~20 seconds. You
   never touch anything.
@@ -435,13 +484,25 @@ cyd/
 ├── README.md                       ← you are here
 ├── simulator.html                  browser-based simulator of the display
 ├── server.html                     browser control panel (status, on/off, logs)
+├── note.html                       browser editor for the Note page (page 6)
+├── note.py                         terminal editor for the same note
+├── pull_giphy_cats.py              downloads cat GIFs for the Cats page
+├── prepare_cat_gifs.py             resizes/optimises them for the board
 ├── server/
 │   ├── usage_server.py             the helper program (Python, no dependencies)
 │   ├── control_server.py           serves the control panel on 127.0.0.1:8788
 │   ├── com.corner.cydusage.plist   auto-start recipe for macOS
 │   └── com.corner.cydcontrol.plist auto-start recipe for the control panel
 └── firmware/cyd_dashboard/
-    ├── cyd_dashboard.ino           the display software (open this in Arduino IDE)
+    ├── cyd_dashboard.ino           setup() + loop(): touch, rendering, the two cores
+    ├── pages.cpp                   every screen the board draws
+    ├── net.cpp                     WiFi, polling the Mac, parsing the JSON
+    ├── gif_player.cpp              the cat GIF player
+    ├── settings.cpp                the on-device Settings area
+    ├── sd_store.cpp                saved settings + SD card files
+    ├── ap_setup.cpp                first-boot WiFi setup portal
+    ├── format.cpp                  number/date formatting helpers
+    ├── state.h                     shared constants and the STATE struct
     ├── pins.h                      which wires go where on this exact board
     ├── config.example.h            template for your WiFi details
     └── config.h                    your actual WiFi details (you create this; never shared/committed)

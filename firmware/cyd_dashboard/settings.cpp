@@ -33,7 +33,8 @@ static const char* const BRIGHTNESS_LABELS[5] = {"0%", "25%", "50%", "75%", "100
 // night_mode are shortened from their old /config.json names for that limit.
 const char* const CONFIG_KEY_NAMES[CFGKEY_COUNT] = {
   "brightness", "poll_sec", "pixel_shift_min", "boot_page", "cat_shuffle_sec",
-  "night_mode", "screen_rotation", "show_countdown", "battery_save", "show_aqi"
+  "night_mode", "screen_rotation", "show_countdown", "battery_save", "show_aqi",
+  "hourly_flash", "show_progress", "last_page"
 };
 
 void queueConfigSave(uint8_t keyId, int32_t value) {
@@ -115,30 +116,38 @@ static void applyPixelShift(int v) {
   queueConfigSave(CFGKEY_PIXEL_SHIFT, v);
 }
 
-// Boot page: which of the 6 pages currentPage starts on next boot. All 6
-// (including the cat/mixed pages) are valid -- render()'s switch and loop()'s
-// catMode check already handle those generically regardless of how
-// currentPage got set, no special-casing needed. Device Stats isn't in this
-// list -- it's an overlay (devicePageOpen), not a currentPage value.
-static const int PAGE_VALUES[5] = {0, 1, 2, 3, 4};
-static const char* const PAGE_LABELS[5] = {
-  "STATUS", "PROJECTS", "LIMITS", "CATS", "MIXED"
+// Boot page: which page currentPage starts on next boot. AUTO (BOOT_PAGE_AUTO,
+// state.h) resumes cfgLastPage -- whichever page the swipe cycle was on
+// before the restart, tracked on every page change in cyd_dashboard.ino. The
+// other 6 (including the cat/mixed pages) pin a fixed page -- render()'s
+// switch and loop()'s catMode check already handle those generically
+// regardless of how currentPage got set, no special-casing needed. Device
+// Stats isn't in this list -- it's an overlay (devicePageOpen), not a
+// currentPage value.
+static const int PAGE_VALUES[7] = {BOOT_PAGE_AUTO, 0, 1, 2, 3, 4, 5};
+static const char* const PAGE_LABELS[7] = {
+  "AUTO", "STATUS", "PROJECTS", "LIMITS", "CATS", "MIXED", "NOTE"
 };
 static int getCurrentBootPage() { return cfgBootPage; }
 static void applyBootPage(int v) {
   cfgBootPage = v;
-  currentPage = v;  // jump the live dashboard too -- a free, immediate effect
+  if (v != BOOT_PAGE_AUTO) currentPage = v;  // jump the live dashboard too -- a free,
+                                              // immediate effect; AUTO isn't itself a page
   queueConfigSave(CFGKEY_BOOT_PAGE, v);
 }
 
 // Cat shuffle interval: how long each cat GIF plays before rotating to a new
-// random one. catShuffleMs lives in gif_player.cpp (core-1-only, read in
-// gifTick()), so no volatile/queue needed for the live value here.
-static const int CAT_SHUFFLE_VALUES[4] = {0, 5, 10, 30};
-static const char* const CAT_SHUFFLE_LABELS[4] = {"OFF", "5s", "10s", "30s"};
-static int getCurrentCatShuffle() { return (int)(catShuffleMs / 1000); }
+// random one. catShuffleMs/catShuffleFixed live in gif_player.cpp
+// (core-1-only, read in gifTick()), so no volatile/queue needed for the live
+// value here. FIXED (-1) disables auto-rotation entirely; the tap-to-advance
+// branch in cyd_dashboard.ino's touch handler is then the only way to change
+// the cat, via gifPlayerResetForPageChange().
+static const int CAT_SHUFFLE_VALUES[5] = {-1, 0, 5, 10, 30};
+static const char* const CAT_SHUFFLE_LABELS[5] = {"FIXED", "OFF", "5s", "10s", "30s"};
+static int getCurrentCatShuffle() { return catShuffleFixed ? -1 : (int)(catShuffleMs / 1000); }
 static void applyCatShuffle(int v) {
-  catShuffleMs = (uint32_t)v * 1000;
+  catShuffleFixed = (v < 0);
+  catShuffleMs = catShuffleFixed ? 0 : (uint32_t)v * 1000;
   queueConfigSave(CFGKEY_CAT_SHUFFLE, v);
 }
 
@@ -209,6 +218,29 @@ static void applyShowAqi(int v) {
   queueConfigSave(CFGKEY_SHOW_AQI, v);
 }
 
+// Hourly Flash: the on-the-hour signal (6s of 1Hz display inversion at :00).
+// checkHourlyFlash() short-circuits on this flag, so turning it off also stops
+// the poll-progress line and shine sweep from skipping their inverted frames.
+// Default ON.
+static const int HOURLY_FLASH_VALUES[2] = {0, 1};
+static const char* const HOURLY_FLASH_LABELS[2] = {"OFF", "ON"};
+static int getCurrentHourlyFlash() { return cfgHourlyFlash ? 1 : 0; }
+static void applyHourlyFlash(int v) {
+  cfgHourlyFlash = (v != 0);
+  if (!cfgHourlyFlash) gfx.invertDisplay(false);  // don't leave the panel stuck inverted mid-flash
+  queueConfigSave(CFGKEY_HOURLY_FLASH, v);
+}
+
+// Progress Bar: the 1px bottom-edge line that fills as the next poll
+// approaches. Default ON.
+static const int SHOW_PROGRESS_VALUES[2] = {0, 1};
+static const char* const SHOW_PROGRESS_LABELS[2] = {"OFF", "ON"};
+static int getCurrentShowProgress() { return cfgShowProgress ? 1 : 0; }
+static void applyShowProgress(int v) {
+  cfgShowProgress = (v != 0);
+  queueConfigSave(CFGKEY_SHOW_PROGRESS, v);
+}
+
 static const SettingDef SETTINGS[] = {
   { "BRIGHTNESS", "BRIGHTNESS", "BACKLIGHT BRIGHTNESS", "TAP A LEVEL TO APPLY",
     5, 1, 5, BRIGHTNESS_VALUES, BRIGHTNESS_LABELS, 2, false,
@@ -219,8 +251,8 @@ static const SettingDef SETTINGS[] = {
   { "PIXEL SHIFT", "PIXEL SHIFT", "ANTI-RETENTION ORBIT INTERVAL", "TAP A RATE TO APPLY",
     4, 1, 4, PIXEL_SHIFT_VALUES, PIXEL_SHIFT_LABELS, 2, false,
     getCurrentPixelShift, applyPixelShift },
-  { "BOOT PAGE", "BOOT PAGE", "PAGE SHOWN AFTER POWER-ON", "TAP A PAGE TO APPLY",
-    3, 2, 5, PAGE_VALUES, PAGE_LABELS, 1, false,
+  { "BOOT PAGE", "BOOT PAGE", "AUTO = RESUME LAST PAGE SHOWN", "TAP A PAGE TO APPLY",
+    4, 2, 7, PAGE_VALUES, PAGE_LABELS, 1, false,
     getCurrentBootPage, applyBootPage },
   { "RESTART", "RESTART", "", "TAP TWICE TO RESTART THE BOARD",
     1, 1, 1, ACTION_VALUES, RESTART_LABELS, 2, true,
@@ -229,7 +261,7 @@ static const SettingDef SETTINGS[] = {
     1, 1, 1, ACTION_VALUES, FORGET_WIFI_LABELS, 2, true,
     getCurrentNone, applyForgetWifi },
   { "CAT SHUFFLE", "CAT SHUFFLE", "HOW LONG EACH CAT GIF PLAYS", "TAP A RATE TO APPLY",
-    4, 1, 4, CAT_SHUFFLE_VALUES, CAT_SHUFFLE_LABELS, 2, false,
+    5, 1, 5, CAT_SHUFFLE_VALUES, CAT_SHUFFLE_LABELS, 2, false,
     getCurrentCatShuffle, applyCatShuffle },
   { "NIGHT MODE", "NIGHT MODE", "23:00-07:00, DIMS TO 25%", "TAP TO TOGGLE",
     2, 1, 2, NIGHT_MODE_VALUES, NIGHT_MODE_LABELS, 2, false,
@@ -246,8 +278,14 @@ static const SettingDef SETTINGS[] = {
   { "SHOW AQI", "SHOW AQI", "BADGE NEXT TO THE STATUS DATE", "TAP TO TOGGLE",
     2, 1, 2, SHOW_AQI_VALUES, SHOW_AQI_LABELS, 2, false,
     getCurrentShowAqi, applyShowAqi },
+  { "HOURLY FLASH", "HOURLY FLASH", "INVERT SIGNAL ON THE HOUR", "TAP TO TOGGLE",
+    2, 1, 2, HOURLY_FLASH_VALUES, HOURLY_FLASH_LABELS, 2, false,
+    getCurrentHourlyFlash, applyHourlyFlash },
+  { "PROGRESS BAR", "PROGRESS BAR", "POLL COUNTDOWN ALONG THE FOOT", "TAP TO TOGGLE",
+    2, 1, 2, SHOW_PROGRESS_VALUES, SHOW_PROGRESS_LABELS, 2, false,
+    getCurrentShowProgress, applyShowProgress },
 };
-static const int SETTINGS_COUNT = 12;
+static const int SETTINGS_COUNT = 14;
 
 static const int SET_BACK_X0 = 0, SET_BACK_X1 = 100, SET_BACK_Y0 = 0, SET_BACK_Y1 = 34;
 static const int SET_BTN_X0 = 11, SET_BTN_Y = 100, SET_BTN_W = 54, SET_BTN_H = 56;

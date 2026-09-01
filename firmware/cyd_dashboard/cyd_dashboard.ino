@@ -42,6 +42,7 @@ UsageState STATE;
 
 int currentPage = 0;
 int cfgBootPage = 0;  // which page currentPage starts on; overridable via flash "boot_page"
+int cfgLastPage = 0;  // last page shown before the most recent restart; flash "last_page"
 bool weatherPageOpen = false;  // Weather overlay (tap status-page weather card)
 bool devicePageOpen = false;  // Device Stats overlay (tap footer's CPU/ROM/RAM stats line)
 SettingsScreen settingsScreen = SET_OFF;
@@ -97,6 +98,8 @@ volatile int cfgBatterySaveMode = BATTERY_SAVE_AUTO;
 volatile bool serverBatterySave = false;
 bool cfgShowCountdown = true;  // default on; flash "show_countdown"
 bool cfgShowAqi = true;        // default on; flash "show_aqi"
+bool cfgHourlyFlash = true;    // default on; flash "hourly_flash"
+bool cfgShowProgress = true;   // default on; flash "show_progress"
 bool nightDimActive = false;
 // Generic Settings-page persistence queue: a leaf's apply() (loop(), core 1)
 // mutates its live global directly, then queues the flash key/value here;
@@ -293,7 +296,10 @@ void setup() {
   // loadRuntimeConfig()). SD is only needed below for the genuinely
   // SD-only assets (env/weather caches, splash, cats).
   loadRuntimeConfig();
-  currentPage = cfgBootPage;   // honor the flash "boot_page" override
+  // AUTO resumes wherever the swipe cycle was before the last restart
+  // (cfgLastPage, updated on every page change below); otherwise honor the
+  // fixed flash "boot_page" override.
+  currentPage = (cfgBootPage == BOOT_PAGE_AUTO) ? cfgLastPage : cfgBootPage;
   applyEffectiveBrightness();  // honor brightness (+ night mode) from flash
   if (STATE.sdOk) {
     loadEnvCache();     // show last-known BTC/weather immediately, before any live fetch
@@ -339,8 +345,7 @@ void loop() {
   uint32_t now = millis();
 
   // Cats own the screen on the cat pages, AND whenever offline (the cat GIF loop
-  // doubles as the offline screen, with an OFFLINE banner overlaid on top —
-  // see drawOfflineBanner()/gifTick()).
+  // doubles as the offline screen — see gifTick()).
   bool offline = !STATE.haveData;
   bool catMode = (currentPage == GIF_PAGE) || (currentPage == MIXED_PAGE) || offline;
 
@@ -429,7 +434,7 @@ void loop() {
     // elapsed pixels straight to the panel (~every 30ms loop pass) instead of
     // pushing a full frame, which at 1s intervals looked stuttery.
     static int lineW = 0;
-    if (connected) {
+    if (connected && cfgShowProgress) {
       uint32_t elapsed = now - lastPollMs;
       if (elapsed > POLL_INTERVAL_MS) elapsed = POLL_INTERVAL_MS;
       int w = (int)((float)elapsed / POLL_INTERVAL_MS * 320);
@@ -492,6 +497,18 @@ void loop() {
       // Tap the footer's CPU/ROM/RAM stats line → open Device Stats overlay.
       devicePageOpen = true;
       render();
+    } else if (catShuffleFixed && catMode && tx >= 160) {
+      // Cat Shuffle is FIXED (never auto-rotates) -- a tap on the right half of
+      // any cat display manually advances to a new random cat instead of
+      // swiping to the next page. This covers GIF_PAGE/MIXED_PAGE directly,
+      // and also offline on any OTHER page: cats take over full-screen there
+      // too (gifTick()'s mixedMode forces false whenever offline -- see
+      // catMode in CLAUDE.md), so the same right-half tap must reach them,
+      // not just when currentPage is literally GIF_PAGE/MIXED_PAGE. Left-half
+      // taps fall through to the branch below unchanged, so the previous page
+      // is still reachable by tapping left.
+      gifPlayerResetForPageChange();
+      flashTouchBorder(true);
     } else {
       bool isRight = (tx >= 160);
       if (isRight) {
@@ -499,6 +516,10 @@ void loop() {
       } else {
         currentPage = (currentPage - 1 + PAGE_COUNT) % PAGE_COUNT;
       }
+      // Always tracked (regardless of cfgBootPage's mode) so switching Boot
+      // Page to AUTO later always has a fresh page ready to resume.
+      cfgLastPage = currentPage;
+      queueConfigSave(CFGKEY_LAST_PAGE, currentPage);
 
       // Handle initialization when entering a page
       if (currentPage == MIXED_PAGE && !offline) {

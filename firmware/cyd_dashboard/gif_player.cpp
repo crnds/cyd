@@ -6,7 +6,8 @@
 //
 // Everything below except the six functions declared in state.h (scanCats,
 // gifTick, gifPlayerEnterCatMode/ExitCatMode/ResetForPageChange, and the
-// catShuffleMs extern settings.cpp reads/writes) is file-local now — loop()
+// catShuffleMs/catShuffleFixed externs settings.cpp and cyd_dashboard.ino
+// read/write) is file-local now — loop()
 // used to reach directly into gif/gifOpen/gifNextFrameMs; those raw globals
 // are now static here, and loop() calls the three intent-named entry points
 // instead.
@@ -18,6 +19,7 @@ int gifMinY = 220;
 int gifMaxY = -1;
 
 uint32_t catShuffleMs = 0;  // 0 = let each GIF play to its natural end
+bool catShuffleFixed = false;  // FIXED preset: never auto-rotate, tap-only advance
 
 // Mixed-page (page 5 of 5, MIXED_PAGE) cat region bounds: starts 2px right of the usage card's
 // right edge (card is x=2 w=157, edge=159) and ends 2px short of the screen's
@@ -203,7 +205,8 @@ void scanCats() {
 }
 
 // "26% reset: 02:09" pinned to the bottom-left corner of the full-screen
-// cat page (GIF_PAGE only), on a solid black box so it stays legible over
+// cat page (GIF_PAGE only, and never while offline -- see the two call
+// sites' `&& !offline`), on a solid black box so it stays legible over
 // any GIF frame. gifTick() runs unlocked on core 1, so STATE is copied under
 // the lock before drawing.
 static void drawSessionResetOverlay() {
@@ -230,9 +233,7 @@ static void drawSessionResetOverlay() {
 }
 
 // A centered message when there are no cats to show (no SD, or empty /cats/).
-// Drawn once per page visit (gifPlaceholderDrawn) so it doesn't flicker; the
-// OFFLINE banner is re-applied on top every call since offline state can
-// change independently of the placeholder's draw-once guard.
+// Drawn once per page visit (gifPlaceholderDrawn) so it doesn't flicker.
 static void drawGifPlaceholder(bool offline) {
   bool mixedMode = (currentPage == MIXED_PAGE && !offline);
   if (!gifPlaceholderDrawn) {
@@ -262,8 +263,7 @@ static void drawGifPlaceholder(bool offline) {
       g->print(msg);
     }
   }
-  if (currentPage == GIF_PAGE) drawSessionResetOverlay();
-  if (offline) drawOfflineBanner();
+  if (currentPage == GIF_PAGE && !offline) drawSessionResetOverlay();
   drawBatterySaveIcon();
   presentFrame();
 }
@@ -312,7 +312,7 @@ static bool reopenCurrentCat() {
 // page (cats double as the offline screen — see catMode in loop()). Decodes at
 // most one frame per call (pacing itself via gifNextFrameMs) so touch stays
 // responsive; when a GIF ends it immediately opens another at random — endless
-// cats. `offline` overlays the OFFLINE banner on top of the cat frame.
+// cats.
 void gifTick(bool offline) {
   if (!STATE.sdOk || catCount == 0 || !gif) { drawGifPlaceholder(offline); return; }
   uint32_t now = millis();
@@ -347,8 +347,7 @@ void gifTick(bool offline) {
   if (gifFirstFrame) {
     gifFirstFrame = false;
   }
-  if (currentPage == GIF_PAGE) drawSessionResetOverlay();
-  if (offline) drawOfflineBanner();
+  if (currentPage == GIF_PAGE && !offline) drawSessionResetOverlay();
   drawBatterySaveIcon();
   if (currentPage == MIXED_PAGE && !offline) {
     // Battery Save's corner box sits inside the GIF region but outside
@@ -366,8 +365,11 @@ void gifTick(bool offline) {
   // Rotate to a new random cat either at the GIF's natural end, or early if
   // the Settings-page shuffle interval says this one has played long enough
   // (catShuffleMs == 0 disables the early cutoff -- always play to the end).
-  bool shuffleDue = catShuffleMs > 0 && now >= gifOpenedAtMs && (now - gifOpenedAtMs) >= catShuffleMs;
-  if (shuffleDue || (more == 0 && catShuffleMs == 0)) {
+  // FIXED (catShuffleFixed) disables auto-rotation entirely -- the current
+  // cat just keeps replaying (the `more == 0` branch below) until a manual
+  // tap calls gifPlayerResetForPageChange().
+  bool shuffleDue = !catShuffleFixed && catShuffleMs > 0 && now >= gifOpenedAtMs && (now - gifOpenedAtMs) >= catShuffleMs;
+  if (shuffleDue || (more == 0 && !catShuffleFixed && catShuffleMs == 0)) {
     lockSD(); gif->close(); unlockSD();
     gifOpen = false;
     gifNextFrameMs = now;          // open the next one on the following tick

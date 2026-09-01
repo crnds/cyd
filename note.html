@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CYD Note</title>
+<style>
+:root {
+  --bg: #08090d;
+  --surface: #0f1117;
+  --surface-alt: #161b27;
+  --border: rgba(255,255,255,0.08);
+  --text: #f1f5f9;
+  --text2: #94a3b8;
+  --muted: #64748b;
+  --accent: #F4620E;
+  --good: #22c55e;
+  --danger: #f43f5e;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.2);
+
+  /* Shared by the textarea and its highlight backdrop. Every one of these
+     must match on both or the coloured text drifts out of register with the
+     characters you are typing. */
+  --editor-font: 400 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --editor-pad: 12px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+}
+
+header {
+  max-width: 720px;
+  margin: 0 auto 20px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+header h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.02em; }
+header p { margin: 0; color: var(--muted); }
+
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px;
+}
+
+/* ── toolbar ─────────────────────────────────────────────── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.size-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px;
+}
+.size-btn {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.size-btn:hover:not(:disabled) { background: rgba(255,255,255,0.09); }
+.size-btn:disabled { color: var(--muted); cursor: default; }
+.size-value {
+  min-width: 30px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--text2);
+  font-size: 12px;
+}
+
+.counter {
+  color: var(--text2);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+
+.chip {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text2);
+}
+.chip::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+.chip[data-state="saved"] { color: var(--good); }
+.chip[data-state="saved"]::before { background: var(--good); }
+.chip[data-state="unsaved"] { color: var(--accent); }
+.chip[data-state="unsaved"]::before { background: var(--accent); }
+.chip[data-state="saving"]::before { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+.chip[data-state="error"] { color: var(--danger); }
+.chip[data-state="error"]::before { background: var(--danger); }
+
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+.btn {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.btn:hover { background: rgba(255,255,255,0.09); }
+
+.size-btn:focus-visible,
+.btn:focus-visible,
+.editor-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── the editor: highlight backdrop under a transparent textarea ──
+   The textarea stays a real textarea — native caret, selection, undo, IME
+   and mobile keyboards all keep working, which no contenteditable rewrite
+   manages. The coloured copy is painted on a div behind it, and the two are
+   kept in register by sharing every font and box property below. */
+.editor-stack {
+  position: relative;
+  height: 460px;
+}
+.editor-backdrop,
+.editor-input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: var(--editor-pad);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: var(--editor-font);
+  letter-spacing: 0;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+.editor-backdrop {
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--bg);
+  color: rgb(255,255,255);  /* 0xFFFF COL_TEXT — the board's default ink */
+}
+.editor-input {
+  background: transparent;
+  color: transparent;
+  caret-color: var(--accent);
+  resize: none;
+  width: 100%;
+  height: 100%;
+}
+
+.warn {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(244,98,14,0.10);
+  border: 1px solid rgba(244,98,14,0.35);
+  color: var(--accent);
+  font-size: 12px;
+}
+.warn[hidden] { display: none; }
+.warn.is-error {
+  background: rgba(244,63,94,0.10);
+  border-color: rgba(244,63,94,0.35);
+  color: var(--danger);
+}
+
+@media (max-width: 768px) {
+  body { padding: 14px; }
+  .editor-stack { height: 340px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CYD Note</h1>
+  <p>Page 6 on the board &mdash; plain monospace text, synced on the next poll.</p>
+</header>
+
+<main>
+  <div class="toolbar">
+    <div class="size-control" role="group" aria-label="Board text size">
+      <button class="size-btn" id="size-down" aria-label="Smaller text">&minus;</button>
+      <span class="size-value" id="size-value" aria-live="polite">1&times;</span>
+      <button class="size-btn" id="size-up" aria-label="Larger text">+</button>
+    </div>
+    <span class="counter" id="counter">0 / 480</span>
+    <button class="btn" id="save-btn">Save now</button>
+    <span class="chip" id="chip" data-state="saved" role="status">loading&hellip;</span>
+  </div>
+
+  <div class="editor-stack">
+    <div class="editor-backdrop" id="backdrop" aria-hidden="true"></div>
+    <textarea class="editor-input" id="input" spellcheck="false" autocapitalize="off"
+              autocorrect="off" aria-label="Note text"></textarea>
+  </div>
+
+  <p class="warn" id="warn-ascii" hidden></p>
+  <p class="warn" id="warn-clip" hidden></p>
+  <p class="warn is-error" id="warn-net" hidden></p>
+</main>
+
+<script>
+// ── CONSTANTS ─────────────────────────────────────────────
+// Same-origin when served by usage_server.py; absolute when opened from disk.
+const API_BASE = location.protocol === 'file:' ? 'http://127.0.0.1:8787' : '';
+const NOTE_API = API_BASE + '/api/note';
+const DRAFT_KEY = 'cydnote_v1_draft';
+const FETCH_TIMEOUT_MS = 5000;
+const SAVE_DEBOUNCE_MS = 800;
+const RETRY_BASE_MS = 1000;
+const RETRY_MAX_MS = 16000;
+// Mirrors the server's NOTE_MAX_CHARS and the firmware's pane capacity.
+const NOTE_MAX_CHARS = 480;
+
+// Board palette: RGB888 twins of the firmware's RGB565 constants, with the
+// original hex in the comment — the convention simulator.html uses. Defined
+// here rather than as CSS custom properties because only this script reads
+// them (the highlighter emits inline colours), and one definition can't drift.
+const COL_TEXT   = 'rgb(255,255,255)'; // 0xFFFF
+const COL_TEXT2  = 'rgb(156,154,156)'; // 0x9CD3
+const COL_ACCENT = 'rgb(255,97,66)';   // 0xFB08
+const COL_GOOD   = 'rgb(33,206,66)';   // 0x2668
+const COL_WARN   = 'rgb(255,24,49)';   // 0xF8C6
+const COL_BLUE   = 'rgb(58,130,247)';  // 0x3C1E
+const COL_YELLOW = 'rgb(255,255,0)';   // 0xFFE0
+
+const STATE = {
+  note: '',
+  noteSize: 1,
+  saved: '',        // last text confirmed by the server
+  savedSize: 1,
+  chip: 'saved',
+  retryMs: RETRY_BASE_MS,
+};
+
+// ── NOTE TOKENIZER + WRAP (page 6, NOTE_PAGE) ─────────────────────────────
+// Pane geometry, needed here only to answer "will this fit on the board?".
+// Must match firmware/cyd_dashboard/pages.cpp and simulator.html.
+const NOTE_TY = 18;       // first glyph row
+const NOTE_TY_MAX = 212;  // exclusive bottom limit: a row is drawn while y + 8*size <= this
+//
+//   size | cols | rows | glyphs | line height
+//     1  |  24  |  19  |  456   |  10
+//     2  |  12  |  10  |  120   |  18
+//     3  |   8  |   7  |   56   |  26
+//
+// ── Syntax highlighting ───────────────────────────────────────────────────
+// Duplicated in firmware/cyd_dashboard/pages.cpp and simulator.html; all three
+// must agree or the board and this editor disagree about what the text looks
+// like. Tokenizing happens at two levels — source line, then word — plus a
+// one-character backtick toggle. There is deliberately no per-character
+// classification: colouring digits individually renders "3.5" as
+// yellow-white-yellow, which reads as broken rather than highlighted.
+//
+// Precedence, first match wins:
+//   1. inside a `backtick span`      -> COL_BLUE (delimiters included)
+//   2. word is TODO/FIXME/BUG        -> COL_WARN
+//      word is DONE/OK               -> COL_GOOD
+//      word is numeric               -> COL_YELLOW
+//   3. line begins '#'               -> COL_ACCENT (whole line)
+//      line begins '>'               -> COL_TEXT2  (whole line)
+//   4. leading "- ", "* ", "+ "      -> COL_ACCENT (the marker char only)
+//   5. otherwise                     -> COL_TEXT
+//
+// Keywords are matched case-SENSITIVE uppercase-only. That keeps "ok" in
+// ordinary prose from lighting up, and avoids the parity hazard of case
+// folding: C's toupper is byte-wise and locale-dependent while JS's
+// toUpperCase is Unicode-aware and can even change a string's length.
+function notePunctOpen(c) {
+  return c === '(' || c === '[' || c === '{' || c === '"' || c === "'";
+}
+
+function notePunctClose(c) {
+  return c === ')' || c === ']' || c === '}' || c === ':' || c === ';' ||
+         c === ',' || c === '.' || c === '!' || c === '?' || c === '"' || c === "'";
+}
+
+function noteIsDigit(c) { return c >= '0' && c <= '9'; }
+
+// Characters allowed inside a numeric token alongside the digits, so
+// "12:30", "$1,200", "2026-08-26" and "50%" each colour as one unit.
+function noteIsNumChar(c) {
+  return noteIsDigit(c) || c === '.' || c === ',' || c === ':' || c === '/' ||
+         c === '%' || c === '$' || c === '+' || c === '-';
+}
+
+// Word-level colour for s[a..b), or null for "no override". Wrapping
+// punctuation is trimmed for the comparison only — the colour still applies to
+// the whole untrimmed word, so "TODO:" and "(TODO)" both light up including
+// the punctuation.
+function noteWordColor(s, a, b) {
+  while (a < b && notePunctOpen(s[a])) a++;
+  while (b > a && notePunctClose(s[b - 1])) b--;
+  if (b === a) return null;
+  const w = s.slice(a, b);
+  if (w === 'TODO' || w === 'FIXME' || w === 'BUG') return COL_WARN;
+  if (w === 'DONE' || w === 'OK') return COL_GOOD;
+  let hasDigit = false;
+  for (let i = 0; i < w.length; i++) {
+    if (!noteIsNumChar(w[i])) return null;
+    if (noteIsDigit(w[i])) hasDigit = true;
+  }
+  return hasDigit ? COL_YELLOW : null;
+}
+
+// Line-level context for the source line starting at i: the whole-line colour
+// override, the index of a bullet marker char, and where the line ends.
+function noteLineContext(s, i, n) {
+  let lineEnd = i;
+  while (lineEnd < n && s[lineEnd] !== '\n') lineEnd++;
+  let p = i;
+  while (p < lineEnd && s[p] === ' ') p++;  // allow indented markers
+  let lineColor = null;
+  let markerIdx = -1;
+  if (p < lineEnd) {
+    if (s[p] === '#') lineColor = COL_ACCENT;
+    else if (s[p] === '>') lineColor = COL_TEXT2;
+    else if ((s[p] === '-' || s[p] === '*' || s[p] === '+') &&
+             (p + 1 === lineEnd || s[p + 1] === ' ')) markerIdx = p;
+  }
+  return { lineEnd, lineColor, markerIdx };
+}
+
+// Does the note fit the board's pane at this size? The same wrap walk as the
+// firmware's drawNotePane — word wrap, hard break for words longer than a row,
+// blank lines consume a row — with all drawing and colouring stripped out.
+// This is what backs the "won't fit" warning; there is no preview canvas to
+// show the clipping directly, and with wrap + clip you otherwise cannot tell.
+//
+// One deliberate difference from drawNotePane: the row advance at end-of-line
+// is skipped once the text is exhausted. The firmware reaches the same point
+// and simply falls out of its loop, so nothing differs on screen — but here
+// the advance would report "doesn't fit" for a note that fills the pane
+// exactly, which is a false alarm.
+function noteFits(s, size) {
+  const glyphH = 8 * size;
+  const lineH = glyphH + 2;
+  const cols = 24 / size;
+  const n = s.length;
+  let y = NOTE_TY;
+  let col = 0;
+  let i = 0;
+
+  while (i < n) {
+    let lineEnd = i;
+    while (lineEnd < n && s[lineEnd] !== '\n') lineEnd++;
+    col = 0;
+
+    while (i < lineEnd) {
+      if (s[i] === ' ') {
+        if (col > 0) col++;
+        i++;
+        if (col >= cols) {
+          y += lineH; col = 0;
+          if (y + glyphH > NOTE_TY_MAX) return false;
+        }
+        continue;
+      }
+
+      let wEnd = i;
+      while (wEnd < lineEnd && s[wEnd] !== ' ') wEnd++;
+      const wLen = wEnd - i;
+
+      if (col > 0 && col + wLen > cols && wLen <= cols) {
+        y += lineH; col = 0;
+        if (y + glyphH > NOTE_TY_MAX) return false;
+        continue;
+      }
+
+      while (i < wEnd) {
+        if (col >= cols) {
+          y += lineH; col = 0;
+          if (y + glyphH > NOTE_TY_MAX) return false;
+        }
+        col++; i++;
+      }
+    }
+
+    i = lineEnd + 1;
+    if (i >= n) break;  // see the note above: no content left to clip
+    y += lineH; col = 0;
+    if (y + glyphH > NOTE_TY_MAX) return false;
+  }
+  return true;
+}
+
+// ── HIGHLIGHTING (textarea backdrop) ──────────────────────
+// Same rules as the board's drawNotePane, but no wrapping — the textarea does
+// its own, and forcing the board's 24-column wrap here would fight the caret.
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+function highlightHtml(s) {
+  const n = s.length;
+  let out = '';
+  let run = '';
+  let runColor = null;
+
+  // Adjacent characters of the same colour share one span — a per-character
+  // span for a 480-char note is 480 DOM nodes rebuilt on every keystroke.
+  const flush = () => {
+    if (!run) return;
+    out += runColor && runColor !== COL_TEXT
+      ? '<span style="color:' + runColor + '">' + escapeHtml(run) + '</span>'
+      : escapeHtml(run);
+    run = '';
+  };
+  const emit = (ch, color) => {
+    if (color !== runColor) { flush(); runColor = color; }
+    run += ch;
+  };
+
+  let i = 0;
+  while (i < n) {
+    const { lineEnd, lineColor, markerIdx } = noteLineContext(s, i, n);
+    let inCode = false;
+
+    while (i < lineEnd) {
+      if (s[i] === ' ') { emit(' ', null); i++; continue; }
+      let wEnd = i;
+      while (wEnd < lineEnd && s[wEnd] !== ' ') wEnd++;
+      const wordColor = noteWordColor(s, i, wEnd);
+      while (i < wEnd) {
+        let c;
+        if (s[i] === '`') { inCode = !inCode; c = COL_BLUE; }
+        else if (inCode) c = COL_BLUE;
+        else if (wordColor) c = wordColor;
+        else if (lineColor) c = lineColor;
+        else if (i === markerIdx) c = COL_ACCENT;
+        else c = COL_TEXT;
+        emit(s[i], c);
+        i++;
+      }
+    }
+    emit('\n', null);
+    i = lineEnd + 1;
+  }
+  flush();
+  // Trailing newline, or the backdrop's last line collapses and the two
+  // scroll heights stop matching.
+  return out + '\n';
+}
+
+// ── NORMALIZATION ─────────────────────────────────────────
+// JS twin of the server's sanitize_note(). Kept in step so the counter and the
+// warnings describe what the server will actually store.
+function normalizeNote(text) {
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, ' ');
+  let out = '';
+  let replaced = 0;
+  for (const ch of text) {
+    if (ch === '\n' || (ch >= ' ' && ch <= '~')) {
+      out += ch;
+    } else {
+      // The board's built-in GFX font is 7-bit ASCII only — Thai and emoji
+      // have no glyph at all. Substituting keeps the length honest and makes
+      // the loss visible instead of mysterious.
+      out += '?';
+      replaced++;
+    }
+  }
+  const truncated = out.length > NOTE_MAX_CHARS;
+  return { text: out.slice(0, NOTE_MAX_CHARS), replaced, truncated };
+}
+
+// ── DOM ───────────────────────────────────────────────────
+const input = document.getElementById('input');
+const backdrop = document.getElementById('backdrop');
+const chip = document.getElementById('chip');
+const counter = document.getElementById('counter');
+const sizeValue = document.getElementById('size-value');
+const sizeDown = document.getElementById('size-down');
+const sizeUp = document.getElementById('size-up');
+const warnAscii = document.getElementById('warn-ascii');
+const warnClip = document.getElementById('warn-clip');
+const warnNet = document.getElementById('warn-net');
+
+function setChip(state, text) {
+  STATE.chip = state;
+  chip.dataset.state = state;
+  chip.textContent = text;
+}
+
+function showWarn(el, msg) {
+  if (msg) { el.textContent = msg; el.hidden = false; }
+  else { el.hidden = true; }
+}
+
+// Single re-render path: highlight, normalize, counter, warnings.
+function refresh() {
+  const raw = input.value;
+  backdrop.innerHTML = highlightHtml(raw);
+  backdrop.scrollTop = input.scrollTop;
+
+  const norm = normalizeNote(raw);
+  STATE.note = norm.text;
+
+  counter.textContent = norm.text.length + ' / ' + NOTE_MAX_CHARS;
+
+  showWarn(warnAscii, norm.replaced > 0
+    ? norm.replaced + (norm.replaced === 1 ? ' character' : ' characters') +
+      " can't be drawn by the board's ASCII font — " +
+      (norm.replaced === 1 ? 'it will show' : 'they will show') + ' as "?".'
+    : '');
+  showWarn(warnClip, norm.truncated
+    ? 'Over ' + NOTE_MAX_CHARS + ' characters — the rest will not be saved.'
+    : (noteFits(norm.text, STATE.noteSize)
+        ? ''
+        : "Too long for the board at " + STATE.noteSize + '×' +
+          " — the text past the bottom of the pane won't be drawn."));
+
+  const dirty = STATE.note !== STATE.saved || STATE.noteSize !== STATE.savedSize;
+  if (dirty && STATE.chip !== 'saving' && STATE.chip !== 'error') {
+    setChip('unsaved', 'unsaved');
+  }
+}
+
+// Coalesce bursts of keystrokes into at most one re-highlight per frame.
+let refreshQueued = false;
+function scheduleRefresh() {
+  if (refreshQueued) return;
+  refreshQueued = true;
+  requestAnimationFrame(() => { refreshQueued = false; refresh(); });
+}
+
+function setSize(v) {
+  STATE.noteSize = Math.min(3, Math.max(1, v));
+  sizeValue.textContent = STATE.noteSize + '×';
+  sizeDown.disabled = STATE.noteSize === 1;
+  sizeUp.disabled = STATE.noteSize === 3;
+  refresh();
+  scheduleSave();
+}
+
+// ── NETWORK ───────────────────────────────────────────────
+async function apiFetch(url, init) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, Object.assign({}, init, { signal: ctl.signal }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+let saveTimer = null;
+let retryTimer = null;
+let saving = false;
+
+function scheduleSave() {
+  scheduleDraft();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, SAVE_DEBOUNCE_MS);
+}
+
+async function save() {
+  clearTimeout(saveTimer);
+  clearTimeout(retryTimer);
+  if (saving) return;
+  const text = STATE.note;
+  const size = STATE.noteSize;
+  if (text === STATE.saved && size === STATE.savedSize) {
+    setChip('saved', 'saved');
+    return;
+  }
+  saving = true;
+  setChip('saving', 'saving…');
+  try {
+    const res = await apiFetch(NOTE_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, size }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const doc = await res.json();
+    if (!doc.ok) throw new Error(doc.detail || 'rejected');
+    STATE.saved = doc.note.text;
+    STATE.savedSize = doc.note.size;
+    STATE.retryMs = RETRY_BASE_MS;
+    clearDraft();
+    showWarn(warnNet, '');
+    setChip('saved', 'saved ' + new Date().toTimeString().slice(0, 8));
+    // A keystroke during the request leaves us dirty again.
+    if (STATE.note !== STATE.saved || STATE.noteSize !== STATE.savedSize) {
+      setChip('unsaved', 'unsaved');
+      scheduleSave();
+    }
+  } catch (e) {
+    setChip('error', 'not saved');
+    showWarn(warnNet, 'Could not reach the usage server (' + e.message +
+      '). It may be paused on battery. Your text is kept locally and will retry.');
+    // Same exponential-backoff shape the project uses elsewhere: the server
+    // socket closing is a normal condition here, not an exception.
+    retryTimer = setTimeout(save, STATE.retryMs);
+    STATE.retryMs = Math.min(STATE.retryMs * 2, RETRY_MAX_MS);
+  } finally {
+    saving = false;
+  }
+}
+
+// ── LOCAL DRAFT ───────────────────────────────────────────
+// localStorage.setItem is synchronous, so writing it straight from the input
+// handler puts a disk write on every keystroke. A short debounce collapses a
+// burst of typing into one write while still landing the draft long before
+// the 800ms network save, so the crash-safety it exists for is unaffected.
+const DRAFT_DEBOUNCE_MS = 250;
+let draftTimer = null;
+
+function scheduleDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraft, DRAFT_DEBOUNCE_MS);
+}
+
+function saveDraft() {
+  clearTimeout(draftTimer);
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({
+      text: input.value, size: STATE.noteSize, at: Date.now(),
+    }));
+  } catch (e) { /* private mode / quota — the server copy is the real one */ }
+}
+
+function clearDraft() {
+  try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* ignore */ }
+}
+
+function readDraft() {
+  try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null'); }
+  catch (e) { return null; }
+}
+
+// ── INIT ──────────────────────────────────────────────────
+async function load() {
+  setChip('saving', 'loading…');
+  let server = null;
+  try {
+    const res = await apiFetch(NOTE_API);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    server = await res.json();
+    showWarn(warnNet, '');
+  } catch (e) {
+    showWarn(warnNet, 'Could not load from the usage server (' + e.message +
+      '). Showing your local draft; saving will retry.');
+  }
+
+  const draft = readDraft();
+  if (server) {
+    STATE.saved = server.text || '';
+    STATE.savedSize = server.size || 1;
+  }
+
+  // An unsent draft that differs from the server copy wins — it is strictly
+  // newer (it only exists because a save hadn't landed), and silently
+  // discarding someone's typing is the one unrecoverable outcome here.
+  if (draft && server && draft.text !== server.text) {
+    input.value = draft.text;
+    setSize(draft.size || 1);
+    setChip('unsaved', 'unsent draft restored');
+  } else if (draft && !server) {
+    input.value = draft.text;
+    setSize(draft.size || 1);
+  } else if (server) {
+    input.value = server.text || '';
+    setSize(server.size || 1);
+    setChip('saved', 'saved');
+  } else {
+    setSize(1);
+  }
+  refresh();
+}
+
+input.addEventListener('input', () => { scheduleRefresh(); scheduleSave(); });
+input.addEventListener('scroll', () => { backdrop.scrollTop = input.scrollTop; });
+sizeDown.addEventListener('click', () => setSize(STATE.noteSize - 1));
+sizeUp.addEventListener('click', () => setSize(STATE.noteSize + 1));
+document.getElementById('save-btn').addEventListener('click', save);
+
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); save(); }
+});
+
+window.addEventListener('beforeunload', (e) => {
+  if (STATE.note !== STATE.saved || STATE.noteSize !== STATE.savedSize) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+
+load();
+</script>
+</body>
+</html>

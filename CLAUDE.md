@@ -10,7 +10,10 @@ Display" (CYD) — a 2.8″ 320×240 landscape touch screen. Three moving parts:
 ```
 Mac laptop                                   CYD board (ESP32, on WiFi)
 server/usage_server.py  ──HTTP /api/usage──▶ firmware/cyd_dashboard/*.ino
-(reads local logs + OAuth usage endpoint)    (polls every 20s, 5 tap-to-cycle pages)
+(reads local logs + OAuth usage endpoint)    (polls every 20s, 6 tap-to-cycle pages)
+        ▲
+        │ POST /api/note   (localhost only — two clients, same endpoint)
+note.html (served by the same server)   note.py (terminal CLI, $EDITOR-based)
 
 simulator.html = a browser stand-in for the board, fetching the same endpoint
 ```
@@ -41,9 +44,11 @@ colors, formatting, or the OFFLINE screen must be made in *both*, using the
   `drawLimitsPage` — the /usage-style limits panel (context window, 5h,
   weekly all/per-model, credits), `drawLimitBlock`, `drawFooter`, weather
   overlay, offline) are near line-for-line ports of each other.
-- **7 pages (0–6):** status, projects+trend, home limits, device, limits,
-  cats (`GIF_PAGE=5`), mixed status+cats (`MIXED_PAGE=6`). There is **no**
-  separate 30-day long-trend page and **no** BTC candlestick ticker page.
+- **6 swiped pages (0–5):** status, projects+trend, limits, cats
+  (`GIF_PAGE=3`), mixed status+cats (`MIXED_PAGE=4`), note (`NOTE_PAGE=5`).
+  Device Stats and the Weather overlay are tap-only, not in the swipe cycle.
+  There is **no** separate 30-day long-trend page and **no** BTC candlestick
+  ticker page.
 - **Exception — cat GIF playback is NOT a pixel-faithful twin.** On the device
   it decodes and plays random GIFs from `/cats/` on the SD card frame-by-frame
   (AnimatedGIF, in the firmware's `gifTick()`), which the canvas simulator can't
@@ -76,7 +81,7 @@ pages; `#sim-offline` / `#mock-data` checkboxes exercise those states.
 arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=huge_app firmware/cyd_dashboard
 ```
 Requires: `esp32:esp32` core + `LovyanGFX`, `ArduinoJson`, and `AnimatedGIF`
-(the CATS-page cat player on pages 6–7) libs (`WebServer`/`DNSServer`, used by the
+(the CATS-page cat player on pages 3–4) libs (`WebServer`/`DNSServer`, used by the
 first-boot AP setup portal, ship with the core, as do ESPmDNS and `Preferences`,
 used for runtime config in flash). A `config.h` must exist (copy
 `config.example.h`); it's gitignored.
@@ -179,10 +184,36 @@ flash storage for the scheme change to orphan.
   weather overlay), `aqi{aqi}` (Bangkok AQI from aqicn.org, same geo coords as
   the weather fetch; null until the first fetch succeeds or if no
   `AQICN_TOKEN` is configured — see market_loop's `fetch_aqi`; feeds the
-  colored badge next to the date on the status page), `power{on_ac,percent,paused,battery_save,battery_save_manual,source}`,
+  colored badge next to the date on the status page),
+  `note{text,size}` (the Note page's text and board text size 1-3 — see "Note
+  page" below; **always an object, never null**, unlike `btc`/`weather`/`limits`:
+  those come from upstream fetches that can transiently fail, so the clients
+  keep the last-known value when they're absent, whereas the note is
+  server-local state and clearing it in the editor must clear it on the board),
+  `power{on_ac,percent,paused,battery_save,battery_save_manual,source}`,
   `clients[{ip,last_seen_sec}]`, `generated_at`, `epoch`.
   **Not in the contract:** `last5h`, `models[]`, `last_activity_sec`,
   `btc.changePct` (removed — no on-device consumer).
+- **Note routes, all localhost-only** (`_is_local()`; LAN clients get 403).
+  `GET /` `/note` `/note.html` serve `note.html` read fresh from disk per
+  request (same as control_server); `GET /api/note` returns the current note;
+  `POST /api/note` takes `{"text": str, "size": 1-3}`, runs it through
+  `sanitize_note()` and persists to `~/.cyd_note.json` (atomic temp+`os.replace`,
+  reloaded by `load_note()` at startup). Writes are localhost-only for the same
+  reason `/api/battery-save` is — but note that the board still *reads* the note
+  over the LAN inside `/api/usage`, which is the whole delivery mechanism.
+  Unlike battery-save, an `Origin` header is **expected** here (note.html is
+  served from this origin and browsers send `Origin` on same-origin POSTs), so
+  the check is an allowlist (`NOTE_ALLOWED_ORIGINS`) rather than a blanket
+  reject. `sanitize_note()` folds CRLF→LF, tab→space, and replaces every
+  character outside printable ASCII with `?` — the board's built-in GFX font is
+  7-bit only, so Thai and emoji have no glyph at all; substituting keeps
+  `len(chars) == len(bytes)` and makes the loss visible instead of mysterious.
+  Capped at `NOTE_MAX_CHARS` (480).
+- **Two clients write the note, both through `POST /api/note`:** `note.html`
+  (browser) and `note.py` (terminal). They need no sync — the endpoint is the
+  single source of truth. `note.py` sends **no `Origin`** header, which the
+  allowlist permits; that is the plain curl/CLI path.
 - Dollar costs are **estimates** from a hardcoded per-model price table
   (opus/sonnet/haiku/fable).
 - Remote (non-localhost) requests are logged one line each to stdout —
@@ -268,13 +299,18 @@ flash storage for the scheme change to orphan.
   (`drawApSetupScreen`) is not part of the simulator-parity rule — it's a
   boot-time-only, firmware-only screen, same exception as the cat GIF
   playback.
-- **Offline = the cat GIFs + an "OFFLINE" banner**, not a dimmed dashboard.
-  `loop()` computes
+- **Offline = the cat GIFs**, not a dimmed dashboard, and not a text banner —
+  there used to be an "OFFLINE" banner overlaid on the cat frame
+  (`drawOfflineBanner()`), removed since the cats themselves are the offline
+  signal. `loop()` computes
   `catMode = (currentPage == GIF_PAGE) || (currentPage == MIXED_PAGE) || offline`,
-  so cats play on the cat pages and on *any* page whenever offline, and
-  `gifTick(offline)` overlays `drawOfflineBanner()` (textSize 5, top-center)
-  on top of the frame. `STATE.haveData` is otherwise sticky-true once any
-  fetch or SD cache load succeeds, so `lastFetchSuccessMs`/`OFFLINE_AFTER_MS`
+  so cats play on the cat pages and on *any* page whenever offline.
+  `gifTick(bool offline)` still takes the flag — it's threaded through to
+  `mixedMode` (`currentPage == MIXED_PAGE && !offline`), which forces
+  full-screen cats instead of the mixed page's split layout while offline,
+  regardless of which page the board was on when it dropped. `STATE.haveData`
+  is otherwise sticky-true once any fetch or SD cache load succeeds, so
+  `lastFetchSuccessMs`/`OFFLINE_AFTER_MS`
   is what forces it back to false — without that, a real outage would just
   freeze the last-known dashboard forever instead of ever showing offline.
   **This threshold (and the WiFi self-reboot) is WALL-CLOCK — ~60s since the
@@ -286,10 +322,14 @@ flash storage for the scheme change to orphan.
   trips constantly. That was the cause of the "goes OFFLINE for 1-2 minutes
   for no reason" flap. Don't reintroduce cycle-counted timeouts here.
 - Token fields are `int64_t` (weekly totals exceed the 32-bit `long` range).
-- **Page map (`PAGE_COUNT = 7`):** 0 status (clock + mini bars + weather/BTC
-  tiles; tap weather → overlay), 1 projects + 7-day trend, 2 home large
-  limits, 3 device stats, 4 /usage-style limits panel, 5 `GIF_PAGE` full-screen
-  cats, 6 `MIXED_PAGE` left limits / right GIF. `gifTick()` (called from
+- **Page map (`PAGE_COUNT = 6`):** 0 status (clock + mini bars + weather/BTC
+  tiles; tap weather → overlay), 1 projects + 7-day trend, 2 /usage-style
+  limits panel, 3 `GIF_PAGE` full-screen cats, 4 `MIXED_PAGE` left limits /
+  right GIF, 5 `NOTE_PAGE` left limits / right note text (see "Note page"
+  below). **Device Stats and the Weather overlay are NOT swiped pages** —
+  they are reached only by tapping (see `DEVICE_HIT_*` and the weather-tile hit
+  box in `loop()`), which is why the footer reads `N / 6` rather than counting
+  them. `gifTick()` (called from
   `loop()` on core 1) decodes at most one frame per pass via AnimatedGIF and
   paces itself with `gifNextFrameMs`, so touch stays responsive; when a GIF
   ends it opens another at random from `catFiles[]` (scanned once at boot by
@@ -298,11 +338,65 @@ flash storage for the scheme change to orphan.
   active so the cats own the whole screen (mixed keeps a footer band at
   y≥220). This is the one deliberate break from the firmware/simulator parity
   rule (placeholders only in the sim).
+- **Note page (`NOTE_PAGE = 5`).** Same left column as the mixed page —
+  `drawLimitsCard()` + `drawBtcCard()`, called verbatim, not copied — with
+  `drawNotePane()` where the cats go. **It is deliberately an ordinary
+  `render()` page** (a `case 5:` in the switch, inheriting `fillScreen`/
+  `drawFooter`/`drawBatterySaveIcon` for free), *not* a cat page: nothing here
+  needs `gifTick()`'s per-frame decode loop or `presentFrame()`'s partial-push
+  path, and going through those would buy only complexity. Text arrives in
+  `/api/usage` as `note{text,size}` → `STATE.note` (`char[NOTE_BUF_MAX]`, 512;
+  named that because `esp32-hal-ledc.h` already has a `note_t` enumerator
+  called `NOTE_MAX` — the musical kind — and the two collide).
+  - **Geometry:** box x 161..317 / y 2..217, text from (167, 18), exclusive
+    bottom `NOTE_TY_MAX = 212`; 24 cols × 19 rows at size 1, 12 × 10 at size 2,
+    8 × 7 at size 3. Two constraints fix those numbers and are easy to
+    re-break: `drawBatterySaveIcon()` punches a `COL_BG` rect over x 296..317,
+    y 2..14 on *every* page after the content, so text starting above y=18
+    loses the end of its first line whenever Battery Save is on (the band that
+    buys holds the "NOTE" label); and `presentFrame()` masks x ≥ 316, which the
+    simulator does not emulate, so no glyph may land there (the rightmost is
+    x=310, 312 with the pixel-shift orbit).
+  - **Overflow is wrap + clip** — word-wrapped, over-long words hard-broken,
+    anything past `NOTE_TY_MAX` simply not drawn. No scrolling and no timers,
+    which is what keeps it a static page.
+  - **`shineTick()` must include `NOTE_PAGE`.** It reuses `drawLimitsCard()`,
+    which seeds `shineFillPx[]`; without the between-render top-up
+    `drawShineStrip`'s unchanged-column dedup renders the band with holes.
+  - **Syntax highlighting is a FOUR-way parity surface** — `pages.cpp` (the
+    authority), `simulator.html`, `note.html` and `note.py` each carry the same
+    tokenizer, and the canonical spec comment is duplicated above all four.
+    Tokenizing is two-level (source line, then word) plus a
+    one-character backtick toggle; there is deliberately **no** per-character
+    classification, because colouring digits individually renders `3.5` as
+    yellow-white-yellow. Precedence, first match wins: backtick span
+    (`COL_BLUE`, delimiters included) → word `TODO`/`FIXME`/`BUG` (`COL_WARN`),
+    `DONE`/`OK` (`COL_GOOD`), all-numeric word (`COL_YELLOW`) → line prefix `#`
+    (`COL_ACCENT`) or `>` (`COL_TEXT2`), whole line → leading `- `/`* `/`+ `
+    marker char (`COL_ACCENT`) → `COL_TEXT`. Keywords are matched
+    **case-sensitive uppercase-only**: it keeps "ok" in prose quiet, and case
+    folding is itself a parity hazard (C's `toupper` is byte-wise and
+    locale-dependent, JS's `toUpperCase` is Unicode-aware and can change a
+    string's length). `grep -rniE 'noteWordColor|note_word_color'` finds all
+    four copies.
+    **The parity check that actually catches drift**, and the one to re-run
+    after touching any copy: monkey-patch `setCursor`/`setTextColor`/`print`
+    on `simulator.html`'s `gfx`, call `drawNotePane()` at sizes 1, 2 and 3 over
+    a set of texts, and diff the resulting `(row, col, char, colour)` sequences
+    against `note.py`'s `note_wrap()` for the same inputs — they must be
+    element-for-element identical. Cases worth keeping in that set: wrap edges,
+    runs of inner spaces, an unclosed backtick, keyword boundaries
+    (`TODO`/`TODOS`/`xTODO`/`TODO:`), numeric vs non-numeric tokens (`3.5` vs
+    `v2`), overflow, and an exact fill (456 glyphs at size 1). `note.py
+    --selftest` covers the row boundaries and the tokenizer rules on its own in
+    milliseconds; `note.html` has no renderer to trace (no preview canvas — see
+    Conventions), so check it against `noteFits()`'s boundaries, which must
+    flip at exactly 19/20 rows at size 1, 10/11 at size 2 and 7/8 at size 3.
 - **Settings area** (`settingsScreen`: `SET_OFF`/`SET_LIST`/`SET_LEAF`).
   Tapping the footer's settings gear icon (bottom-right corner,
   `SETTINGS_HIT_*`/`drawSettingsIcon()`, only live on non-cat/non-offline
   pages) opens `SET_LIST`, a **drag-to-scroll** list of setting names
-  (**12** settings); tapping a row opens `SET_LEAF`, a generic value-picker
+  (**14** settings); tapping a row opens `SET_LEAF`, a generic value-picker
   button grid for that one setting.
   Both screens, and every setting, are driven by one data table (`SettingDef
   SETTINGS[]`, plain function pointers — no `std::function`/virtual dispatch,
@@ -310,7 +404,8 @@ flash storage for the scheme change to orphan.
   setting is a label + a small `values[]`/`valueLabels[]` array + a short
   `getCurrent()`/`apply()` pair. Int settings (Brightness, Poll Interval,
   Pixel Shift, Boot Page, Cat Shuffle, Night Mode, Battery Save, Rotation,
-  Show Countdown, Show AQI) persist through one generic queue
+  Show Countdown, Show AQI, Hourly Flash, Progress Bar) persist through one
+  generic queue
   (`pendingConfigSave`/`pendingConfigKeyId`/`pendingConfigValue` →
   `saveIntConfigToFlash()`, drained by `networkTask` on core 0 so the flash write
   never happens on the render core). Forget WiFi is the string-key exception
@@ -349,12 +444,24 @@ flash storage for the scheme change to orphan.
   `touch_y_min`/`touch_y_max`/`touch_offset` (physical touch calibration,
   board-specific, not exposed in the on-device Settings UI), `pixel_shift_min`
   (minutes per anti-retention orbit step, clamped 0-60, 0 = off), `boot_page`
-  (0-6, which page `currentPage` starts on), `cat_shuffle_sec` (0-300, forces
-  a cat GIF to rotate before its natural end; 0 = always play to the end),
+  (0-5, which page `currentPage` starts on), `cat_shuffle_sec` (-1-300, forces
+  a cat GIF to rotate before its natural end; 0 = always play to the end; -1 =
+  FIXED — disables auto-rotation entirely, live in `catShuffleFixed`, and the
+  current cat only changes via a tap on the right half of the screen whenever
+  `catMode` is showing cats (the CATS/mixed pages, or offline on any other
+  page — offline forces `gifTick()`'s `mixedMode` false so cats always go
+  full-screen there, so the right-half tap must reach them too), handled in
+  `loop()`'s touch chain by calling `gifPlayerResetForPageChange()`),
   `night_mode` (0/1, fixed 23:00-07:00 auto-dim to 25%), `show_countdown`
   (0/1, default 1 — green reset bars under 5h/week + analog clock timer
   wedge; green reset hand always stays), `battery_save` (0/1/2), `show_aqi`
-  (0/1, default 1 — colored AQI badge next to the status-page date), and
+  (0/1, default 1 — colored AQI badge next to the status-page date),
+  `hourly_flash` (0/1, default 1 — the on-the-hour signal: 6s of 1Hz display
+  inversion at :00; off makes `checkHourlyFlash()` return false outright, so
+  the invert, the progress line's skip-while-inverted guard and the shine
+  sweep's all go quiet together), `show_progress` (0/1, default 1 — the 1px
+  poll-countdown line along the bottom edge, drawn from both `drawFooter()`
+  and `loop()`'s between-render top-up), and
   `server_ip` (raw 4-byte IPv4 of the last successful mDNS resolve — written
   by `resolveServer()`, not a user setting and absent from the Settings area;
   purely so a reboot during a multicast outage can still reach the Mac). All of
@@ -399,3 +506,51 @@ flash storage for the scheme change to orphan.
 `~/CLAUDE.md` (a `:root` design-token set, kebab-case classes, no build
 step). The dashboard UI colors there are dictated by the firmware parity
 requirement above, not by those tokens.
+
+`note.html` (the Note page editor, served by `usage_server.py` at
+`http://127.0.0.1:8787/`) follows those same conventions and, like
+`server.html`, is **not** bound by the firmware-parity rule — its chrome is
+ordinary web UI. Its *tokenizer* (`noteWordColor`/`noteLineContext`) and its
+*wrap walk* (`noteFits`) are the exception: both are deliberate copies of the
+firmware's and must track it (see the Note page notes above).
+
+It is kept deliberately light — one file, no external requests, no canvas, and
+nothing per-keystroke that touches disk or does layout-heavy work:
+- The editor is a plain `<textarea>` with a highlight backdrop `<div>` behind
+  it. The textarea stays a real textarea so native caret, selection, undo, IME
+  and mobile keyboards keep working, which no `contenteditable` rewrite
+  manages; the two elements must share every font and box property or the
+  coloured copy drifts out of register with the characters being typed.
+- Re-highlighting is coalesced with `requestAnimationFrame`, the highlighter
+  emits one `<span>` per colour *run* rather than per character, and the
+  localStorage draft write is debounced (`DRAFT_DEBOUNCE_MS`) because
+  `setItem` is synchronous.
+- **There is no board-preview canvas** — an earlier version drew the pane with
+  a `gfx` stand-in, which meant re-rendering up to 456 glyphs (each a
+  `measureText` + `save`/`scale`/`fillText`/`restore`) on every keystroke.
+  `noteFits()` replaces it: the same wrap walk with all drawing stripped out,
+  answering only "does this still fit?" for the warning line. If a preview is
+  ever wanted back, port `drawNotePane` from `simulator.html` rather than
+  reinventing it, and drive it off a debounce.
+
+`note.py` (repo root) is the terminal client for the same endpoint — the
+lighter path when you just want to change a line without opening a browser.
+It follows the root scripts' Python style (`#!/usr/bin/env python3`, stdlib
+only, 3.9-compatible, `argparse` with an `ap` parser, `print("Error: …")` +
+`sys.exit(1)`), with two deliberate deviations: it is named for the noun
+rather than the repo's usual `verb_noun.py`, and it is `chmod +x`, both
+because it is meant to be aliased and typed daily rather than run occasionally
+as `python3 script.py`.
+- **Editing is `$VISUAL`/`$EDITOR` on a temp `.md` file**, not a built-in
+  editor. vim already does this better than a hand-rolled TUI would, and the
+  `.md` suffix gets most editors to highlight headings, bullets and backtick
+  spans — roughly the board's own rules.
+- **It carries no copy of `sanitize_note()`.** It POSTs the raw text and
+  previews the text the *server returns*, then reports what changed by diffing
+  sent against stored. One less thing to keep in step.
+- It *does* carry the fourth copy of the tokenizer and wrap walk, for the
+  `--show` preview. `--selftest` is the cheap guard on it.
+- ANSI colour is **xterm-256** (`38;5;N`), not truecolor: only seven fixed
+  colours are needed and macOS Terminal.app mishandles `38;2;R;G;B`. Suppressed
+  when `NO_COLOR` is set or stdout is not a tty, so `--raw` and pipelines are
+  clean.
