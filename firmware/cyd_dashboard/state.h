@@ -121,6 +121,7 @@ extern lgfx::LovyanGFX* g;
 
 void presentFrame(bool fullScreen = true);
 void flashTouchBorder(bool isRight);
+void flashTouchCenter();
 bool pixelShiftTick(uint32_t now);
 void clearShiftMargins();
 bool checkHourlyFlash(bool& isEvenSecond);
@@ -209,6 +210,17 @@ const int DEVICE_HIT_Y0 = 214, DEVICE_HIT_Y1 = 240;
 // invisible hit-box that used to sit over the connection-status pulse dot.
 const int SETTINGS_HIT_X0 = 282, SETTINGS_HIT_X1 = 316;
 const int SETTINGS_HIT_Y0 = 219, SETTINGS_HIT_Y1 = 240;
+
+// Cat pages only (GIF_PAGE/MIXED_PAGE), and only while Cat Shuffle is FIXED:
+// the middle third of the screen advances to the next random cat. The outer
+// thirds deliberately fall through to the normal left/right page swipe, which
+// still splits at x=160 -- 107 and 213 sit either side of it, so tapping
+// outside this band navigates exactly as it does on every other page. An
+// earlier version of this feature claimed the whole right half (tx >= 160),
+// which swallowed every forward tap and made pages 5/6 unreachable from the
+// cat pages (and unreachable everywhere at all while offline, since catMode is
+// true on any page then). Don't widen this band back over x=160.
+const int CAT_ADVANCE_X0 = 107, CAT_ADVANCE_X1 = 213;
 
 // Battery Save top-right corner overlay: y-range of drawBatterySaveIcon()'s
 // backing box (pages.cpp), needed by gif_player.cpp to fold the icon's rows

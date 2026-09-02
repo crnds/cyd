@@ -497,18 +497,20 @@ void loop() {
       // Tap the footer's CPU/ROM/RAM stats line → open Device Stats overlay.
       devicePageOpen = true;
       render();
-    } else if (catShuffleFixed && catMode && tx >= 160) {
-      // Cat Shuffle is FIXED (never auto-rotates) -- a tap on the right half of
-      // any cat display manually advances to a new random cat instead of
-      // swiping to the next page. This covers GIF_PAGE/MIXED_PAGE directly,
-      // and also offline on any OTHER page: cats take over full-screen there
-      // too (gifTick()'s mixedMode forces false whenever offline -- see
-      // catMode in CLAUDE.md), so the same right-half tap must reach them,
-      // not just when currentPage is literally GIF_PAGE/MIXED_PAGE. Left-half
-      // taps fall through to the branch below unchanged, so the previous page
-      // is still reachable by tapping left.
+    } else if (catShuffleFixed &&
+               (currentPage == GIF_PAGE || currentPage == MIXED_PAGE) &&
+               tx >= CAT_ADVANCE_X0 && tx < CAT_ADVANCE_X1) {
+      // Cat Shuffle is FIXED (never auto-rotates), so a tap is the only way to
+      // change the cat -- but only the MIDDLE third does it, and only on the
+      // two real cat pages. The outer thirds still fall through to the page
+      // swipe below, so forward/back navigation keeps working here like
+      // anywhere else (see CAT_ADVANCE_X0/X1 in state.h for why this must not
+      // reclaim the whole right half). Gated on currentPage rather than
+      // catMode on purpose: while merely offline on a non-cat page, cats are
+      // only a stand-in for unavailable data, and being able to leave that
+      // page matters more than shuffling what's behind it.
       gifPlayerResetForPageChange();
-      flashTouchBorder(true);
+      flashTouchCenter();
     } else {
       bool isRight = (tx >= 160);
       if (isRight) {

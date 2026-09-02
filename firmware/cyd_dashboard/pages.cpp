@@ -36,6 +36,20 @@ void flashTouchBorder(bool isRight) {
   presentFrame();
 }
 
+// Tap feedback for the cat pages' middle "next cat" band (CAT_ADVANCE_X0/X1).
+// A full thin perimeter rather than one side, since that tap belongs to
+// neither the prev-page nor the next-page third.
+void flashTouchCenter() {
+  const int T = 5;
+  const uint16_t WHITE = 0xFFFF;
+  gfx.fillRect(0, 0, 320, T, WHITE);          // top
+  gfx.fillRect(0, 240 - T, 320, T, WHITE);    // bottom
+  gfx.fillRect(0, 0, T, 240, WHITE);          // left
+  gfx.fillRect(320 - T, 0, T, 240, WHITE);    // right
+  delay(60);
+  presentFrame();
+}
+
 // Advance the pixel-shift orbit (core 1 only, like everything display-side).
 // Returns true on a step so the caller can repaint immediately — the panel
 // never straddles two offsets (shiftDirty forces the next presentFrame to be

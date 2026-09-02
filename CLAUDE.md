@@ -447,11 +447,16 @@ flash storage for the scheme change to orphan.
   (0-5, which page `currentPage` starts on), `cat_shuffle_sec` (-1-300, forces
   a cat GIF to rotate before its natural end; 0 = always play to the end; -1 =
   FIXED — disables auto-rotation entirely, live in `catShuffleFixed`, and the
-  current cat only changes via a tap on the right half of the screen whenever
-  `catMode` is showing cats (the CATS/mixed pages, or offline on any other
-  page — offline forces `gifTick()`'s `mixedMode` false so cats always go
-  full-screen there, so the right-half tap must reach them too), handled in
-  `loop()`'s touch chain by calling `gifPlayerResetForPageChange()`),
+  current cat only changes by tapping the **middle third** of the screen
+  (`CAT_ADVANCE_X0/X1`, 107..213) while on `GIF_PAGE`/`MIXED_PAGE`, handled in
+  `loop()`'s touch chain by calling `gifPlayerResetForPageChange()`. **The band
+  must stay inside x=160 and stay gated on `currentPage`, not `catMode`.** The
+  first version of this took the whole right half (`tx >= 160`) gated on
+  `catMode`, which put it directly on top of the next-page tap zone: every
+  forward tap was swallowed, so pages 5/6 were unreachable from the cat pages
+  — and while offline (`catMode` true on *any* page) forward navigation died on
+  all six. The outer thirds now fall through to the normal swipe, whose x=160
+  split sits between 107 and 213, so navigation is unchanged everywhere),
   `night_mode` (0/1, fixed 23:00-07:00 auto-dim to 25%), `show_countdown`
   (0/1, default 1 — green reset bars under 5h/week + analog clock timer
   wedge; green reset hand always stays), `battery_save` (0/1/2), `show_aqi`

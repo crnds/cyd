@@ -261,6 +261,13 @@ const DEVICE_HIT_Y0 = 214, DEVICE_HIT_Y1 = 240;
 // hit-box that used to sit over the connection-status pulse dot.
 const SETTINGS_HIT_X0 = 282, SETTINGS_HIT_X1 = 316;
 const SETTINGS_HIT_Y0 = 219, SETTINGS_HIT_Y1 = 240;
+// Middle-third "next cat" band on the cat pages while Cat Shuffle is FIXED --
+// mirrors the firmware's CAT_ADVANCE_X0/X1 (state.h). The cat *playback* is
+// firmware-only, but this hit-box is NOT: it decides page navigation, and the
+// firmware regression it guards against (a right-half band that swallowed
+// every forward tap, stranding the user on the cats page) was invisible here
+// precisely because the sim's touch chain had no equivalent branch.
+const CAT_ADVANCE_X0 = 107, CAT_ADVANCE_X1 = 213;
 const WEATHER_HOURLY_N = 6;
 const WEATHER_DAILY_N = 5;
 const LAST_WEATHER_KEY = 'cyddashboard_v1_weather';
@@ -2900,6 +2907,21 @@ canvas.addEventListener('click', (event) => {
     // Tap the footer's CPU/ROM/RAM stats line → open Device Stats overlay.
     STATE.devicePageOpen = true;
     render();
+    return;
+  }
+
+  // Cat Shuffle FIXED: the middle third of a cat page advances to the next
+  // cat instead of turning the page. Mirrors the firmware branch in
+  // cyd_dashboard.ino's touch chain -- gated on currentPage (not catMode), so
+  // that being offline on a non-cat page never costs you page navigation.
+  // The sim has no real GIF to swap, so this only logs; what's kept in parity
+  // is which taps navigate and which don't.
+  if (STATE.catShuffleSec < 0 &&
+      (STATE.currentPage === GIF_PAGE || STATE.currentPage === MIXED_PAGE) &&
+      tx >= CAT_ADVANCE_X0 && tx < CAT_ADVANCE_X1) {
+    console.log('[sim] Cat Shuffle FIXED: middle-third tap advances to the ' +
+                'next random cat on the device (page unchanged).');
+    flashTouchBorder(tx >= 160);
     return;
   }
 
