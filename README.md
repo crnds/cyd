@@ -102,8 +102,8 @@ matter how the IP changes). Run:
 scutil --get LocalHostName
 ```
 
-It prints something like `Dusits-MacBook-Air`. **Write this down and add
-`.local` to the end** — so `Dusits-MacBook-Air.local`. That's the address
+It prints something like `Your-Mac-Name`. **Write this down and add
+`.local` to the end** — so `Your-Mac-Name.local`. That's the address
 you'll type into the display's settings in Part 2.
 
 ### Step 1.5 — Make the helper start automatically
@@ -112,9 +112,9 @@ So you never have to think about it again — it will start when the Mac
 starts, and restart itself if it ever crashes:
 
 ```
-cp ~/cyd/server/com.corner.cydusage.plist ~/cyd/server/com.corner.cydcontrol.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.corner.cydusage.plist
-launchctl load ~/Library/LaunchAgents/com.corner.cydcontrol.plist
+cp ~/cyd/server/com.example.cydusage.plist ~/cyd/server/com.example.cydcontrol.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.example.cydusage.plist
+launchctl load ~/Library/LaunchAgents/com.example.cydcontrol.plist
 ```
 
 (The second one is the browser control panel — see "The control panel"
@@ -178,7 +178,7 @@ If a popup asks "install dependencies?", click **Install All**.
    ```c
    #define WIFI_SSID     "YourWifiName"
    #define WIFI_PASSWORD "YourWifiPassword"
-   #define SERVER_HOST   "Dusits-MacBook-Air.local"  // ← your Mac's name from Step 1.4
+   #define SERVER_HOST   "Your-Mac-Name.local"  // ← your Mac's name from Step 1.4
    #define SERVER_PORT   8787                         // leave this as-is
    ```
 
@@ -291,7 +291,7 @@ live status page that answers "is everything working?" at a glance:
 
 This page is served by a second tiny helper (`server/control_server.py`)
 that was installed the same way as the main one
-(`server/com.corner.cydcontrol.plist` in `~/Library/LaunchAgents/`). It
+(`server/com.example.cydcontrol.plist` in `~/Library/LaunchAgents/`). It
 only listens on your Mac itself (127.0.0.1) — other devices on your WiFi
 cannot reach it, because it has the power to stop and start the server.
 
@@ -493,8 +493,8 @@ cyd/
 ├── server/
 │   ├── usage_server.py             the helper program (Python, no dependencies)
 │   ├── control_server.py           serves the control panel on 127.0.0.1:8788
-│   ├── com.corner.cydusage.plist   auto-start recipe for macOS
-│   └── com.corner.cydcontrol.plist auto-start recipe for the control panel
+│   ├── com.example.cydusage.plist   auto-start recipe for macOS
+│   └── com.example.cydcontrol.plist auto-start recipe for the control panel
 └── firmware/cyd_dashboard/
     ├── cyd_dashboard.ino           setup() + loop(): touch, rendering, the two cores
     ├── pages.cpp                   every screen the board draws
