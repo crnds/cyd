@@ -430,6 +430,108 @@ other).
 - Everything on the Mac side is one Python file using only what ships
   with macOS — nothing to install, no dependencies to break.
 
+## How the 5-hour / weekly usage percentages are retrieved
+
+The **session (5h)** and **week** bars/percentages on the board are a
+different data path from the token counts and cost estimates elsewhere in
+this dashboard — worth spelling out since both are "usage" but come from
+different places:
+
+| | Session (5h) % + Week % | Today/week **token counts** & $ estimates |
+|---|---|---|
+| Source | Anthropic's OAuth usage endpoint (the same one `/usage` in Claude Code itself calls) | Your local `~/.claude/projects/*/*.jsonl` logs, tailed and aggregated on your Mac |
+| What it is | The account-wide utilization % Anthropic tracks server-side | A local recount of tokens your Mac has seen, priced with an approximate table |
+| Code | `fetch_limits()` / `limits_loop()` | `scan_loop()` (not covered below) |
+
+This section covers the **first** path only — how `limits.session.percent`
+and `limits.week.percent` (and their reset countdowns) get from Anthropic
+into the JSON at `/api/usage`.
+
+### The logic
+
+1. **Read your existing login, don't create a new one.** `oauth_token()`
+   shells out to `/usr/bin/security find-generic-password -s "Claude
+   Code-credentials" -w` to pull the OAuth access token Claude Code already
+   stored in the macOS Keychain. It's read fresh at fetch time, never
+   written to disk or included in any response. If the token is already
+   expired, the fetch is skipped entirely that cycle (only the CLI itself
+   can refresh it) rather than wasting a request on a guaranteed 401.
+2. **Ask Anthropic, not your logs.** With a valid token, `fetch_limits()`
+   sends one `GET https://api.anthropic.com/api/oauth/usage` with
+   `Authorization: Bearer <token>`. The response carries `five_hour` (the
+   session window) and `seven_day` (the week window), each as a percent
+   (`utilization`) plus a `resets_at` timestamp — plus, when present, a
+   per-model weekly limit and extra-usage credit spend.
+3. **Shape it once, on the Mac.** The parsed result —
+   `{session, week, week_model, credits, fetched_at_epoch}` — is written
+   into the shared `STATE["limits"]` dict under a lock. `resets_at` is kept
+   as a raw epoch (`resets_at_epoch`), not a pre-computed countdown.
+4. **This runs on its own clock, not on demand.** `limits_loop()` fetches
+   every **180s on AC power / 300s on battery**, independent of when the
+   board or simulator happens to poll — a request to `/api/usage` just
+   reads whatever `STATE["limits"]` currently holds. Like the other
+   background loops, it parks itself entirely after ~180s with no client
+   polls, and un-parks the moment a client polls again (the first run after
+   startup always fires, so there's real data before any client connects).
+5. **Never show a blank number.** If the endpoint call fails, the token is
+   missing/expired, or the response has no usable `five_hour`/`seven_day`
+   fields, the loop keeps the **last-good snapshot** in `STATE["limits"]`
+   and just logs the miss (once, until it recovers) — the board keeps
+   showing the last real percentage rather than flashing "--". A `429`
+   triggers a hard backoff (10–30 min, honoring `Retry-After` but capped,
+   since the endpoint has been seen sending multi-hour values that would
+   otherwise freeze the display until a server restart).
+6. **The countdown is recomputed on every request, not on every fetch.**
+   `build_report()` (called fresh for each `/api/usage` hit) takes the
+   stored `resets_at_epoch` and computes `resets_in_sec = resets_at_epoch -
+   now()` at request time. That's why the on-screen countdown ticks
+   smoothly even though the underlying *percent* only refreshes every 3–5
+   minutes — only the percent is allowed to lag; the timer never is.
+
+### Diagram
+
+```
+  macOS Keychain
+  "Claude Code-credentials"  (same login the Claude Code CLI uses)
+          │
+          │ /usr/bin/security find-generic-password -w
+          ▼
+  ┌───────────────────┐   expired token? ──▶ skip this cycle, try again later
+  │   oauth_token()    │
+  └─────────┬──────────┘
+            │ Bearer <access token>
+            ▼
+  api.anthropic.com/api/oauth/usage           ← the exact endpoint
+  ─────────────────────────────────           `/usage` in Claude Code hits
+  { five_hour: {utilization, resets_at},
+    seven_day: {utilization, resets_at},
+    limits: [...], spend / extra_usage }
+            │
+            ▼
+  ┌────────────────────┐   every 180s (AC) / 300s (battery)
+  │   fetch_limits()    │   parks entirely when no client has polled recently
+  └─────────┬───────────┘
+            │ on success: {session, week, week_model, credits, resets_at_epoch}
+            │ on failure/429: keep whatever was there before
+            ▼
+  STATE["limits"]   ← in-memory, lock-protected, always "last known good"
+            │
+            │                     ┌─────────────────────────────┐
+  board/simulator ── GET ────────▶│         build_report()        │
+  /api/usage          (per request, no network call of its own)  │
+                                   │ resets_in_sec = resets_at_epoch - now()  │
+                                   └───────────────┬───────────────┘
+                                                    ▼
+                          JSON: limits.session.{percent, resets, resets_in_sec}
+                                limits.week.{percent, resets, resets_in_sec}
+                                                    │
+                                                    ▼
+                     CYD board — Status page mini bars, page 3 "Limits" panel
+                     simulator.html — same fields, visible in the #raw-json panel
+```
+
+---
+
 ## Appendix — compile & flash from the command line (advanced)
 
 If you'd rather not use the Arduino IDE GUI (Part 2), you can build and
