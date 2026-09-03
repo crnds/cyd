@@ -1,5 +1,7 @@
 # Claude Code Usage Dashboard — for the "Cheap Yellow Display"
 
+![The CYD dashboard running on the physical board](cyd2.jpeg)
+
 A little always-on desk display that shows your live Claude Code usage:
 
 - **Current session** — how much of your 5-hour limit you've used, as a
