@@ -646,19 +646,19 @@ static String formatPaceDur(int currentPct, long elapsedSec, long remainingSec) 
 // A warning is only ever earned by pace, never by level (statusline.md's
 // design rule) -- callers gate `ahead` on actual > pace + deadband, so this
 // draws nothing at all unless usage is genuinely running ahead of the window.
-// Size 3 to match the percent number it sits beside (callers place it on
-// that row, not the small 5H/WEEK label row, since size-3 text is too tall
-// to fit between the label and the mini bars below it).
+// Size 2 -- callers place it on the percent number's row (not the small
+// 5H/WEEK label row below it), since even at size 2 the text is too tall to
+// fit between the label and the mini bars without overlapping them.
 static void drawPaceFlag(int x, int y, bool ahead, int currentPct, long elapsedSec, long remainingSec) {
   if (!ahead) return;
   g->setTextColor(COL_WARN);
-  g->setTextSize(3);
+  g->setTextSize(2);
   g->setCursor(x, y);
   g->print("!");
   String dur = formatPaceDur(currentPct, elapsedSec, remainingSec);
   if (dur.length() > 0) {
     g->setTextColor(COL_TEXT2);
-    g->setCursor(x + 18, y);
+    g->setCursor(x + 12, y);
     g->print(dur);
   }
 }

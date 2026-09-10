@@ -1248,19 +1248,19 @@ function formatPaceDur(currentPct, elapsedSec, remainingSec) {
 
 // A warning is only ever earned by pace, never by level (statusline.md) --
 // callers gate `ahead` on actual > pace + deadband.
-// Size 3 to match the percent number it sits beside (callers place it on
-// that row, not the small 5H/WEEK label row, since size-3 text is too tall
-// to fit between the label and the mini bars below it).
+// Size 2 -- callers place it on the percent number's row (not the small
+// 5H/WEEK label row below it), since even at size 2 the text is too tall to
+// fit between the label and the mini bars without overlapping them.
 function drawPaceFlag(x, y, ahead, currentPct, elapsedSec, remainingSec) {
   if (!ahead) return;
   gfx.setTextColor(COL_WARN);
-  gfx.setTextSize(3);
+  gfx.setTextSize(2);
   gfx.setCursor(x, y);
   gfx.print('!');
   const dur = formatPaceDur(currentPct, elapsedSec, remainingSec);
   if (dur.length > 0) {
     gfx.setTextColor(COL_TEXT2);
-    gfx.setCursor(x + 18, y);
+    gfx.setCursor(x + 12, y);
     gfx.print(dur);
   }
 }
