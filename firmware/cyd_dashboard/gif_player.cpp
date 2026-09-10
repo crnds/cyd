@@ -126,11 +126,13 @@ static void GIFDraw(GIFDRAW* pDraw) {
         int clipStart = startX;
         int clipEnd = endX;
         if (mixedMode) {
+          int mixedMaxX = MIXED_GIF_X0 + MIXED_GIF_W;
+          if (mixedMaxX > 320 - SCREEN_RIGHT_PADDING) mixedMaxX = 320 - SCREEN_RIGHT_PADDING;
           if (clipStart < MIXED_GIF_X0) clipStart = MIXED_GIF_X0;
-          if (clipEnd > MIXED_GIF_X0 + MIXED_GIF_W) clipEnd = MIXED_GIF_X0 + MIXED_GIF_W;
+          if (clipEnd > mixedMaxX) clipEnd = mixedMaxX;
         } else {
           if (clipStart < 0) clipStart = 0;
-          if (clipEnd > 320) clipEnd = 320;
+          if (clipEnd > 320 - SCREEN_RIGHT_PADDING) clipEnd = 320 - SCREEN_RIGHT_PADDING;
         }
         if (clipStart < clipEnd) {
           g->pushImage(clipStart, y, clipEnd - clipStart, 1, usTemp + (clipStart - startX));
@@ -157,11 +159,13 @@ static void GIFDraw(GIFDRAW* pDraw) {
     int clipStart = startX;
     int clipEnd = endX;
     if (mixedMode) {
+      int mixedMaxX = MIXED_GIF_X0 + MIXED_GIF_W;
+      if (mixedMaxX > 320 - SCREEN_RIGHT_PADDING) mixedMaxX = 320 - SCREEN_RIGHT_PADDING;
       if (clipStart < MIXED_GIF_X0) clipStart = MIXED_GIF_X0;
-      if (clipEnd > MIXED_GIF_X0 + MIXED_GIF_W) clipEnd = MIXED_GIF_X0 + MIXED_GIF_W;
+      if (clipEnd > mixedMaxX) clipEnd = mixedMaxX;
     } else {
       if (clipStart < 0) clipStart = 0;
-      if (clipEnd > 320) clipEnd = 320;
+      if (clipEnd > 320 - SCREEN_RIGHT_PADDING) clipEnd = 320 - SCREEN_RIGHT_PADDING;
     }
     if (clipStart < clipEnd) {
       g->pushImage(clipStart, y, clipEnd - clipStart, 1, usTemp + (clipStart - startX));
