@@ -13,7 +13,8 @@ static const char* const WDAY_ABBR[7] = {
 // Keep a quiet gutter at the physical panel's right edge on every composed
 // frame. Applying it at presentation time makes the inset uniform across all
 // dashboard pages, settings, overlays, and offline/cat states.
-static const int SCREEN_RIGHT_PADDING = 4;
+// SCREEN_RIGHT_PADDING itself is declared in state.h -- gif_player.cpp needs
+// it too, to clamp GIFDraw()'s clip bounds clear of this gutter.
 static const int FOOTER_RIGHT_PADDING = 8;
 
 // Touch feedback: flash a 5px white border on the left or right part of the screen
@@ -143,8 +144,13 @@ void presentFrame(bool fullScreen) {
         // Push left half (0-159, height 240) + right footer (160-319, rows 220-239)
         pushFrameRegion(0, 0, 160, 240);
         pushFrameRegion(160, 220, 160, 20);
-      } else if (gifMinY <= gifMaxY) {
-        // Push only the dirty band of the right half (160-319) where the GIF is drawn
+      }
+      // Push the dirty band of the right half (160-319) where the GIF is drawn,
+      // on both the fullScreen and partial paths -- GIFDraw() already wrote this
+      // pass's frame into the sprite before presentFrame() was called, so
+      // skipping this on the fullScreen (static-card-flush) path silently
+      // dropped that frame's GIF update, leaving stale pixels on screen.
+      if (gifMinY <= gifMaxY) {
         int startY = gifMinY < 0 ? 0 : gifMinY;
         int endY = gifMaxY >= 220 ? 219 : gifMaxY;
         if (endY >= startY) pushFrameRegion(160, startY, 160, endY - startY + 1);
@@ -617,6 +623,38 @@ static int elapsedPercentOfWindow(long remainingSec, long windowSec) {
   return constrain(pct, 0, 100);
 }
 
+// Projected time until 100% at the measured burn rate, or "" when unknown or
+// the reset would land first -- "the reset wins, say nothing" (statusline.md).
+static String formatPaceDur(long remainingSec, float burnPerSec, int currentPct) {
+  if (burnPerSec <= 0 || currentPct < 0) return "";
+  float remainingPct = 100 - currentPct;
+  if (remainingPct <= 0) return "";
+  float hoursToExhaust = remainingPct / burnPerSec / 3600.0f;
+  if (remainingSec >= 0 && hoursToExhaust >= remainingSec / 3600.0f) return "";
+  if (hoursToExhaust < 1.0f) {
+    int m = (int)(hoursToExhaust * 60 + 0.5f);
+    return String(m < 1 ? 1 : m) + "m";
+  }
+  return String((int)(hoursToExhaust + 0.5f)) + "h";
+}
+
+// A warning is only ever earned by pace, never by level (statusline.md's
+// design rule) -- callers gate `ahead` on pace > actual + deadband, so this
+// draws nothing at all unless usage is genuinely running ahead of the window.
+static void drawPaceFlag(int x, int y, bool ahead, long remainingSec, float burnPerSec, int currentPct) {
+  if (!ahead) return;
+  g->setTextColor(COL_WARN);
+  g->setTextSize(1);
+  g->setCursor(x, y);
+  g->print("!");
+  String dur = formatPaceDur(remainingSec, burnPerSec, currentPct);
+  if (dur.length() > 0) {
+    g->setTextColor(COL_TEXT2);
+    g->setCursor(x + 6, y);
+    g->print(dur);
+  }
+}
+
 static void drawLimitsCard() {
   // Two separate cards (5h / week) with a 2px gap between them, rather than
   // one tall card split by an internal divider line (all card-to-card gaps
@@ -631,6 +669,18 @@ static void drawLimitsCard() {
   long sessionRem = liveResetsInSec(STATE.sessionResetsInSec);
   long weekRem = liveResetsInSec(STATE.weekResetsInSec);
 
+  // QUOTA PACING: "% of the window elapsed" (already computed for the green
+  // countdown bar below) compared against actual usage -- a flag is earned
+  // only by running ahead of pace, never by level alone (statusline.md).
+  // Computed unconditionally (not gated on cfgShowCountdown) since the flag
+  // is independent of whether the green bar itself is drawn.
+  int sessionPace = elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC);
+  int weekPace = elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC);
+  bool sessionAhead = STATE.sessionPercent >= 0 && sessionPace >= 0 &&
+                       sessionPace > STATE.sessionPercent + 2;  // 2pt deadband stops boundary flicker
+  bool weekAhead = STATE.weekPercent >= 0 && weekPace >= 0 &&
+                    weekPace > STATE.weekPercent + 2;
+
   // ── left card: limits ──
   String sessionPctStr = STATE.sessionPercent >= 0 ? String(STATE.sessionPercent) + "%" : "--";
   g->setTextColor(COL_ACCENT);
@@ -638,12 +688,14 @@ static void drawLimitsCard() {
   g->setCursor(12, 11);
   g->print(sessionPctStr);
   drawCardLabel(12 + sessionPctStr.length() * 18 + 6, 27, "5H");
+  drawPaceFlag(12 + sessionPctStr.length() * 18 + 6 + 2 * 6 + 4, 27,
+               sessionAhead, sessionRem, STATE.sessionBurnPerSec, STATE.sessionPercent);
 
   drawMiniBar(12, 41, 137, STATE.sessionPercent, COL_ACCENT);
   // Green reset-countdown bars (and their shine) are optional via Settings
   // "Show Countdown"; when off, clear the cached fill so shineTick no-ops.
   if (cfgShowCountdown) {
-    shineFillPx[0] = drawMiniBar(12, 51, 137, elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+    shineFillPx[0] = drawMiniBar(12, 51, 137, sessionPace, COL_GOOD, COL_TRACK_BLACK, 4);
     drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[0], shineFillPx[0], millis(), 0);
   } else {
     shineFillPx[0] = -1;
@@ -664,10 +716,12 @@ static void drawLimitsCard() {
   g->setCursor(12, 110);
   g->print(weekPctStr);
   drawCardLabel(12 + weekPctStr.length() * 18 + 6, 126, "WEEK");
+  drawPaceFlag(12 + weekPctStr.length() * 18 + 6 + 4 * 6 + 4, 126,
+               weekAhead, weekRem, STATE.weekBurnPerSec, STATE.weekPercent);
 
   drawMiniBar(12, 140, 137, STATE.weekPercent, COL_ACCENT);
   if (cfgShowCountdown) {
-    shineFillPx[1] = drawMiniBar(12, 150, 137, elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC), COL_GOOD, COL_TRACK_BLACK, 4);
+    shineFillPx[1] = drawMiniBar(12, 150, 137, weekPace, COL_GOOD, COL_TRACK_BLACK, 4);
     drawShineStrip(g, SHINE_BAR_X, SHINE_BAR_Y[1], shineFillPx[1], millis(), 1);
   } else {
     shineFillPx[1] = -1;

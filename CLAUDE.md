@@ -240,6 +240,25 @@ flash storage for the scheme change to orphan.
 
 - Landscape `setRotation(1)`. Pin map for the resistive-touch (XPT2046)
   variant is in `pins.h`; capacitive (GT911) units need different pins.
+- **Display SPI runs at 60MHz (`cfg.freq_write` in `state.h`'s `LGFX`
+  class), bumped up from a 40MHz default.** This panel has **no TE
+  (tearing-effect) sync pin**, so the firmware has no way to know when the
+  panel's own internal refresh is mid-scan versus safe to write. At 40MHz a
+  full 320×240×16bpp frame (~154KB) took ~30ms to transmit — long enough
+  that the panel's async refresh reliably caught writes mid-flight, visible
+  as continuous tearing/flicker concentrated on the right half of the
+  screen, specifically during cat GIF playback (`gifTick()` calls
+  `presentFrame()` far more often — up to ~30×/sec — than any other page's
+  ~1Hz `render()`). Root-caused by first ruling out drawing-logic theories
+  (pixel-shift orbit made no difference; tearing was equally bad on
+  full-screen `GIF_PAGE` and split-layout `MIXED_PAGE`, which pointed away
+  from page-specific dirty-region code and toward raw transfer time vs.
+  panel refresh timing). Confirmed on the physical board: 60MHz visibly
+  reduces the tearing with no corruption on any other page; 80MHz was not
+  tried and may have more headroom. If tearing reappears or a different
+  panel variant shows corruption at 60MHz, this is the first place to
+  check — the fix is inherently panel/wiring-dependent, not something a
+  future firmware change alone can be relied on to preserve.
 - **Two cores, one lock.** ALL blocking I/O (usage poll, BTC, weather, mDNS,
   WiFi reconnect, SD writes) runs in `networkTask` pinned to core 0; `loop()`
   on core 1 does only touch + render, so a slow/hung fetch can never freeze
@@ -338,6 +357,30 @@ flash storage for the scheme change to orphan.
   active so the cats own the whole screen (mixed keeps a footer band at
   y≥220). This is the one deliberate break from the firmware/simulator parity
   rule (placeholders only in the sim).
+- **Quota pacing flag (status page's `drawLimitsCard()`).** A `!` (optionally
+  `!14h`/`!45m`) drawn next to the 5H/WEEK percent, ported from
+  `~/statusline.md`'s "QUOTA PACING" design: a warning is earned only by
+  *pace* (usage running ahead of the elapsed share of the window), never by
+  raw level alone — 89% one hour before a reset is fine, 40% on day one
+  isn't. The pace threshold itself needs no new state — `elapsedPercentOfWindow()`
+  (already used to size the green reset-countdown bar) **is** the statusline
+  script's `pace_pct`; the flag just compares it against `STATE.sessionPercent`/
+  `weekPercent` with the same 2-point deadband the shell script uses to stop
+  boundary flicker. The optional duration comes from `STATE.sessionBurnPerSec`/
+  `weekBurnPerSec` (%/sec), fitted in `net.cpp`'s `recordQuotaSample()`/
+  `fitBurnPerSec()` — a small RAM-only ring buffer (45 min window, samples no
+  faster than 1/min, `-1` when there's under 10 min of span or the trend is
+  flat/falling), least-squares-fit the same way as the shell script's
+  `burn_hours()`. Recording is gated on `fromNetwork` in `applyUsageDoc()` —
+  same reasoning as the battery-save flag just below it: a cold SD-cache
+  reapplication must not be recorded as a fresh sample. History is RAM-only
+  and resets on reboot, so a freshly-booted board shows a bare `!` (no
+  duration) until enough samples accumulate — "absent answer beats a made-up
+  one," same as the shell script's own fallback. **This is a two-way parity
+  surface** (`pages.cpp`+`net.cpp` ↔ `simulator.html`, mirrored function for
+  function including `quotaSamples`/`fitBurnPerSec`/`formatPaceDur`); the
+  simulator has no NTP gate and uses `Date.now()`, and its sampler runs from
+  `applyData(doc, fromNetwork)` instead of `applyUsageDoc`.
 - **Note page (`NOTE_PAGE = 5`).** Same left column as the mixed page —
   `drawLimitsCard()` + `drawBtcCard()`, called verbatim, not copied — with
   `drawNotePane()` where the cats go. **It is deliberately an ordinary
@@ -379,19 +422,8 @@ flash storage for the scheme change to orphan.
     locale-dependent, JS's `toUpperCase` is Unicode-aware and can change a
     string's length). `grep -rniE 'noteWordColor|note_word_color'` finds all
     four copies.
-    **The parity check that actually catches drift**, and the one to re-run
-    after touching any copy: monkey-patch `setCursor`/`setTextColor`/`print`
-    on `simulator.html`'s `gfx`, call `drawNotePane()` at sizes 1, 2 and 3 over
-    a set of texts, and diff the resulting `(row, col, char, colour)` sequences
-    against `note.py`'s `note_wrap()` for the same inputs — they must be
-    element-for-element identical. Cases worth keeping in that set: wrap edges,
-    runs of inner spaces, an unclosed backtick, keyword boundaries
-    (`TODO`/`TODOS`/`xTODO`/`TODO:`), numeric vs non-numeric tokens (`3.5` vs
-    `v2`), overflow, and an exact fill (456 glyphs at size 1). `note.py
-    --selftest` covers the row boundaries and the tokenizer rules on its own in
-    milliseconds; `note.html` has no renderer to trace (no preview canvas — see
-    Conventions), so check it against `noteFits()`'s boundaries, which must
-    flip at exactly 19/20 rows at size 1, 10/11 at size 2 and 7/8 at size 3.
+    After touching any of the four tokenizer/wrap-walk copies, use the
+    `cyd-note-parity-check` skill to verify they stay in lockstep.
 - **Settings area** (`settingsScreen`: `SET_OFF`/`SET_LIST`/`SET_LEAF`).
   Tapping the footer's settings gear icon (bottom-right corner,
   `SETTINGS_HIT_*`/`drawSettingsIcon()`, only live on non-cat/non-offline

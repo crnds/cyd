@@ -45,7 +45,14 @@ public:
       auto cfg = _bus_instance.config();
       cfg.spi_host = VSPI_HOST;
       cfg.spi_mode = 0;
-      cfg.freq_write = 40000000;
+      // Bumped from 40MHz: no TE (tearing-effect) sync pin on this panel, so a
+      // full 320x240x16bpp frame's ~30ms transfer time at 40MHz gave the
+      // panel's own async refresh a large window to catch a write mid-flight,
+      // seen as tearing/flicker concentrated on the right half during cat GIF
+      // playback (gifTick() pushes far more often than any other page).
+      // Confirmed on the physical board: 60MHz visibly reduces the tearing
+      // with no corruption on any other page. 80MHz was not tried.
+      cfg.freq_write = 60000000;
       cfg.freq_read = 16000000;
       cfg.pin_sclk = CYD_TFT_SCLK;
       cfg.pin_mosi = CYD_TFT_MOSI;
@@ -227,6 +234,14 @@ const int CAT_ADVANCE_X0 = 107, CAT_ADVANCE_X1 = 213;
 // into the mixed page's dirty-band partial push (see gifTick()).
 const int BATTERY_ICON_Y0 = 2, BATTERY_ICON_Y1 = 14;
 
+// Width of the quiet gutter presentFrame() (pages.cpp) always blanks at the
+// panel's right edge (columns 320-SCREEN_RIGHT_PADDING..319) after every
+// push, on every page. gif_player.cpp's GIFDraw() needs this too, to clamp
+// its clip bounds clear of that strip -- letting animated GIF content land
+// there caused a visible flash each frame, since presentFrame() immediately
+// wiped it back to COL_BG as a second SPI write right after the GIF push.
+const int SCREEN_RIGHT_PADDING = 4;
+
 // Weather forecast slots delivered by /api/usage (Mac-proxied Open-Meteo)
 // and cached on SD as /weather.json. Fixed-size arrays — no String/heap
 // churn on every poll.
@@ -265,6 +280,11 @@ struct UsageState {
   int weekPercent = -1;
   char weekResets[24] = "";
   long weekResetsInSec = -1;     // countdown to week reset; -1 = unknown
+  // Quota-pacing burn rate (%/sec), fitted from a rolling sample window in
+  // net.cpp's recordQuotaSample()/fitBurnPerSec() -- see drawLimitsCard()'s
+  // pace flag. -1 = not enough history yet, or usage isn't currently rising.
+  float sessionBurnPerSec = -1;
+  float weekBurnPerSec = -1;
   int64_t ctxTokens = -1;    // context window of the latest session; -1 = unknown -- int64_t
                              // for consistency with the other token fields (see their note above)
   int ctxPercent = -1;
