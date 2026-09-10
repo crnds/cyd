@@ -1248,9 +1248,8 @@ function formatPaceDur(currentPct, elapsedSec, remainingSec) {
 
 // A warning is only ever earned by pace, never by level (statusline.md) --
 // callers gate `ahead` on actual > pace + deadband.
-// Size 2 -- callers place it on the percent number's row (not the small
-// 5H/WEEK label row below it), since even at size 2 the text is too tall to
-// fit between the label and the mini bars without overlapping them.
+// Size 2, drawn inline to the right of the 5H/WEEK label (not stacked above
+// it on the percent number's row).
 function drawPaceFlag(x, y, ahead, currentPct, elapsedSec, remainingSec) {
   if (!ahead) return;
   gfx.setTextColor(COL_WARN);
@@ -1308,9 +1307,9 @@ function drawLimitsCard() {
   gfx.setTextSize(3);
   gfx.setCursor(12, 11);
   gfx.print(sessionPctStr);
-  drawPaceFlag(12 + sessionPctStr.length * 18 + 6, 11,
-               sessionAhead, STATE.sessionPercent, sessionElapsed, sessionRem);
   drawCardLabel(12 + sessionPctStr.length * 18 + 6, 27, '5H');
+  drawPaceFlag(12 + sessionPctStr.length * 18 + 6 + 2 * 6 + 4, 27,
+               sessionAhead, STATE.sessionPercent, sessionElapsed, sessionRem);
 
   drawMiniBar(12, 41, 137, STATE.sessionPercent, COL_ACCENT);
   // Green reset-countdown bars (and shine) optional via Settings "Show Countdown".
@@ -1333,9 +1332,9 @@ function drawLimitsCard() {
   gfx.setTextSize(3);
   gfx.setCursor(12, 110);
   gfx.print(weekPctStr);
-  drawPaceFlag(12 + weekPctStr.length * 18 + 6, 110,
-               weekAhead, STATE.weekPercent, weekElapsed, weekRem);
   drawCardLabel(12 + weekPctStr.length * 18 + 6, 126, 'WEEK');
+  drawPaceFlag(12 + weekPctStr.length * 18 + 6 + 4 * 6 + 4, 126,
+               weekAhead, STATE.weekPercent, weekElapsed, weekRem);
 
   drawMiniBar(12, 140, 137, STATE.weekPercent, COL_ACCENT);
   if (STATE.cfgShowCountdown) {
