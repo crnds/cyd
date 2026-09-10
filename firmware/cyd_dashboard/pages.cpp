@@ -677,9 +677,9 @@ static void drawLimitsCard() {
   int sessionPace = elapsedPercentOfWindow(sessionRem, SESSION_WINDOW_SEC);
   int weekPace = elapsedPercentOfWindow(weekRem, WEEK_WINDOW_SEC);
   bool sessionAhead = STATE.sessionPercent >= 0 && sessionPace >= 0 &&
-                       sessionPace > STATE.sessionPercent + 2;  // 2pt deadband stops boundary flicker
+                       STATE.sessionPercent > sessionPace + 2;  // 2pt deadband stops boundary flicker
   bool weekAhead = STATE.weekPercent >= 0 && weekPace >= 0 &&
-                    weekPace > STATE.weekPercent + 2;
+                    STATE.weekPercent > weekPace + 2;
 
   // ── left card: limits ──
   String sessionPctStr = STATE.sessionPercent >= 0 ? String(STATE.sessionPercent) + "%" : "--";
