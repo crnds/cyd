@@ -646,16 +646,19 @@ static String formatPaceDur(int currentPct, long elapsedSec, long remainingSec) 
 // A warning is only ever earned by pace, never by level (statusline.md's
 // design rule) -- callers gate `ahead` on actual > pace + deadband, so this
 // draws nothing at all unless usage is genuinely running ahead of the window.
+// Size 3 to match the percent number it sits beside (callers place it on
+// that row, not the small 5H/WEEK label row, since size-3 text is too tall
+// to fit between the label and the mini bars below it).
 static void drawPaceFlag(int x, int y, bool ahead, int currentPct, long elapsedSec, long remainingSec) {
   if (!ahead) return;
   g->setTextColor(COL_WARN);
-  g->setTextSize(1);
+  g->setTextSize(3);
   g->setCursor(x, y);
   g->print("!");
   String dur = formatPaceDur(currentPct, elapsedSec, remainingSec);
   if (dur.length() > 0) {
     g->setTextColor(COL_TEXT2);
-    g->setCursor(x + 6, y);
+    g->setCursor(x + 18, y);
     g->print(dur);
   }
 }
@@ -697,9 +700,9 @@ static void drawLimitsCard() {
   g->setTextSize(3);
   g->setCursor(12, 11);
   g->print(sessionPctStr);
-  drawCardLabel(12 + sessionPctStr.length() * 18 + 6, 27, "5H");
-  drawPaceFlag(12 + sessionPctStr.length() * 18 + 6 + 2 * 6 + 4, 27,
+  drawPaceFlag(12 + sessionPctStr.length() * 18 + 6, 11,
                sessionAhead, STATE.sessionPercent, sessionElapsed, sessionRem);
+  drawCardLabel(12 + sessionPctStr.length() * 18 + 6, 27, "5H");
 
   drawMiniBar(12, 41, 137, STATE.sessionPercent, COL_ACCENT);
   // Green reset-countdown bars (and their shine) are optional via Settings
@@ -725,9 +728,9 @@ static void drawLimitsCard() {
   g->setTextSize(3);
   g->setCursor(12, 110);
   g->print(weekPctStr);
-  drawCardLabel(12 + weekPctStr.length() * 18 + 6, 126, "WEEK");
-  drawPaceFlag(12 + weekPctStr.length() * 18 + 6 + 4 * 6 + 4, 126,
+  drawPaceFlag(12 + weekPctStr.length() * 18 + 6, 110,
                weekAhead, STATE.weekPercent, weekElapsed, weekRem);
+  drawCardLabel(12 + weekPctStr.length() * 18 + 6, 126, "WEEK");
 
   drawMiniBar(12, 140, 137, STATE.weekPercent, COL_ACCENT);
   if (cfgShowCountdown) {
