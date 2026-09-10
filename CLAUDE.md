@@ -358,29 +358,28 @@ flash storage for the scheme change to orphan.
   y≥220). This is the one deliberate break from the firmware/simulator parity
   rule (placeholders only in the sim).
 - **Quota pacing flag (status page's `drawLimitsCard()`).** A `!` (optionally
-  `!14h`/`!45m`) drawn next to the 5H/WEEK percent, ported from
-  `~/statusline.md`'s "QUOTA PACING" design: a warning is earned only by
-  *pace* (usage running ahead of the elapsed share of the window), never by
-  raw level alone — 89% one hour before a reset is fine, 40% on day one
-  isn't. The pace threshold itself needs no new state — `elapsedPercentOfWindow()`
-  (already used to size the green reset-countdown bar) **is** the statusline
-  script's `pace_pct`; the flag just compares it against `STATE.sessionPercent`/
-  `weekPercent` with the same 2-point deadband the shell script uses to stop
-  boundary flicker. The optional duration comes from `STATE.sessionBurnPerSec`/
-  `weekBurnPerSec` (%/sec), fitted in `net.cpp`'s `recordQuotaSample()`/
-  `fitBurnPerSec()` — a small RAM-only ring buffer (45 min window, samples no
-  faster than 1/min, `-1` when there's under 10 min of span or the trend is
-  flat/falling), least-squares-fit the same way as the shell script's
-  `burn_hours()`. Recording is gated on `fromNetwork` in `applyUsageDoc()` —
-  same reasoning as the battery-save flag just below it: a cold SD-cache
-  reapplication must not be recorded as a fresh sample. History is RAM-only
-  and resets on reboot, so a freshly-booted board shows a bare `!` (no
-  duration) until enough samples accumulate — "absent answer beats a made-up
-  one," same as the shell script's own fallback. **This is a two-way parity
-  surface** (`pages.cpp`+`net.cpp` ↔ `simulator.html`, mirrored function for
-  function including `quotaSamples`/`fitBurnPerSec`/`formatPaceDur`); the
-  simulator has no NTP gate and uses `Date.now()`, and its sampler runs from
-  `applyData(doc, fromNetwork)` instead of `applyUsageDoc`.
+  `!42m`/`!2h`) drawn next to the 5H/WEEK percent, inspired by
+  `~/statusline.md`'s "QUOTA PACING" design but simplified: a warning is
+  earned only by *pace* (usage running ahead of the elapsed share of the
+  window), never by raw level alone — 89% one hour before a reset is fine,
+  40% on day one isn't. The pace threshold needs no new state —
+  `elapsedPercentOfWindow()` (already used to size the green reset-countdown
+  bar) **is** the statusline script's `pace_pct`; the flag compares
+  `STATE.sessionPercent`/`weekPercent` against it with a 2-point deadband to
+  stop boundary flicker (`actual > pace + 2`, not the other way around — the
+  first cut of this had the comparison backwards, which made the flag fire
+  on the *safe* case and constantly suppress the duration). The optional
+  duration is "if this pace continues": `currentPct / elapsedSecondsInWindow`
+  extrapolated to 100%, computed inline in `formatPaceDur()`
+  (`pages.cpp`/`simulator.html`) from data already in `STATE` — deliberately
+  **not** a historical-sample regression (statusline.md's own `burn_hours()`
+  approach was tried first and reverted: it needed ~10 min of accumulated
+  RAM-only sample history before ever showing a duration, which is too slow
+  for a "how bad is this right now" glance at a physical display). Suppressed
+  ("reset wins, say nothing") whenever the projected exhaustion would land
+  after the reset anyway. **This is a two-way parity surface**
+  (`pages.cpp` ↔ `simulator.html`, `formatPaceDur`/`drawPaceFlag` mirrored
+  function for function).
 - **Note page (`NOTE_PAGE = 5`).** Same left column as the mixed page —
   `drawLimitsCard()` + `drawBtcCard()`, called verbatim, not copied — with
   `drawNotePane()` where the cats go. **It is deliberately an ordinary

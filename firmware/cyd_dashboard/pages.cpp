@@ -623,31 +623,36 @@ static int elapsedPercentOfWindow(long remainingSec, long windowSec) {
   return constrain(pct, 0, 100);
 }
 
-// Projected time until 100% at the measured burn rate, or "" when unknown or
-// the reset would land first -- "the reset wins, say nothing" (statusline.md).
-static String formatPaceDur(long remainingSec, float burnPerSec, int currentPct) {
-  if (burnPerSec <= 0 || currentPct < 0) return "";
+// Projected time until 100% "if this pace continues" -- the average rate
+// since the window's own start (currentPct / elapsedSec), not a historical
+// sample fit, so it's available immediately rather than needing minutes of
+// accumulated history. "" when unknown or the reset would land first --
+// "the reset wins, say nothing" (statusline.md's principle, applied to a
+// same-window average instead of a rolling-window regression).
+static String formatPaceDur(int currentPct, long elapsedSec, long remainingSec) {
+  if (currentPct <= 0 || elapsedSec <= 0 || remainingSec < 0) return "";
   float remainingPct = 100 - currentPct;
   if (remainingPct <= 0) return "";
-  float hoursToExhaust = remainingPct / burnPerSec / 3600.0f;
-  if (remainingSec >= 0 && hoursToExhaust >= remainingSec / 3600.0f) return "";
-  if (hoursToExhaust < 1.0f) {
-    int m = (int)(hoursToExhaust * 60 + 0.5f);
+  float ratePerSec = (float)currentPct / (float)elapsedSec;
+  float secToExhaust = remainingPct / ratePerSec;
+  if (secToExhaust >= remainingSec) return "";  // reset wins, say nothing
+  if (secToExhaust < 3600.0f) {
+    int m = (int)(secToExhaust / 60.0f + 0.5f);
     return String(m < 1 ? 1 : m) + "m";
   }
-  return String((int)(hoursToExhaust + 0.5f)) + "h";
+  return String((int)(secToExhaust / 3600.0f + 0.5f)) + "h";
 }
 
 // A warning is only ever earned by pace, never by level (statusline.md's
-// design rule) -- callers gate `ahead` on pace > actual + deadband, so this
+// design rule) -- callers gate `ahead` on actual > pace + deadband, so this
 // draws nothing at all unless usage is genuinely running ahead of the window.
-static void drawPaceFlag(int x, int y, bool ahead, long remainingSec, float burnPerSec, int currentPct) {
+static void drawPaceFlag(int x, int y, bool ahead, int currentPct, long elapsedSec, long remainingSec) {
   if (!ahead) return;
   g->setTextColor(COL_WARN);
   g->setTextSize(1);
   g->setCursor(x, y);
   g->print("!");
-  String dur = formatPaceDur(remainingSec, burnPerSec, currentPct);
+  String dur = formatPaceDur(currentPct, elapsedSec, remainingSec);
   if (dur.length() > 0) {
     g->setTextColor(COL_TEXT2);
     g->setCursor(x + 6, y);
@@ -680,6 +685,11 @@ static void drawLimitsCard() {
                        STATE.sessionPercent > sessionPace + 2;  // 2pt deadband stops boundary flicker
   bool weekAhead = STATE.weekPercent >= 0 && weekPace >= 0 &&
                     STATE.weekPercent > weekPace + 2;
+  // Elapsed time into each window, for the "at this pace" duration below --
+  // same "windowSec - remainingSec" math elapsedPercentOfWindow uses, just
+  // kept in seconds rather than converted to a percentage.
+  long sessionElapsed = sessionRem >= 0 ? SESSION_WINDOW_SEC - sessionRem : -1;
+  long weekElapsed = weekRem >= 0 ? WEEK_WINDOW_SEC - weekRem : -1;
 
   // ── left card: limits ──
   String sessionPctStr = STATE.sessionPercent >= 0 ? String(STATE.sessionPercent) + "%" : "--";
@@ -689,7 +699,7 @@ static void drawLimitsCard() {
   g->print(sessionPctStr);
   drawCardLabel(12 + sessionPctStr.length() * 18 + 6, 27, "5H");
   drawPaceFlag(12 + sessionPctStr.length() * 18 + 6 + 2 * 6 + 4, 27,
-               sessionAhead, sessionRem, STATE.sessionBurnPerSec, STATE.sessionPercent);
+               sessionAhead, STATE.sessionPercent, sessionElapsed, sessionRem);
 
   drawMiniBar(12, 41, 137, STATE.sessionPercent, COL_ACCENT);
   // Green reset-countdown bars (and their shine) are optional via Settings
@@ -717,7 +727,7 @@ static void drawLimitsCard() {
   g->print(weekPctStr);
   drawCardLabel(12 + weekPctStr.length() * 18 + 6, 126, "WEEK");
   drawPaceFlag(12 + weekPctStr.length() * 18 + 6 + 4 * 6 + 4, 126,
-               weekAhead, weekRem, STATE.weekBurnPerSec, STATE.weekPercent);
+               weekAhead, STATE.weekPercent, weekElapsed, weekRem);
 
   drawMiniBar(12, 140, 137, STATE.weekPercent, COL_ACCENT);
   if (cfgShowCountdown) {

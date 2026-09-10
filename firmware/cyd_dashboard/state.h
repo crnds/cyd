@@ -280,11 +280,6 @@ struct UsageState {
   int weekPercent = -1;
   char weekResets[24] = "";
   long weekResetsInSec = -1;     // countdown to week reset; -1 = unknown
-  // Quota-pacing burn rate (%/sec), fitted from a rolling sample window in
-  // net.cpp's recordQuotaSample()/fitBurnPerSec() -- see drawLimitsCard()'s
-  // pace flag. -1 = not enough history yet, or usage isn't currently rising.
-  float sessionBurnPerSec = -1;
-  float weekBurnPerSec = -1;
   int64_t ctxTokens = -1;    // context window of the latest session; -1 = unknown -- int64_t
                              // for consistency with the other token fields (see their note above)
   int ctxPercent = -1;

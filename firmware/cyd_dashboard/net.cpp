@@ -198,65 +198,6 @@ static JsonDocument usageFilter() {
   return f;
 }
 
-// ── QUOTA PACING sampler ─────────────────────────────────────────────────
-// Mirrors ~/statusline.md's SAMPLE_FILE/burn_hours(): a short rolling window
-// of (epoch, percent) samples, least-squares fit to a slope (%/sec). Pace
-// itself needs no history -- elapsedPercentOfWindow() (pages.cpp) already
-// derives "% of window elapsed" from resets_in_sec alone -- only the
-// *measured burn rate* behind a "!Nh" duration does. RAM-only ring buffer
-// (no SD/heap allocation): history resets on reboot, which just means a
-// freshly-booted board shows a bare "!" until ~10 min of samples accumulate.
-static const int  QUOTA_SAMPLE_MAX = 48;
-static const long QUOTA_SAMPLE_GAP_SEC = 60;        // don't sample faster than 1/min
-static const long QUOTA_SAMPLE_WINDOW_SEC = 2700;   // fit over the last 45 min
-static const long QUOTA_SAMPLE_MIN_SPAN_SEC = 600;  // refuse to fit under 10 min of span
-
-struct QuotaSample { time_t t; int8_t sessionPct; int8_t weekPct; };
-static QuotaSample quotaSamples[QUOTA_SAMPLE_MAX];
-static int quotaSampleHead = 0, quotaSampleCount = 0;  // ring buffer, oldest overwritten first
-
-static void recordQuotaSample(int sessionPct, int weekPct) {
-  time_t now = time(nullptr);
-  if (now < 1700000000) return;  // wall clock not sync'd yet -- see the NTP-fallback block above
-  if (quotaSampleCount > 0) {
-    QuotaSample &last = quotaSamples[(quotaSampleHead + QUOTA_SAMPLE_MAX - 1) % QUOTA_SAMPLE_MAX];
-    if (now - last.t < QUOTA_SAMPLE_GAP_SEC) return;
-  }
-  quotaSamples[quotaSampleHead] = { now, (int8_t)sessionPct, (int8_t)weekPct };
-  quotaSampleHead = (quotaSampleHead + 1) % QUOTA_SAMPLE_MAX;
-  if (quotaSampleCount < QUOTA_SAMPLE_MAX) quotaSampleCount++;
-}
-
-// col: 0 = session, 1 = week. Least-squares slope in %/sec, or -1 when there
-// isn't enough/valid history. A sample above curPct predates a reset and is
-// excluded -- fitting across that boundary would read the wrap as a huge
-// negative slope (same guard as statusline.md's burn_hours()).
-static float fitBurnPerSec(int col, int curPct) {
-  if (quotaSampleCount < 2) return -1.0f;
-  time_t now = time(nullptr);
-  double sx = 0, sy = 0, sxx = 0, sxy = 0;
-  int n = 0;
-  time_t t0 = 0, lastT = 0;
-  bool haveT0 = false;
-  for (int i = 0; i < quotaSampleCount; i++) {
-    int idx = (quotaSampleHead + QUOTA_SAMPLE_MAX - quotaSampleCount + i) % QUOTA_SAMPLE_MAX;
-    QuotaSample &s = quotaSamples[idx];
-    if (now - s.t > QUOTA_SAMPLE_WINDOW_SEC) continue;
-    int v = (col == 0) ? s.sessionPct : s.weekPct;
-    if (v > curPct) continue;
-    if (!haveT0) { t0 = s.t; haveT0 = true; }
-    double x = (double)(s.t - t0), y = (double)v;
-    sx += x; sy += y; sxx += x * x; sxy += x * y;
-    lastT = s.t;
-    n++;
-  }
-  if (n < 2 || (lastT - t0) < QUOTA_SAMPLE_MIN_SPAN_SEC) return -1.0f;
-  double d = (double)n * sxx - sx * sx;
-  if (d <= 0) return -1.0f;
-  double slope = (n * sxy - sx * sy) / d;
-  return slope > 0 ? (float)slope : -1.0f;
-}
-
 // Does the actual STATE population from an already-parsed/filtered doc.
 // Split out of applyUsageJson() so fetchUsage() -- which needs the parsed
 // doc anyway for appendArchiveRow() -- can reuse that one parse instead of
@@ -319,15 +260,6 @@ static bool applyUsageDoc(const JsonDocument& doc, bool fromNetwork) {
     STATE.creditsUsed = doc["limits"]["credits"]["used"] | -1.0f;
     STATE.creditsLimit = doc["limits"]["credits"]["limit"] | -1.0f;
     STATE.creditsPercent = doc["limits"]["credits"]["percent"] | -1;
-
-    // Live poll only -- a cold SD-cache/reboot reapplication of this same
-    // function must not be recorded as a fresh sample (same reasoning as the
-    // battery-save gate below: the cache can be hours old).
-    if (fromNetwork) {
-      recordQuotaSample(STATE.sessionPercent, STATE.weekPercent);
-      STATE.sessionBurnPerSec = STATE.sessionPercent >= 0 ? fitBurnPerSec(0, STATE.sessionPercent) : -1.0f;
-      STATE.weekBurnPerSec = STATE.weekPercent >= 0 ? fitBurnPerSec(1, STATE.weekPercent) : -1.0f;
-    }
   }
 
   // Context window of the latest session — computed by the server from the
