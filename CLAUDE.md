@@ -13,7 +13,7 @@ server/usage_server.py  ──HTTP /api/usage──▶ firmware/cyd_dashboard/*.
 (reads local logs + OAuth usage endpoint)    (polls every 20s, 6 tap-to-cycle pages)
         ▲
         │ POST /api/note   (localhost only — two clients, same endpoint)
-note.html (served by the same server)   note.py (terminal CLI, $EDITOR-based)
+~/s3/note.html (served by this server)   note.py (terminal CLI, $EDITOR-based)
 
 simulator.html = a browser stand-in for the board, fetching the same endpoint
 ```
@@ -195,7 +195,8 @@ flash storage for the scheme change to orphan.
   **Not in the contract:** `last5h`, `models[]`, `last_activity_sec`,
   `btc.changePct` (removed — no on-device consumer).
 - **Note routes, all localhost-only** (`_is_local()`; LAN clients get 403).
-  `GET /` `/note` `/note.html` serve `note.html` read fresh from disk per
+  `GET /` `/note` `/note.html` serve `~/s3/note.html` (the page lives in
+  the S3 repo; `NOTE_HTML_PATH` is absolute) read fresh from disk per
   request (same as control_server); `GET /api/note` returns the current note;
   `POST /api/note` takes `{"text": str, "size": 1-3}`, runs it through
   `sanitize_note()` and persists to `~/.cyd_note.json` (atomic temp+`os.replace`,
@@ -219,7 +220,11 @@ flash storage for the scheme change to orphan.
 - Remote (non-localhost) requests are logged one line each to stdout —
   `tail -f /tmp/cydusage.log` is a live heartbeat of the board's polling.
 
-## Control panel (`server/control_server.py` + `server.html`)
+## Control panel (`server/control_server.py` + `~/s3/server.html`)
+
+- **The page itself lives in the S3 repo** (`~/s3/server.html`);
+  `control_server.py` stays here and serves it via an absolute `HTML_PATH`.
+  Edit the page in `~/s3`, the API here.
 
 - A second launchd job (`com.corner.cydcontrol.plist`) serving
   `http://127.0.0.1:8788/` — a status page (`server.html`) plus
@@ -406,7 +411,7 @@ flash storage for the scheme change to orphan.
     which seeds `shineFillPx[]`; without the between-render top-up
     `drawShineStrip`'s unchanged-column dedup renders the band with holes.
   - **Syntax highlighting is a FOUR-way parity surface** — `pages.cpp` (the
-    authority), `simulator.html`, `note.html` and `note.py` each carry the same
+    authority), `simulator.html`, `~/s3/note.html` and `note.py` each carry the same
     tokenizer, and the canonical spec comment is duplicated above all four.
     Tokenizing is two-level (source line, then word) plus a
     one-character backtick toggle; there is deliberately **no** per-character
@@ -543,7 +548,7 @@ flash storage for the scheme change to orphan.
 step). The dashboard UI colors there are dictated by the firmware parity
 requirement above, not by those tokens.
 
-`note.html` (the Note page editor, served by `usage_server.py` at
+`~/s3/note.html` (the Note page editor, served by `usage_server.py` at
 `http://127.0.0.1:8787/`) follows those same conventions and, like
 `server.html`, is **not** bound by the firmware-parity rule — its chrome is
 ordinary web UI. Its *tokenizer* (`noteWordColor`/`noteLineContext`) and its

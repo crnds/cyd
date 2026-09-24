@@ -28,9 +28,9 @@ NOTE_PATH = os.path.expanduser("~/.cyd_note.json")
 # under the firmware's 512-byte buffer. Because sanitize_note() forces ASCII,
 # characters == bytes and the two caps are directly comparable.
 NOTE_MAX_CHARS = 480
-NOTE_HTML_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "note.html"
-)
+# The editor page lives in the S3 repo now (~/s3/note.html), like the
+# control panel's server.html; this server still serves it from there.
+NOTE_HTML_PATH = os.path.expanduser("~/s3/note.html")
 # note.html is served from this same origin, so its POST carries an Origin
 # header — the blanket "reject any Origin" rule /api/battery-save uses (see
 # do_POST) can't be reused here. Allowlist the origins this server can

@@ -361,7 +361,7 @@ stateDiagram-v2
 
 ```
 Browser ──► 127.0.0.1:8788 ──► control_server.py
-                                 ├── GET /                 → server.html
+                                 ├── GET /                 → ~/s3/server.html
                                  ├── GET /api/status       → launchd + probe + log tails + power
                                  ├── POST /api/enable      → launchctl bootstrap usage job
                                  ├── POST /api/disable     → launchctl bootout usage job
@@ -869,7 +869,7 @@ Contract source: `control_server.py` `Handler.do_GET` / `do_POST`.
 
 | Method | Path | Behavior |
 |---|---|---|
-| GET | `/`, `/index.html`, `/server.html` | Static `server.html` |
+| GET | `/`, `/index.html`, `/server.html` | Static `~/s3/server.html` (the page moved to the S3 repo) |
 | GET | `/api/status` | See nested shape below |
 | POST | `/api/enable` | `launchctl bootstrap` usage job → `{ok, detail}` |
 | POST | `/api/disable` | `launchctl bootout` usage job → `{ok, detail}` |

@@ -587,14 +587,12 @@ release it once writing starts — same trick as the GUI (Step 2.6).
 cyd/
 ├── README.md                       ← you are here
 ├── simulator.html                  browser-based simulator of the display
-├── server.html                     browser control panel (status, on/off, logs)
-├── note.html                       browser editor for the Note page (page 6)
 ├── note.py                         terminal editor for the same note
 ├── pull_giphy_cats.py              downloads cat GIFs for the Cats page
 ├── prepare_cat_gifs.py             resizes/optimises them for the board
 ├── server/
 │   ├── usage_server.py             the helper program (Python, no dependencies)
-│   ├── control_server.py           serves the control panel on 127.0.0.1:8788
+│   ├── control_server.py           serves the control panel (~/s3/server.html) on 127.0.0.1:8788
 │   ├── com.example.cydusage.plist   auto-start recipe for macOS
 │   └── com.example.cydcontrol.plist auto-start recipe for the control panel
 └── firmware/cyd_dashboard/

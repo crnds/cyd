@@ -22,7 +22,9 @@ ALLOWED_ORIGIN = "http://127.0.0.1:8788"
 PORT = 8788
 JOB_LABEL = "com.corner.cydusage"
 PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % JOB_LABEL)
-HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "server.html")
+# The panel page lives in the S3 repo now (~/s3/server.html); this process
+# still runs from ~/cyd next to the usage server it controls.
+HTML_PATH = os.path.expanduser("~/s3/server.html")
 USAGE_URL = "http://127.0.0.1:8787/api/usage"
 BATTERY_SAVE_URL = "http://127.0.0.1:8787/api/battery-save"
 LOG_OUT = "/tmp/cydusage.log"
