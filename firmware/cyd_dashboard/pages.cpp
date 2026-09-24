@@ -646,8 +646,9 @@ static String formatPaceDur(int currentPct, long elapsedSec, long remainingSec) 
 // A warning is only ever earned by pace, never by level (statusline.md's
 // design rule) -- callers gate `ahead` on actual > pace + deadband, so this
 // draws nothing at all unless usage is genuinely running ahead of the window.
-// Size 2, drawn inline to the right of the 5H/WEEK label (not stacked above
-// it on the percent number's row).
+// Size 2, drawn inline to the right of the 5H/WK label (not stacked above
+// it on the percent number's row). Callers pass a y that bottom-aligns the
+// 16px-tall flag with the size-3 percent's baseline (percent_y + 24 - 16).
 static void drawPaceFlag(int x, int y, bool ahead, int currentPct, long elapsedSec, long remainingSec) {
   if (!ahead) return;
   g->setTextColor(COL_WARN);
@@ -700,7 +701,7 @@ static void drawLimitsCard() {
   g->setCursor(12, 11);
   g->print(sessionPctStr);
   drawCardLabel(12 + sessionPctStr.length() * 18 + 6, 27, "5H");
-  drawPaceFlag(12 + sessionPctStr.length() * 18 + 6 + 2 * 6 + 4, 27,
+  drawPaceFlag(12 + sessionPctStr.length() * 18 + 6 + 2 * 6 + 4, 19,
                sessionAhead, STATE.sessionPercent, sessionElapsed, sessionRem);
 
   drawMiniBar(12, 41, 137, STATE.sessionPercent, COL_ACCENT);
@@ -727,8 +728,8 @@ static void drawLimitsCard() {
   g->setTextSize(3);
   g->setCursor(12, 110);
   g->print(weekPctStr);
-  drawCardLabel(12 + weekPctStr.length() * 18 + 6, 126, "WEEK");
-  drawPaceFlag(12 + weekPctStr.length() * 18 + 6 + 4 * 6 + 4, 126,
+  drawCardLabel(12 + weekPctStr.length() * 18 + 6, 126, "WK");
+  drawPaceFlag(12 + weekPctStr.length() * 18 + 6 + 2 * 6 + 4, 118,
                weekAhead, STATE.weekPercent, weekElapsed, weekRem);
 
   drawMiniBar(12, 140, 137, STATE.weekPercent, COL_ACCENT);
