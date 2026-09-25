@@ -79,7 +79,7 @@ STATE = {
     "clients": {},      # client ip -> last request ts, shows who is polling us
     "limits": None,     # latest plan-limit snapshot from the OAuth usage endpoint
     "context": None,    # {tokens, ts} — newest assistant event's context size
-    "btc": None,        # {price} from Binance — fetched here so the board needs no TLS
+    "btc": None,        # {price, changePct} from Binance — fetched here so the board needs no TLS
     # Bangkok weather for the status card + Weather page: current + next-6h
     # hourly + next-5d daily, fetched here so the board needs no TLS.
     "weather": None,
@@ -517,9 +517,16 @@ def fetch_btc():
     with urllib.request.urlopen(req, timeout=8) as resp:
         doc = json.loads(resp.read())
     price = float(doc.get("lastPrice") or 0)
-    # Price only — changePct was never drawn on board/sim; omit to keep the
-    # /api/usage payload lean (24hr endpoint still used for lastPrice).
-    return {"price": price} if price > 0 else None
+    if price <= 0:
+        return None
+    # changePct = Binance's rolling 24h change, drawn beside the price on the
+    # S3's BTC card (the CYD ignores it).
+    out = {"price": price}
+    try:
+        out["changePct"] = round(float(doc["priceChangePercent"]), 2)
+    except (KeyError, TypeError, ValueError):
+        pass
+    return out
 
 
 def wmo_condition(code):
