@@ -602,7 +602,7 @@ def fetch_weather_openmeteo():
     code = cur.get("weather_code", -1)
     temp_c = cur["temperature_2m"]
 
-    # Next 6 hours starting at the current hour (or the next future slot if
+    # Now + next 10 hours starting at the current hour (or the next future slot if
     # the exact current hour is missing from the series).
     hourly_out = []
     hdoc = doc.get("hourly") or {}
@@ -619,7 +619,7 @@ def fetch_weather_openmeteo():
         if t[:13] >= cur_time[:13]:
             start_i = i
             break
-    for i in range(start_i, min(start_i + 6, len(h_times))):
+    for i in range(start_i, min(start_i + 11, len(h_times))):
         h = _iso_hour(h_times[i])
         if h is None or i >= len(h_temps) or h_temps[i] is None:
             continue
