@@ -215,6 +215,30 @@ flash storage for the scheme change to orphan.
   (browser) and `note.py` (terminal). They need no sync — the endpoint is the
   single source of truth. `note.py` sends **no `Origin`** header, which the
   allowlist permits; that is the plain curl/CLI path.
+- **OTA firmware for the S3 board** (`~/s3` roadmap O9). `~/s3`'s
+  `pio run -t publish` copies a build to `~/.cyd_firmware/s3.bin`
+  (`FIRMWARE_DIR`, outside both repos: an image carries the WiFi credentials
+  compiled into it). `/api/usage` announces it as `firmware.s3.{sha256, size,
+  published}` (`firmware_offer()`; `{}` when nothing is published; the CYD
+  ignores it). The sha256 is the image digest esptool appends -- the file's
+  last 32 bytes -- which the board compares with its own running image. `GET
+  /firmware/s3.bin` serves the file only to this Mac and to IPs that have
+  polled `/api/usage` (403 otherwise), and logs one line per download.
+  The S3 reports its running digest and OTA state on every poll
+  (`X-S3-Firmware`, `X-S3-OTA: <state>; auto=<0|1>; req=<id>`;
+  `note_board_firmware`). Localhost-only `GET /api/firmware` (offer, pending
+  request, each board's report and last download) and `POST
+  /api/firmware/install` (no Origin, like battery-save) back the control
+  panel: an install request rides in the offer as `firmware.s3.install: <id>`
+  until a board runs that build, reports it acted on the id (`req=`, i.e. the
+  install failed), a newer build is published, or 15 min pass.
+- **Control panel firmware** (`control_server.py`): `/api/status` adds
+  `firmware` (the proxied `/api/firmware`) and `build`. `POST
+  /api/firmware/publish` runs `pio run -t publish -d ~/s3` in a thread, one
+  at a time, 15 min cap, keeping the last 200 output lines; PlatformIO is
+  found on PATH or in `PIO_CANDIDATES` (launchd's PATH has none). `POST
+  /api/firmware/install` proxies the install request. Both sit behind the
+  POST Origin check.
 - **CORS is an exact allowlist, never `*`** (a blanket `*` would let any
   website's JS read the usage data). `Origin: null` (pages opened from disk,
   `file://`) gets `Access-Control-Allow-Origin` on every route; a page served

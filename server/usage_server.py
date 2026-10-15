@@ -41,6 +41,27 @@ NOTE_ALLOWED_ORIGINS = {
     f"http://localhost:{PORT}",
     "null",
 }
+# ── OTA firmware (S3 board, ~/s3 roadmap O9) ─────────────────────────────
+# `pio run -t publish` in ~/s3 copies a build here; this server only offers
+# what was published, never a half-finished `pio run`. The board compares the
+# offered image digest with its own running image and pulls the file from
+# /firmware/<board>.bin into its idle app slot. Outside both repos on purpose:
+# a build carries the WiFi credentials compiled into it.
+FIRMWARE_DIR = os.path.expanduser("~/.cyd_firmware")
+FIRMWARE_BOARDS = ("s3",)
+FIRMWARE_MAX_BYTES = 6553600  # the S3's app slot (default_16MB.csv)
+_firmware_cache = {}  # board -> ((mtime_ns, size), info)
+# The control panel's "Install on board": board -> {"id", "sha256", "ts"}. The
+# id rides in the offer (firmware.<board>.install) until a board reports
+# running that build, a newer one is published, or FIRMWARE_REQUEST_TTL_SEC.
+FIRMWARE_REQUEST_TTL_SEC = 15 * 60
+FIRMWARE_DOWNLOAD_RECENT_SEC = 180  # "installing" in the panel this long after a download
+_firmware_requests = {}
+# What each board reports on every poll (X-S3-Firmware / X-S3-OTA headers):
+# ip -> {"sha256", "ota", "auto", "ts"}; and when each ip last downloaded.
+_board_firmware = {}
+_firmware_downloads = {}  # ip -> time.time() of the last /firmware/<board>.bin
+
 # Browser pages that may read GET /api/usage cross-origin, besides the file://
 # case (Origin: null): pages served from this Mac's own loopback, any port --
 # e.g. ~/s3's simulator-s3.html under `python3 -m http.server 8765`. Matched
@@ -1134,7 +1155,128 @@ def build_report():
         "note": STATE["note"],
         "clients": clients,
         "power": power_snapshot(),
+        # Published OTA builds per board ({} when none): additive, and the CYD
+        # ignores it.
+        "firmware": firmware_offer(),
     }
+
+
+def firmware_path(board):
+    return os.path.join(FIRMWARE_DIR, board + ".bin")
+
+
+def firmware_info(board):
+    """{"sha256", "size", "published"} for a published image, or None.
+
+    sha256 is the image digest esptool appends as the file's last 32 bytes --
+    the same value the board reads for its own running app partition
+    (esp_partition_get_sha256), so equal means "already running this build".
+    Cached on (mtime, size): the board asks every poll, the file rarely moves.
+    """
+    path = firmware_path(board)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    cached = _firmware_cache.get(board)
+    if cached and cached[0] == key:
+        return cached[1]
+    info = None
+    if 1024 < st.st_size <= FIRMWARE_MAX_BYTES:
+        try:
+            with open(path, "rb") as f:
+                magic = f.read(1)
+                f.seek(-32, os.SEEK_END)
+                digest = f.read(32)
+            if magic == b"\xe9" and len(digest) == 32:  # ESP image header magic
+                info = {
+                    "sha256": digest.hex(),
+                    "size": st.st_size,
+                    "published": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+                }
+        except OSError:
+            info = None
+    _firmware_cache[board] = (key, info)
+    return info
+
+
+def firmware_request(board, info):
+    """The pending install request for this published build, or None."""
+    req = _firmware_requests.get(board)
+    if not req or not info:
+        return None
+    if req["sha256"] != info["sha256"] or time.time() - req["ts"] > FIRMWARE_REQUEST_TTL_SEC:
+        _firmware_requests.pop(board, None)
+        return None
+    return req
+
+
+def firmware_offer():
+    offer = {}
+    for board in FIRMWARE_BOARDS:
+        info = firmware_info(board)
+        if info:
+            offer[board] = dict(info)
+            req = firmware_request(board, info)
+            if req:
+                offer[board]["install"] = req["id"]
+    return offer
+
+
+def note_board_firmware(ip, sha256, ota):
+    """Record a board's poll headers (X-S3-OTA: "<state>; auto=<0|1>; req=<id>").
+
+    A request is done once a board runs its build, or reports it has acted on
+    that request id (req=) and isn't running it -- the install failed, and the
+    panel should offer it again rather than show it pending.
+    """
+    if not sha256 or len(sha256) != 64:
+        return
+    sha256 = sha256.lower()
+    state, auto, handled = ota.split(";")[0].strip(), None, None
+    for part in ota.split(";")[1:]:
+        key, _, value = part.strip().partition("=")
+        if key == "auto":
+            auto = value == "1"
+        elif key == "req" and value.isdigit():
+            handled = int(value)
+    _board_firmware[ip] = {"sha256": sha256, "ota": state[:16], "auto": auto, "ts": time.time()}
+    for board, req in list(_firmware_requests.items()):
+        if req["sha256"] == sha256 or req["id"] == handled:
+            _firmware_requests.pop(board, None)
+
+
+def firmware_status():
+    """GET /api/firmware (localhost): the control panel's Firmware section."""
+    now = time.time()
+    boards = []
+    for ip, fw in sorted(_board_firmware.items(), key=lambda kv: -kv[1]["ts"]):
+        dl = _firmware_downloads.get(ip)
+        boards.append({
+            "ip": ip,
+            "sha256": fw["sha256"],
+            "ota": fw["ota"],
+            "auto": fw["auto"],
+            "last_report_sec": int(now - fw["ts"]),
+            "download_sec": int(now - dl) if dl and now - dl <= FIRMWARE_DOWNLOAD_RECENT_SEC else None,
+        })
+    offer = firmware_offer().get("s3")
+    req = firmware_request("s3", firmware_info("s3"))
+    return {
+        "offer": offer,
+        "request": {"id": req["id"], "age_sec": int(now - req["ts"])} if req else None,
+        "boards": boards,
+        "slot_bytes": FIRMWARE_MAX_BYTES,
+    }
+
+
+def request_firmware_install(board="s3"):
+    info = firmware_info(board)
+    if not info:
+        return False, "no build published"
+    _firmware_requests[board] = {"id": int(time.time()), "sha256": info["sha256"], "ts": time.time()}
+    return True, "the board installs %s on its next poll" % info["sha256"][:12]
 
 
 HEARTBEAT_LOG_INTERVAL_SEC = 300
@@ -1227,6 +1369,34 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self._send(b"note.html not found", "text/plain", status=404)
 
+    def _serve_firmware(self):
+        # Only to this Mac and to boards that poll /api/usage: an image holds
+        # the WiFi credentials compiled into it, so it isn't for the whole LAN.
+        name = self.path[len("/firmware/"):]
+        board = name[:-4] if name.endswith(".bin") else ""
+        ip = self.client_address[0]
+        with STATE["lock"]:
+            known = ip in STATE["clients"]
+        if board not in FIRMWARE_BOARDS:
+            self._send(b"not found", "text/plain", status=404)
+            return
+        if not (self._is_local() or known):
+            self._send(b"poll /api/usage first", "text/plain", status=403)
+            return
+        if not firmware_info(board):
+            self._send(b"no build published", "text/plain", status=404)
+            return
+        try:
+            with open(firmware_path(board), "rb") as f:
+                body = f.read()
+        except OSError:
+            self._send(b"no build published", "text/plain", status=404)
+            return
+        _firmware_downloads[ip] = time.time()
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {ip} GET /firmware/{board}.bin "
+              f"({len(body)} bytes)", flush=True)
+        self._send(body, "application/octet-stream")
+
     def do_GET(self):
         # The note routes are localhost-only, matching /api/battery-save:
         # the note is writable only from this Mac, so serving the editor to
@@ -1243,6 +1413,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(note_snapshot())
             return
+        if self.path.startswith("/firmware/"):
+            self._serve_firmware()
+            return
+        if self.path == "/api/firmware":
+            if not self._is_local():
+                self._send_json({"ok": False, "detail": "localhost only"}, status=403)
+                return
+            self._send_json(firmware_status())
+            return
         if self.path != "/api/usage":
             self.send_response(404)
             self.end_headers()
@@ -1254,6 +1433,9 @@ class Handler(BaseHTTPRequestHandler):
         with STATE["lock"]:
             STATE["clients"][ip] = datetime.now(timezone.utc)
             STATE["activity_event"].set()
+        # The S3 reports its running build + OTA state on every poll.
+        if self.headers.get("X-S3-Firmware"):
+            note_board_firmware(ip, self.headers.get("X-S3-Firmware", ""), self.headers.get("X-S3-OTA", ""))
         if ip not in ("127.0.0.1", "::1"):
             # Heartbeat line, throttled to once per HEARTBEAT_LOG_INTERVAL_SEC
             # per client -- at the board's ~20s poll cadence an unthrottled
@@ -1328,6 +1510,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/note":
             self._do_post_note()
+            return
+        if self.path == "/api/firmware/install":
+            # The control panel's "Install on board", proxied by
+            # control_server (no Origin, same rule as battery-save below).
+            if not self._is_local():
+                self._send_json({"ok": False, "detail": "localhost only"}, status=403)
+                return
+            if self.headers.get("Origin") is not None:
+                self._send_json({"ok": False, "detail": "forbidden origin"}, status=403)
+                return
+            ok, detail = request_firmware_install()
+            self._send_json({"ok": ok, "detail": detail}, status=200 if ok else 409)
             return
         # Manual battery-save override from the localhost control panel.
         # LAN clients (the board) get 403 — power policy stays Mac-local.

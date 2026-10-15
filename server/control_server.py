@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""Control panel for the CYD usage server: status, logs, enable/disable.
+"""Control panel for the CYD usage server: status, logs, enable/disable, and
+the S3 board's firmware (OTA): status, build & publish, install on board.
 
 Serves server.html plus a small JSON API on 127.0.0.1:8788. Bound to
 localhost ONLY because /api/enable and /api/disable shell out to launchctl —
 never expose this port to the LAN.
 """
 
+import collections
 import json
 import os
+import re
+import shutil
 import subprocess
+import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -27,6 +33,20 @@ PLIST_PATH = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % JOB_LABEL)
 HTML_PATH = os.path.expanduser("~/s3/server.html")
 USAGE_URL = "http://127.0.0.1:8787/api/usage"
 BATTERY_SAVE_URL = "http://127.0.0.1:8787/api/battery-save"
+# Firmware (OTA) for the S3 board: status and "Install on board" are the usage
+# server's (localhost-only there); "Build & publish" runs here.
+FIRMWARE_URL = "http://127.0.0.1:8787/api/firmware"
+FIRMWARE_INSTALL_URL = "http://127.0.0.1:8787/api/firmware/install"
+S3_REPO = os.path.expanduser("~/s3")
+# launchd's PATH has no PlatformIO; these are where it lives on this Mac.
+PIO_CANDIDATES = [
+    os.path.expanduser("~/.pio-venv/bin/pio"),
+    "/opt/homebrew/bin/pio",
+    "/usr/local/bin/pio",
+    os.path.expanduser("~/.platformio/penv/bin/pio"),
+]
+BUILD_TIMEOUT_SEC = 15 * 60
+BUILD_LOG_LINES = 200
 LOG_OUT = "/tmp/cydusage.log"
 LOG_ERR = "/tmp/cydusage.err"
 LOG_TAIL_LINES = 40
@@ -107,6 +127,108 @@ def set_battery_save(enabled):
         return False, doc.get("detail") or "usage server rejected request", None
     except Exception as exc:
         return False, "usage server unreachable: %s" % exc, None
+
+
+def probe_firmware():
+    try:
+        with urllib.request.urlopen(FIRMWARE_URL, timeout=3) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        return {"error": "usage server answered %d (restart it for /api/firmware)" % exc.code}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def request_install():
+    req = urllib.request.Request(FIRMWARE_INSTALL_URL, data=b"{}", method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            doc = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        try:
+            doc = json.loads(exc.read())
+        except ValueError:
+            doc = {"ok": False, "detail": "usage server answered %d" % exc.code}
+    except Exception as exc:
+        return False, "usage server unreachable: %s" % exc
+    return bool(doc.get("ok")), doc.get("detail") or ("requested" if doc.get("ok") else "failed")
+
+
+# ── Build & publish (`pio run -t publish` in ~/s3), one at a time ──
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+BUILD = {
+    "lock": threading.Lock(),
+    "running": False,
+    "started": None,
+    "finished": None,
+    "code": None,
+    "error": None,
+    "lines": collections.deque(maxlen=BUILD_LOG_LINES),
+}
+
+
+def find_pio():
+    found = shutil.which("pio")
+    if found:
+        return found
+    for path in PIO_CANDIDATES:
+        if os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def run_publish(pio):
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([os.path.dirname(pio), "/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "")])
+    env["PLATFORMIO_NO_ANSI"] = "true"
+    code, error = None, None
+    try:
+        proc = subprocess.Popen([pio, "run", "-t", "publish", "-d", S3_REPO], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, env=env, cwd=S3_REPO)
+        killer = threading.Timer(BUILD_TIMEOUT_SEC, proc.kill)
+        killer.start()
+        for line in proc.stdout:
+            BUILD["lines"].append(ANSI_RE.sub("", line.rstrip()))
+        code = proc.wait()
+        killer.cancel()
+    except Exception as exc:
+        error = str(exc)
+    with BUILD["lock"]:
+        BUILD.update(running=False, finished=time.time(), code=code, error=error)
+
+
+def start_publish():
+    pio = find_pio()
+    if not pio:
+        return False, "PlatformIO not found (looked on PATH and in %s)" % ", ".join(PIO_CANDIDATES)
+    if not os.path.isdir(S3_REPO):
+        return False, "%s not found" % S3_REPO
+    with BUILD["lock"]:
+        if BUILD["running"]:
+            return False, "a build is already running"
+        BUILD["lines"].clear()
+        BUILD.update(running=True, started=time.time(), finished=None, code=None, error=None)
+    threading.Thread(target=run_publish, args=(pio,), daemon=True).start()
+    return True, "building and publishing ~/s3"
+
+
+def build_status():
+    now = time.time()
+    with BUILD["lock"]:
+        lines = list(BUILD["lines"])
+        doc = {
+            "running": BUILD["running"],
+            "elapsed_sec": int((BUILD["finished"] or now) - BUILD["started"]) if BUILD["started"] else None,
+            "finished_ago_sec": int(now - BUILD["finished"]) if BUILD["finished"] else None,
+            "code": BUILD["code"],
+            "error": BUILD["error"],
+        }
+    doc["lines"] = lines[-80:]
+    # ota_publish.py's two result lines, for the panel's summary.
+    doc["published"] = next((l for l in reversed(lines) if l.startswith("Published ")), None)
+    doc["digest"] = next((l for l in reversed(lines) if l.startswith("Image digest ")), None)
+    return doc
 
 
 def tail_file(path, n=LOG_TAIL_LINES):
@@ -196,6 +318,8 @@ class Handler(BaseHTTPRequestHandler):
                 "launchd": launchd_status(),
                 "endpoint": probe_endpoint(),
                 "logs": {"out": tail_file(LOG_OUT), "err": tail_file(LOG_ERR)},
+                "firmware": probe_firmware(),
+                "build": build_status(),
             })
             return
         self._send(404, b"not found", "text/plain")
@@ -210,6 +334,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/disable":
             ok, detail = do_disable()
+            self._send_json({"ok": ok, "detail": detail})
+            return
+        if self.path == "/api/firmware/publish":
+            ok, detail = start_publish()
+            self._send_json({"ok": ok, "detail": detail})
+            return
+        if self.path == "/api/firmware/install":
+            ok, detail = request_install()
             self._send_json({"ok": ok, "detail": detail})
             return
         if self.path == "/api/battery-save":
