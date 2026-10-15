@@ -215,6 +215,13 @@ flash storage for the scheme change to orphan.
   (browser) and `note.py` (terminal). They need no sync — the endpoint is the
   single source of truth. `note.py` sends **no `Origin`** header, which the
   allowlist permits; that is the plain curl/CLI path.
+- **CORS is an exact allowlist, never `*`** (a blanket `*` would let any
+  website's JS read the usage data). `Origin: null` (pages opened from disk,
+  `file://`) gets `Access-Control-Allow-Origin` on every route; a page served
+  from this Mac's loopback (`http://localhost|127.0.0.1|[::1]` on any port,
+  `USAGE_CORS_ORIGIN_RE`, e.g. `~/s3`'s simulator under
+  `python3 -m http.server 8765`) gets it on `GET /api/usage` only. The
+  header echoes the origin, with `Vary: Origin`.
 - Dollar costs are **estimates** from a hardcoded per-model price table
   (opus/sonnet/haiku/fable).
 - Remote (non-localhost) requests are logged one line each to stdout —

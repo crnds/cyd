@@ -4,6 +4,7 @@
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -40,6 +41,12 @@ NOTE_ALLOWED_ORIGINS = {
     f"http://localhost:{PORT}",
     "null",
 }
+# Browser pages that may read GET /api/usage cross-origin, besides the file://
+# case (Origin: null): pages served from this Mac's own loopback, any port --
+# e.g. ~/s3's simulator-s3.html under `python3 -m http.server 8765`. Matched
+# exactly, never "*": a website's JS can't send a loopback Origin, so no other
+# site can read the usage data.
+USAGE_CORS_ORIGIN_RE = re.compile(r"http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?")
 # 30s on AC: token pages update from board polls of cached aggregates, so the
 # ingest lag is invisible on screen, and this halves the scan wakeups + disk
 # glob/stat over ~200 jsonl files vs. the old 15s — the biggest wakeup source.
@@ -1160,13 +1167,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        # ACAO only for the file:// dev case (Origin: null) -- simulator.html
-        # fetches this endpoint directly from disk. A blanket "*" would let
-        # any website's JS read board usage data cross-origin over the LAN/
-        # loopback; nothing else needs CORS here (the board is not a browser,
-        # and server.html goes through control_server's proxy instead).
-        if self.headers.get("Origin") == "null":
-            self.send_header("Access-Control-Allow-Origin", "null")
+        # ACAO only for the dev pages: the file:// case (Origin: null) --
+        # simulator.html fetches this endpoint directly from disk -- and, for
+        # /api/usage only, a page served from this Mac's loopback
+        # (USAGE_CORS_ORIGIN_RE). A blanket "*" would let any website's JS read
+        # board usage data cross-origin over the LAN/loopback; nothing else
+        # needs CORS here (the board is not a browser, and server.html goes
+        # through control_server's proxy instead).
+        origin = self.headers.get("Origin")
+        if origin == "null" or (self.path == "/api/usage" and origin and USAGE_CORS_ORIGIN_RE.fullmatch(origin)):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(body)
 
