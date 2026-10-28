@@ -7,7 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/Users/eunitembam3/cyd/server/usage_server.py</string>
+        <string>/Users/eunitembam2/cyd/server/usage_server.py</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
